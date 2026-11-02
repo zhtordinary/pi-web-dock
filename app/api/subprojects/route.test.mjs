@@ -1,0 +1,37 @@
+import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
+import test from "node:test"
+
+const route = await readFile(new URL("./route.ts", import.meta.url), "utf8")
+const sessionRoute = await readFile(new URL("../sessions/[id]/subproject/route.ts", import.meta.url), "utf8")
+const deleteRoute = await readFile(new URL("../sessions/[id]/route.ts", import.meta.url), "utf8")
+const stateSource = await readFile(new URL("../../../lib/subproject-state.ts", import.meta.url), "utf8")
+
+test("subproject API exposes owner-local CRUD and project validation", () => {
+  assert.match(route, /readSubprojectState\(\)/)
+  assert.match(route, /isKnownProjectKey/)
+  assert.match(route, /projectIdentityKeys/)
+  assert.match(route, /createSubproject\(body\.projectKey/)
+  assert.match(route, /Unknown project/)
+  assert.match(route, /unknown_project/)
+  assert.match(route, /subproject_required/)
+  assert.match(route, /deleteSubproject\(body\.id\)/)
+  assert.match(route, /export async function PUT/)
+  assert.match(route, /setSubprojectSort/)
+  assert.match(route, /setSubprojectHidden/)
+  assert.match(route, /setSubprojectAutoHideEmpty/)
+  assert.match(route, /autoHideEmptySubprojects/)
+  assert.match(route, /order must be an array of ids/)
+  assert.match(sessionRoute, /Session belongs to another project/)
+  assert.match(sessionRoute, /session_project_mismatch/)
+  assert.match(sessionRoute, /projectKeysEqual/)
+  assert.match(sessionRoute, /setSubprojectForSessions\(projectKey, lineageIds, nextSubprojectId\)/)
+  assert.match(sessionRoute, /unassignSession\(id, orphanAssignment\.projectKey\)/)
+  assert.match(sessionRoute, /transient_session_assignment_forbidden/)
+  assert.match(route, /error\.code/)
+  assert.match(sessionRoute, /subproject_label_conflict|SubprojectDomainError/)
+  assert.match(deleteRoute, /assignmentForSession/)
+  assert.match(deleteRoute, /mutateSessionAssignment/)
+  assert.match(sessionRoute, /orphanAssignment/)
+  assert.match(sessionRoute, /orphaned: true/)
+})

@@ -1,0 +1,51 @@
+{
+  "agentEndCompleted": {
+    "type": "agent_end",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "complete" }],
+        "stopReason": "stop"
+      }
+    ],
+    "willRetry": false
+  },
+  "agentEndRetryingError": {
+    "type": "agent_end",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "partial" }],
+        "stopReason": "error",
+        "errorMessage": "provider failed"
+      }
+    ],
+    "willRetry": true
+  },
+  "agentEndAbortedMessage": {
+    "type": "agent_end",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "stopped" }],
+        "stopReason": "aborted"
+      }
+    ],
+    "willRetry": false
+  },
+  "agentSettledCompleted": {
+    "type": "agent_settled",
+    "aborted": false
+  },
+  "agentSettledAborted": {
+    "type": "agent_settled",
+    "aborted": true
+  },
+  "toolEndWithZeroDuration": {
+    "type": "tool_execution_end",
+    "toolCallId": "tool-zero",
+    "toolName": "read",
+    "isError": false,
+    "durationMs": 0
+  }
+}

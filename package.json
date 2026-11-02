@@ -1,0 +1,102 @@
+{
+  "name": "pi-web-dock",
+  "version": "0.13.0",
+  "description": "Web workbench for the pi coding agent: sessions, files, worktrees and multi-device activity in one browser UI",
+  "homepage": "https://github.com/zhtordinary/pi-web-dock#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhtordinary/pi-web-dock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zhtordinary/pi-web-dock/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=26.4.0"
+  },
+  "bin": {
+    "pi-web-dock": "bin/pi-web.js"
+  },
+  "files": [
+    "bin",
+    ".next",
+    "!.next/cache",
+    "!.next/dev",
+    "!.next/**/*.js.map",
+    "public",
+    "next.config.ts",
+    "package.json",
+    "packages/reader-mcp"
+  ],
+  "scripts": {
+    "postinstall": "node bin/prepare-terminal.js",
+    "dev": "next dev --webpack -H 127.0.0.1 -p 30141",
+    "dev:lan": "next dev --webpack -H 0.0.0.0 -p 30141",
+    "build": "node scripts/build-reader.mjs",
+    "start": "next start -H 127.0.0.1 -p 30141",
+    "start:lan": "next start -H 0.0.0.0 -p 30141",
+    "lint": "eslint .",
+    "test:terminal": "node e2e/terminal.mjs",
+    "test:e2e": "node e2e/run.mjs",
+    "test:e2e:scroll": "node e2e/chat-scroll.mjs",
+    "test": "node scripts/run-reader-tests.mjs",
+    "verify:release-tree": "node scripts/check-release-tree.mjs",
+    "test:mcp": "npm --prefix packages/reader-mcp test",
+    "mcp": "node packages/reader-mcp/server.mjs",
+    "test:e2e:mcp": "node e2e/reader-mcp.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "jiti": "^2.7.0",
+    "js-yaml": "^5.2.3",
+    "next": "16.3.8",
+    "node-pty": "1.2.0-beta.15",
+    "proper-lockfile": "4.1.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "semver": "7.8.5",
+    "undici": "8.11.0",
+    "web-push": "^3.6.7",
+    "lucide-react": "^0.562.0",
+    "ansi_up": "^6.0.6",
+    "remark-frontmatter": "^5.0.0",
+    "@earendil-works/pi-codemode": "1.4.0",
+    "@earendil-works/pi-mcp": "1.4.0",
+    "@earendil-works/pi-telemetry": "1.4.0"
+  },
+  "devDependencies": {
+    "@pydantic/genai-prices": "0.1.9",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/js-yaml": "^4.0.9",
+    "@types/mdast": "^4.0.4",
+    "@types/node": "^25",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/semver": "7.8.0",
+    "@types/web-push": "^3.6.4",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "katex": "^0.16.47",
+    "mammoth": "^1.12.0",
+    "mermaid": "^11.16.1",
+    "pi-subagents": "0.74.0",
+    "playwright": "^1.62.1",
+    "postcss": "^8.5.26",
+    "react-markdown": "^10.1.0",
+    "react-syntax-highlighter": "^16.1.1",
+    "rehype-katex": "^7.0.1",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5"
+  }
+}

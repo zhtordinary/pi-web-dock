@@ -1,0 +1,11 @@
+{
+  "name": "pi-web-session-control",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "First-party durable session-control protocol core for Pi-Web Reader",
+  "files": ["index.ts", "README.md", "package.json"],
+  "exports": {
+    ".": "./index.ts"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "role": "Reader test-only frozen public pricing inputs; not production pricing truth",
+  "sourceSnapshotManifest": "maintainer pricing-skill snapshot manifest (not distributed)",
+  "sourceSnapshotManifestSha256": "e13d5f9b35616e554c566d2d2dcc4735e64e0d1d2c007ab7a0f87efc58e9bef0",
+  "lockedTestPackages": {
+    "@pydantic/genai-prices": "0.1.9",
+    "pi-subagents": "0.74.0"
+  },
+  "files": [
+    {
+      "path": "scripts/session_cost.py",
+      "sha256": "567163c9f85d79997ce63e311dc12d81931bcd07b8c820d3daef9c2d7f541a52",
+      "bytes": 31518,
+      "role": "public test input only; not production pricing truth",
+      "source": "maintainer pricing skill: scripts/session_cost.py",
+      "sourceSnapshotManifestSha256": "e13d5f9b35616e554c566d2d2dcc4735e64e0d1d2c007ab7a0f87efc58e9bef0"
+    },
+    {
+      "path": "genai-prices/cli.cjs",
+      "sha256": "f2d8c0e1d2bee7c058a83eb497abc9037c1b0e57e489ab1451b8e9aabb51a737",
+      "bytes": 1192,
+      "role": "public test input only; not production pricing truth",
+      "source": "maintainer pricing skill: genai-prices/cli.cjs",
+      "sourceSnapshotManifestSha256": "e13d5f9b35616e554c566d2d2dcc4735e64e0d1d2c007ab7a0f87efc58e9bef0"
+    },
+    {
+      "path": "genai-prices/engine.cjs",
+      "sha256": "0fd57e2f3bfa27da5f7c9203136dd588222aea302c96602996d94c6f6301466b",
+      "bytes": 24614,
+      "role": "public test input only; not production pricing truth",
+      "source": "maintainer pricing skill: genai-prices/engine.cjs",
+      "sourceSnapshotManifestSha256": "e13d5f9b35616e554c566d2d2dcc4735e64e0d1d2c007ab7a0f87efc58e9bef0"
+    },
+    {
+      "path": "data/genai-prices-v2.json",
+      "sha256": "bc66dba86357578c183b9f5267a1482fe3b7dc6591f91aa17b9472746df457fc",
+      "bytes": 528629,
+      "role": "public test input only; not production pricing truth",
+      "source": "pydantic genai-prices v2 price data, frozen copy",
+      "sourceSnapshotManifestSha256": "5f3e1446f3528ba9133f9886221df38f163466eb304dd2ac6385e29c120ac654"
+    }
+  ],
+  "network": "none required; fixture engine must consume private fresh cache derived from selected-tree data",
+  "previousSnapshotManifestSha256": "5f3e1446f3528ba9133f9886221df38f163466eb304dd2ac6385e29c120ac654"
+}

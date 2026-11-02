@@ -1,0 +1,21 @@
+{
+  "name": "pi-web-dock-mcp",
+  "version": "0.10.1",
+  "private": true,
+  "type": "module",
+  "description": "Dependency-free stdio MCP adapter for Pi Web Dock",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "reader-mcp": "server.mjs"
+  },
+  "files": [
+    "server.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

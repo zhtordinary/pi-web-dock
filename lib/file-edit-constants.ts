@@ -1,0 +1,2 @@
+export const TEXT_EDIT_MAX_BYTES = 2 * 1024 * 1024;
+export const MAX_EDIT_REQUEST_BYTES = TEXT_EDIT_MAX_BYTES * 2 + 64 * 1024;

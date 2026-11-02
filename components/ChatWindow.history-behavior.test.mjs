@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+import ts from 'typescript';
+const source=readFileSync(new URL('./ChatWindow.tsx',import.meta.url),'utf8');const tree=ts.createSourceFile('view.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+function actual(name,ctx){let callback;function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText(tree)===name)callback=ts.isCallExpression(node.initializer)?node.initializer.arguments[0]:node.initializer;ts.forEachChild(node,visit);}visit(tree);assert.ok(callback);return vm.runInNewContext(ts.transpileModule(`(${callback.getText(tree)})`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);}
+test('send waits for a successful remote-jump reset before showing its optimistic user message',async()=>{let resolve;const calls=[];const ctx={reader:{getState:()=>({transcript:{after:'old'}}),reset:()=>new Promise(r=>resolve=r)},setFollow:v=>calls.push(['follow',v]),handleSessionSend:async text=>calls.push(['send',text])};const send=actual('handleSend',ctx);const pending=send('hello');assert.deepEqual(calls,[]);resolve({});await pending;assert.deepEqual(calls,[['follow',true],['send','hello']]);});
+test('failed jump reset does not send into a disconnected transcript',async()=>{const calls=[];const send=actual('handleSend',{reader:{getState:()=>({transcript:{after:'old'}}),reset:async()=>null},setFollow:()=>{},handleSessionSend:async()=>calls.push('sent')});await send('hello');assert.deepEqual(calls,[]);});
+test('one process expansion uses the full fixed range, not a text-segment button',async()=>{const calls=[];const summary={firstEntryId:'a',lastEntryId:'z'};const expand=actual('readHistoryProcess',{setOpenedProcessEntryId:id=>calls.push(id),setProcessReadStates:()=>{},t:key=>key,reader:{getState:()=>({requestedScope:null,error:null}),expandProcess:async range=>calls.push(range)}});await expand(summary);assert.deepEqual(calls,['a',summary]);});

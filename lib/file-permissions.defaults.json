@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "read": ["~/.pi", "~/Sync", "~/.agents/skills"],
+  "write": ["~/.pi", "~/Sync", "~/.agents/skills"]
+}

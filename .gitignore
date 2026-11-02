@@ -1,0 +1,68 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# Local task checkouts
+/.worktrees/
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/test-results/
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+/.agents/
+/skills-lock.json
+/.archify/
+/.build/
+/.ruff_cache/
+/.pi/messenger/
+__pycache__/
+*.py[cod]
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+.factory
+# Internal Reader documents and visual assets
+/docs/archive/
+/docs/screenshots/
+/docs/**/*.png
+/docs/**/*.jpg
+/docs/**/*.jpeg
+/docs/**/*.gif
+/docs/**/*.webp
+/docs/**/*.svg
+
+# Generated planning records; retain locally, never treat as source
+/.pi/task-plans-by-chatgpt/
+/.pi/task-plans-by-plan-execute/
+e2e_*.mjs

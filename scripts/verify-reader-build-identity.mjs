@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+const root = process.argv[2] || ".next";
+const buildId = readFileSync(join(root, "BUILD_ID"), "utf8").trim();
+assert.match(buildId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/);
+const server = readFileSync(join(root, "server/app/api/reader/events/route.js"), "utf8");
+const serverIds = [...server.matchAll(/buildId:"([0-9a-f-]{36})"/g)].map(match => match[1]);
+assert.ok(serverIds.length > 0, "runtime identity missing from compiled server");
+assert.ok(serverIds.every(id => id === buildId), "server runtime identity differs from BUILD_ID");
+const pages = readdirSync(join(root, "static/chunks/app")).filter(name => /^page-.*\.js$/.test(name));
+assert.ok(pages.length > 0, "browser page bundle missing");
+assert.ok(pages.some(name => readFileSync(join(root, "static/chunks/app", name), "utf8").includes(JSON.stringify(buildId))), "browser bundle identity differs from BUILD_ID");
+console.log(JSON.stringify({ buildId, server: "matched", browser: "matched" }));
