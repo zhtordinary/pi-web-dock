@@ -26,6 +26,19 @@ Pi Web Dock 与 pi、Pi Web 官方项目无隶属关系。界面上仍显示 “
 
 ## 快速开始
 
+从 npm 安装命令行工具并启动：
+
+```bash
+npm install -g @zhtordinary/pi-web-dock
+pi-web-dock
+```
+
+服务就绪后会自动打开浏览器；没有打开时访问 <http://127.0.0.1:30141>。默认只监听 `127.0.0.1`。
+
+更新时先停止服务，执行 `npm install -g @zhtordinary/pi-web-dock@latest`，再重新启动。
+
+### 从源码运行
+
 ```bash
 git clone https://github.com/zhtordinary/pi-web-dock.git
 cd pi-web-dock
@@ -34,13 +47,11 @@ npm run build
 node bin/pi-web.js
 ```
 
-服务就绪后会自动打开浏览器；没有打开时访问 <http://127.0.0.1:30141>。默认只监听 `127.0.0.1`。
-
-更新时先停止服务，执行 `git pull --ff-only`，再执行 `npm ci` 和 `npm run build`。
+源码目录更新时先停止服务，执行 `git pull --ff-only`，再执行 `npm ci` 和 `npm run build`。
 
 ## 配置
 
-命令行参数优先于对应的环境变量，`node bin/pi-web.js --help` 可查看全部参数。
+命令行参数优先于对应的环境变量，`pi-web-dock --help`（源码目录中为 `node bin/pi-web.js --help`）可查看全部参数。
 
 | 参数或环境变量 | 作用 | 默认值 |
 | --- | --- | --- |
@@ -60,7 +71,7 @@ node bin/pi-web.js
 监听非回环地址等于把一个能在本机执行命令的智能体暴露出去。只在可信网络中这样做，并设置足够长的随机密码：
 
 ```bash
-PI_WEB_PASSWORD='a-long-random-password' node bin/pi-web.js --hostname 0.0.0.0
+PI_WEB_PASSWORD='a-long-random-password' pi-web-dock --hostname 0.0.0.0
 ```
 
 密码认证不会加密流量。不要通过明文 HTTP 暴露到公网；请放在可信反向代理的 HTTPS 或 VPN 之后，并把代理使用的主机名加入 `PI_WEB_ALLOWED_HOSTS`。服务端的模型和 API 请求遵循 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`。

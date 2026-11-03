@@ -1,17 +1,17 @@
 # reader-mcp
 
-A dependency-free stdio [MCP](https://modelcontextprotocol.io) server that lets MCP clients read Pi Web Dock sessions and request explicit, confirmed session-control actions. It ships inside the `pi-web-dock` npm package and needs only Node.js 22.19.0 or newer.
+A dependency-free stdio [MCP](https://modelcontextprotocol.io) server that lets MCP clients read Pi Web Dock sessions and request explicit, confirmed session-control actions. It ships inside the `@zhtordinary/pi-web-dock` npm package and needs only Node.js 22.19.0 or newer.
 
 ## Running
 
-Point an MCP client at `server.mjs` from an installed `pi-web-dock` package and tell it where Pi Web Dock is listening:
+Point an MCP client at `server.mjs` from an installed `@zhtordinary/pi-web-dock` package and tell it where Pi Web Dock is listening:
 
 ```json
 {
   "mcpServers": {
     "pi-web-dock": {
       "command": "/absolute/path/to/node",
-      "args": ["/absolute/path/to/node_modules/pi-web-dock/packages/reader-mcp/server.mjs"],
+      "args": ["/absolute/path/to/node_modules/@zhtordinary/pi-web-dock/packages/reader-mcp/server.mjs"],
       "env": { "PI_WEB_READER_URL": "http://127.0.0.1:30141" }
     }
   }

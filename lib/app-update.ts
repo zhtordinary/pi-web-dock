@@ -1,5 +1,5 @@
 /** The published npm package and its source repository; package.json declares the same identity. */
-export const APP_PACKAGE_NAME = "pi-web-dock";
+export const APP_PACKAGE_NAME = "@zhtordinary/pi-web-dock";
 export const APP_REPOSITORY_URL = "https://github.com/zhtordinary/pi-web-dock";
 
 const STABLE_VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;

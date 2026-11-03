@@ -26,6 +26,19 @@ Pi Web Dock is not affiliated with the pi or Pi Web projects. The interface is s
 
 ## Quick start
 
+Install the CLI from npm and start it:
+
+```bash
+npm install -g @zhtordinary/pi-web-dock
+pi-web-dock
+```
+
+The CLI opens a browser when the server is ready. Otherwise open <http://127.0.0.1:30141>. Pi Web Dock listens only on `127.0.0.1` by default.
+
+To update, stop the server, run `npm install -g @zhtordinary/pi-web-dock@latest`, then start it again.
+
+### From source
+
 ```bash
 git clone https://github.com/zhtordinary/pi-web-dock.git
 cd pi-web-dock
@@ -34,13 +47,11 @@ npm run build
 node bin/pi-web.js
 ```
 
-The CLI opens a browser when the server is ready. Otherwise open <http://127.0.0.1:30141>. Pi Web Dock listens only on `127.0.0.1` by default.
-
-To update, stop the server, run `git pull --ff-only`, then repeat `npm ci` and `npm run build`.
+To update a source checkout, stop the server, run `git pull --ff-only`, then repeat `npm ci` and `npm run build`.
 
 ## Configuration
 
-Command-line options override the corresponding environment variables. Run `node bin/pi-web.js --help` to print the options.
+Command-line options override the corresponding environment variables. Run `pi-web-dock --help` (or `node bin/pi-web.js --help` in a source checkout) to print the options.
 
 | Option or environment variable | Purpose | Default |
 | --- | --- | --- |
@@ -60,7 +71,7 @@ Ports `30142`–`30144` are reserved for the maintainer's managed release channe
 Binding to a non-loopback address exposes an agent that can run commands on your machine. On a trusted network, require a long random password:
 
 ```bash
-PI_WEB_PASSWORD='a-long-random-password' node bin/pi-web.js --hostname 0.0.0.0
+PI_WEB_PASSWORD='a-long-random-password' pi-web-dock --hostname 0.0.0.0
 ```
 
 Password authentication does not encrypt traffic. Do not expose Pi Web Dock over plain HTTP to the internet; put it behind HTTPS on a trusted reverse proxy or VPN, and add the proxy's hostname to `PI_WEB_ALLOWED_HOSTS`.

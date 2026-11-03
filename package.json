@@ -1,5 +1,5 @@
 {
-  "name": "pi-web-dock",
+  "name": "@zhtordinary/pi-web-dock",
   "version": "0.13.0",
   "description": "Web workbench for the pi coding agent: sessions, files, worktrees and multi-device activity in one browser UI",
   "homepage": "https://github.com/zhtordinary/pi-web-dock#readme",
@@ -16,6 +16,9 @@
   },
   "bin": {
     "pi-web-dock": "bin/pi-web.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "bin",

@@ -24,7 +24,7 @@ function writeIdentity(root, overrides = {}) {
   mkdirSync(join(root, ".next"), { recursive: true });
   mkdirSync(join(root, "bin"), { recursive: true });
   mkdirSync(join(root, "node_modules"), { recursive: true });
-  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pi-web-dock", version: "0.9.3" }) + "\n");
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@zhtordinary/pi-web-dock", version: "0.9.3" }) + "\n");
   writeFileSync(join(root, "bin", "pi-web.js"), "#!/usr/bin/env node\n");
   writeFileSync(join(root, ".next", "BUILD_ID"), `${buildId}\n`);
   writeFileSync(join(root, ".pi-web-reader-release.json"), JSON.stringify({

@@ -7,7 +7,8 @@ work="${RUNNER_TEMP:-$(mktemp -d)}/pi-web-dock-package"
 rm -rf "$work"
 mkdir -p "$work/pack" "$work/app" "$work/home"
 npm pack --pack-destination "$work/pack" >/dev/null
-tarball="$(ls "$work"/pack/pi-web-dock-*.tgz)"
+# npm names a scoped package tarball <scope>-<name>-<version>.tgz.
+tarball="$(ls "$work"/pack/zhtordinary-pi-web-dock-*.tgz)"
 
 cd "$work/app"
 npm init -y >/dev/null
