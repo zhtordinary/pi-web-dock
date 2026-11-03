@@ -48,6 +48,9 @@ export async function checkExtensionDialogs(page, artifacts, width) {
     // The select moves with ArrowUp/ArrowDown (wrapping) and jumps with the 1–9 shortcuts.
     for (const [key, expected] of [["ArrowUp", "Option 30"], ["ArrowDown", "Option 1"], ["ArrowDown", "Option 2"], ["ArrowUp", "Option 1"], ["9", "Option 9"], ["1", "Option 1"], ["ArrowUp", "Option 30"]]) {
       await page.keyboard.press(key);
+      // Focus follows the selection on the next animation frame, so wait for it instead of reading it at once.
+      await page.waitForFunction((label) => document.activeElement?.getAttribute("aria-label") === label, expected, { timeout: 5_000 })
+        .catch(() => {});
       assert.equal(await page.locator(":focus").getAttribute("aria-label"), expected);
     }
     assert.ok(await page.locator(":focus").evaluate(element => {
@@ -62,7 +65,10 @@ export async function checkExtensionDialogs(page, artifacts, width) {
 
     for (const mode of ["select", "confirm", "input", "editor"]) {
       const dialog = await start(mode);
-      assert.ok(await page.locator(":focus").evaluate(element => element.closest('[role="dialog"]')));
+      // The select dialog also moves focus inside on the next animation frame.
+      await page.waitForFunction(() => Boolean(document.activeElement?.closest('[role="dialog"]')), undefined, { timeout: 5_000 })
+        .catch(() => {});
+      assert.ok(await page.locator(":focus").evaluate(element => element.closest('[role="dialog"]')), `${mode} dialog must take focus`);
       if (mode === "input" || mode === "editor") {
         await dialog.getByRole("textbox").fill("Preserved draft");
         await dialog.getByRole("button", { name: "Collapse", exact: true }).click();
