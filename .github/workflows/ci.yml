@@ -27,6 +27,8 @@ jobs:
       - run: npm run lint
       - run: npx tsc --noEmit
       - run: npm test
+        env:
+          PI_READER_TEST_CONCURRENCY: 1
 
   checks-macos:
     runs-on: macos-latest
@@ -40,6 +42,8 @@ jobs:
           node-version: 26.4.0
       - run: npm ci
       - run: npm test
+        env:
+          PI_READER_TEST_CONCURRENCY: 1
 
   package-linux:
     runs-on: ubuntu-latest
