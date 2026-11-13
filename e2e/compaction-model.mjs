@@ -58,6 +58,8 @@ export async function checkCompactionModelSettings(page, artifacts) {
       const providerSelect = settings.getByRole("button", { name: `${label} ${t("modelRouting.provider")}`, exact: true });
       const modelSelect = settings.getByRole("button", { name: `${label} ${t("modelRouting.model")}`, exact: true });
       await providerSelect.waitFor();
+      const providerAriaLabel = await providerSelect.getAttribute("aria-label");
+      await page.waitForFunction((ariaLabel) => [...document.querySelectorAll("button")].some((button) => button.getAttribute("aria-label") === ariaLabel && !button.disabled), providerAriaLabel);
       await providerSelect.click();
       await page.getByRole("option", { name: provider, exact: true }).click();
       assert.match(await modelSelect.textContent(), /Fixture compressor/);
