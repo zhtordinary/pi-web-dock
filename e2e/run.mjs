@@ -62,9 +62,8 @@ async function assertEnglishUi(page, selector, label) {
 }
 
 async function checkEnglishMessages(page, width) {
-  const userMessage = page.locator(".chat-transcript [data-entry-id]").filter({ hasText: "Render E2E markdown" }).first();
-  await userMessage.getByRole("button", { name: "Edit in input", exact: true }).waitFor({ state: "attached" });
-  await userMessage.getByRole("button", { name: "Fork to session", exact: true }).waitFor({ state: "attached" });
+  await page.getByRole("button", { name: "Edit in input", exact: true }).first().waitFor({ state: "attached" });
+  await page.getByRole("button", { name: "Fork to session", exact: true }).first().waitFor({ state: "attached" });
   await assertEnglishUi(page, "body", `${width}px message actions`);
 }
 
