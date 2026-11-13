@@ -44,7 +44,7 @@ export async function checkCompactionModelSettings(page, artifacts) {
     }
     return request.fulfill({ json: { rows: plugins } });
   };
-  await page.route("**/api/compaction-model", route);
+  await page.route("**/api/compaction-model*", route);
   await page.route("**/api/plugin-models", pluginRoute);
   try {
     for (const width of [1280, 390, 320]) {
@@ -130,7 +130,7 @@ export async function checkCompactionModelSettings(page, artifacts) {
       console.log(`PASS: ${width}px plugin model rows, preserved drafts, independent save, light/dark`);
     }
   } finally {
-    await page.unroute("**/api/compaction-model", route);
+    await page.unroute("**/api/compaction-model*", route);
     await page.unroute("**/api/plugin-models", pluginRoute);
     await page.evaluate((theme) => {
       if (theme) document.documentElement.setAttribute("data-theme", theme);
