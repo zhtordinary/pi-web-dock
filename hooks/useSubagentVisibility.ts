@@ -81,5 +81,5 @@ export function useSubagentVisibility(): ReadonlySet<string> {
 }
 
 export function useSubagentVisibilitySetter(): (parentSessionId: string, visible: boolean) => void {
-  return useCallback(setSubagentVisibility, []);
+  return useCallback((parentSessionId, visible) => setSubagentVisibility(parentSessionId, visible), []);
 }

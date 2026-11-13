@@ -366,12 +366,11 @@ export class CpaResponsesTransport {
       if (idle) idle.close();
       else persistent = false;
     }
-    let channel: Channel;
     const socket = this.createSocket(wsUrl.href, {
       headers: Object.fromEntries(wsHeaders), perMessageDeflate: true,
       handshakeTimeout: options?.websocketConnectTimeoutMs ?? 5_000,
     });
-    channel = new Channel(sessionId, socket, () => {
+    const channel = new Channel(sessionId, socket, () => {
       this.allChannels.delete(channel);
       if (this.channels.get(key) === channel) this.channels.delete(key);
     });
