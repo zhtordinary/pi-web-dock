@@ -27,6 +27,8 @@ export async function checkSettingsSelects(page, artifacts) {
   try {
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 900 });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.locator(".chat-input-textarea").waitFor();
       const sidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
       if (await sidebar.isVisible()) await sidebar.click();
       await page.getByRole("button", { name: "Models", exact: true }).first().click();
