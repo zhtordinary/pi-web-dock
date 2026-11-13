@@ -234,7 +234,7 @@ try {
   assert.deepEqual(beforeRoot.context.entryIds, []);
   assert.equal(beforeRoot.context.hasMore, false);
   await api("/api/sessions/e2e-does-not-exist", 404);
-  await api("/api/files/..%2F..%2Fetc%2Fpasswd?type=read", 403);
+  await api("/api/files/..%2F..%2Fetc%2Fpasswd?type=read", 400);
   const compacted = await api(`/api/sessions/${COMPACTED}`);
   assert.equal(compacted.context.entryIds[0], "compact");
   assert.equal(compacted.context.messages.some((entry) => entry.role === "user"), false);
