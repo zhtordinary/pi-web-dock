@@ -35,6 +35,7 @@ export async function checkSettingsSelects(page, artifacts) {
       const mcpTab = page.getByRole("button", { name: "MCP", exact: true });
       if (await mcpTab.count() === 0 || !await mcpTab.first().isVisible()) {
         console.log(`SKIP: ${width}px MCP settings tab is not exposed in this responsive fixture`);
+        await page.reload({ waitUntil: "domcontentloaded" });
         continue;
       }
       await mcpTab.click();
