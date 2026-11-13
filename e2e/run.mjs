@@ -74,7 +74,12 @@ async function checkEnglishSettings(page, width) {
   const openedSessions = await sessionToggle.count() > 0 && await sessionToggle.getAttribute("aria-label") === "Show sessions";
   if (openedSessions) await sessionToggle.click();
   await page.getByRole("button", { name: "Models", exact: true }).first().click({ timeout: 20_000 });
-  await page.getByRole("button", { name: "General", exact: true }).click({ timeout: 20_000 });
+  const general = page.getByRole("button", { name: "General", exact: true });
+  if (await general.count() === 0) {
+    const back = page.getByRole("button", { name: /^Back:/ }).first();
+    if (await back.isVisible()) await back.click();
+  }
+  await general.click({ timeout: 20_000 });
   await assertEnglishUi(page, '[role="dialog"][aria-label="Settings"]', `${width}px settings`);
   await page.keyboard.press("Escape");
   if (openedSessions) await page.getByRole("button", { name: "Hide sessions", exact: true }).first().click();
