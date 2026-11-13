@@ -29,8 +29,8 @@ export async function checkSettingsSelects(page, artifacts) {
       await page.setViewportSize({ width, height: 900 });
       await page.reload({ waitUntil: "domcontentloaded" });
       await page.locator(".chat-input-textarea").waitFor();
-      const sidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
-      if (await sidebar.isVisible()) await sidebar.click();
+      const sessionToggle = page.locator('.app-top-bar [data-layout-control="sessions"]');
+      if (await sessionToggle.count() > 0 && await sessionToggle.getAttribute("aria-label") === "Show sessions") await sessionToggle.click();
       await page.getByRole("button", { name: "Models", exact: true }).first().click();
       await page.getByRole("button", { name: "MCP", exact: true }).click();
       await page.locator(".config-sidebar-item").filter({ hasText: server.name }).click();
