@@ -36,7 +36,12 @@ export async function GET(
       let closed = false;
       let heartbeat: ReturnType<typeof setInterval> | null = null;
       let unsubscribe: (() => void) | null = null;
-      let writer: ReturnType<typeof createReaderStreamWriter>;
+      const writer = createReaderStreamWriter(
+        controller,
+        diagnostic,
+        () => cleanup("error"),
+        () => cleanup(true),
+      );
       const cleanup = (closeController: boolean | "error" = true) => {
         if (closed) return;
         closed = true;
@@ -49,12 +54,6 @@ export async function GET(
         } catch { /* already closed */ }
         finally { unregister(); }
       };
-      writer = createReaderStreamWriter(
-        controller,
-        diagnostic,
-        () => cleanup("error"),
-        () => cleanup(true),
-      );
       const abort = () => cleanup(true);
       const write = (text: string) => {
         writer.write(text);

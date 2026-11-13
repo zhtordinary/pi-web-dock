@@ -909,7 +909,12 @@ export async function GET(
           };
           let unregister = () => {};
           let closed = false;
-          let writer: ReturnType<typeof createReaderStreamWriter>;
+          const writer = createReaderStreamWriter(
+            controller,
+            diagnostic,
+            () => cleanup("error"),
+            () => cleanup(true),
+          );
           const onAbort = () => cleanup(true);
           const cleanup = (closeController: boolean | "error" = true) => {
             if (closed) return;
@@ -924,12 +929,6 @@ export async function GET(
             } catch { /* already closed */ }
             finally { unregister(); }
           };
-          writer = createReaderStreamWriter(
-            controller,
-            diagnostic,
-            () => cleanup("error"),
-            () => cleanup(true),
-          );
           stopWatch = cleanup;
           unregister = registerReaderStreamCloser(cleanup, diagnostic);
           if (request.signal.aborted) {

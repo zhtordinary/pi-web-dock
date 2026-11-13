@@ -38,7 +38,8 @@ async function fetchCost(view = "full", id = sessionId) {
   const body = await response.json();
   if (view === "full") {
     const summary = await fetchCost("summary", id);
-    const { contextUsage, compactionContexts, messageCosts, imageGenerationCosts, compactionCosts, ...billing } = body;
+    const billing = { ...body };
+    for (const key of ["contextUsage", "compactionContexts", "messageCosts", "imageGenerationCosts", "compactionCosts"]) delete billing[key];
     assert.deepEqual(summary, billing, "summary preserves aggregate billing fields without transcript detail");
     assert.equal("messageCosts" in summary, false);
     assert.equal("imageGenerationCosts" in summary, false);

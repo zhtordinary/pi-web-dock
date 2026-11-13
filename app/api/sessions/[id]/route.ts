@@ -15,7 +15,6 @@ import {
   getSessionBranchEntries,
   getSessionBranchSettings,
   buildSessionHistoryInfo,
-  parseSessionTail,
   getQuestionAnalysisJobsForBranch,
   getQuestionDraftViewsForBranch,
   readSessionHeader,

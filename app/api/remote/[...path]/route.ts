@@ -7,7 +7,6 @@ import { isCrossOriginPdfNavigation } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
 
-const DEFAULT_REMOTE_TIMEOUT_MS = 12_000;
 const MODEL_CONFIG_LONG_TIMEOUT_MS = 30_000;
 const MODEL_CONFIG_LONG_PATHS = new Set(["catalog", "discover", "discover-managed", "test"]);
 

@@ -158,7 +158,12 @@ export function createReaderEventStream(
       const stops: Array<() => void> = [];
       let closed = false;
       let heartbeat: ReturnType<typeof setInterval> | undefined;
-      let writer: ReturnType<typeof createReaderStreamWriter>;
+      const writer = createReaderStreamWriter(
+        controller,
+        diagnostic,
+        () => cleanup("error"),
+        () => cleanup(true),
+      );
       const onAbort = () => cleanup();
       cleanup = (mode) => {
         if (closed) return;
@@ -172,12 +177,6 @@ export function createReaderEventStream(
         } catch { /* cancelled reader */ }
         finally { unregister(); }
       };
-      writer = createReaderStreamWriter(
-        controller,
-        diagnostic,
-        () => cleanup("error"),
-        () => cleanup(true),
-      );
       const emit = (event: Record<string, unknown>) => {
         if (closed) return;
         // A slow client reconnects and receives authoritative snapshots/replay.

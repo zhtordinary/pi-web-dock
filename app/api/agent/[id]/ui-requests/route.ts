@@ -40,7 +40,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       let unsubscribe = () => {};
       let heartbeat: ReturnType<typeof setInterval> | null = null;
       let unregister = () => {};
-      let writer: ReturnType<typeof createReaderStreamWriter>;
+      const writer = createReaderStreamWriter(
+        controller,
+        diagnostic,
+        () => close("error"),
+        () => close(true),
+      );
       const close = (closeController: boolean | "error" = true) => {
         if (closed) return;
         closed = true;
@@ -53,12 +58,6 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         } catch { /* already closed */ }
         finally { unregister(); }
       };
-      writer = createReaderStreamWriter(
-        controller,
-        diagnostic,
-        () => close("error"),
-        () => close(true),
-      );
       const abort = () => close();
       dispose = () => close(false);
       unregister = registerReaderStreamCloser(close, diagnostic);

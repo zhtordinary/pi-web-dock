@@ -4692,6 +4692,16 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
     void activity.setHidden("device", device.id, true, device.id);
   }, [activity]);
 
+  const [collapsedSidebarBranchKeys, setCollapsedSidebarBranchKeys] = useState<Set<string>>(() => new Set());
+  const toggleSidebarBranch = useCallback((key: string) => {
+    setCollapsedSidebarBranchKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   if (deviceSwitchOnly) return (
     <div className="session-activity-sidebar" style={{ display: "flex", alignItems: "flex-start", width: "100%", padding: "6px 6px 6px 8px", background: "var(--bg-panel)", color: "var(--text)" }}>
       <ActivityDeviceFilter
@@ -4711,16 +4721,6 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
       />
     </div>
   );
-
-  const [collapsedSidebarBranchKeys, setCollapsedSidebarBranchKeys] = useState<Set<string>>(() => new Set());
-  const toggleSidebarBranch = useCallback((key: string) => {
-    setCollapsedSidebarBranchKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }, []);
 
   const renderSidebarSessionRow = (node: ActivitySessionNode, depth = 0, isLast = false, hasChildren = false) => {
     const item = node.item;

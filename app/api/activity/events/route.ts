@@ -44,7 +44,12 @@ function handleSse(req: Request): Response {
       let unsubscribe = () => {};
       let stopWaitChanges = () => {};
       let unregister = () => {};
-      let writer: ReturnType<typeof createReaderStreamWriter>;
+      const writer = createReaderStreamWriter(
+        controller,
+        diagnostic,
+        () => cleanup("error"),
+        () => cleanup(true),
+      );
       const cleanup = (closeController: boolean | "error" = true) => {
         if (closed) return;
         closed = true;
@@ -58,12 +63,6 @@ function handleSse(req: Request): Response {
         } catch { /* already closed */ }
         finally { unregister(); }
       };
-      writer = createReaderStreamWriter(
-        controller,
-        diagnostic,
-        () => cleanup("error"),
-        () => cleanup(true),
-      );
       const onAbort = () => cleanup(true);
       cancelStream = cleanup;
       unregister = registerReaderStreamCloser(cleanup, diagnostic);

@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createJiti } from "jiti";
-
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
-const { POST } = await jiti.import("./route.ts");
-
 test("analyze route keeps single-skill compatibility and exposes the background job", async () => {
   const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
   assert.match(source, /isApiRequestAllowed\(req\)/);

@@ -193,7 +193,7 @@ test("remote file watch propagates downstream abort and body cancellation", asyn
 });
 
 test("cross-origin PDF navigation cannot relay session-reference authority", async () => {
-  const mock = mockFetch((_url, init) => new Response("pdf", { status: 206, headers: {
+  const mock = mockFetch(() => new Response("pdf", { status: 206, headers: {
     "content-type": "application/pdf", "content-range": "bytes 0-2/3", "x-content-type-options": "nosniff",
   } }));
   try {
