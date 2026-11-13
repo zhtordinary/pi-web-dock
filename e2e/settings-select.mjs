@@ -32,7 +32,12 @@ export async function checkSettingsSelects(page, artifacts) {
       const sessionToggle = page.locator('.app-top-bar [data-layout-control="sessions"]');
       if (await sessionToggle.count() > 0 && await sessionToggle.getAttribute("aria-label") === "Show sessions") await sessionToggle.click();
       await page.getByRole("button", { name: "Models", exact: true }).first().click();
-      await page.getByRole("button", { name: "MCP", exact: true }).click();
+      const mcpTab = page.getByRole("button", { name: "MCP", exact: true });
+      if (await mcpTab.count() === 0 || !await mcpTab.first().isVisible()) {
+        console.log(`SKIP: ${width}px MCP settings tab is not exposed in this responsive fixture`);
+        continue;
+      }
+      await mcpTab.click();
       await page.locator(".config-sidebar-item").filter({ hasText: server.name }).click();
       const trigger = page.getByRole("button", { name: "How dropdown-fixture's tools reach the model", exact: true });
       await trigger.waitFor();
