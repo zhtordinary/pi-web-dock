@@ -18,6 +18,7 @@ import type { Dirent } from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { findPiSubagentSessionPaths } from "./session-child-tree";
 
 export interface ScannedSessionInfo {
 	path: string;
@@ -505,7 +506,12 @@ async function enumerateSessionFiles(sessionsDir: string): Promise<string[]> {
 			// unreadable project dir: same skip-as-absent semantics as the SDK
 		}
 	}
-	return files;
+	const parentsWithChildRoots = files.filter((parentPath) => existsSync(parentPath.slice(0, -".jsonl".length)));
+	const children = await Promise.all(parentsWithChildRoots.map(async (parentPath) => {
+		try { return await findPiSubagentSessionPaths(parentPath); }
+		catch { return []; }
+	}));
+	return [...new Set([...files, ...children.flat()])];
 }
 
 const MAX_CONCURRENT_SCANS = 10;

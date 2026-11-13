@@ -22,7 +22,10 @@ test("rejects relative GitHub cwd", async () => {
 
 test("does not expose a GitHub data shell without an eligible repository", async () => {
   const response = await GET(request("cwd=%2Ftmp"));
-  assert.equal(response.status, 403);
+  assert.equal(response.status, 200);
+  const { snapshot } = await response.json();
+  assert.equal(snapshot.available, false);
+  assert.equal(snapshot.reason, "no-github-remote");
 });
 
 test("requires JSON and an absolute cwd before PR creation", async () => {

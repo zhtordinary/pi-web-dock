@@ -50,6 +50,18 @@ test("file visibility eye reflects current filtered state", () => {
   assert.ok(eyeButton.indexOf("M9.88") < eyeButton.indexOf("M2 12"), "filtered files must use EyeOff before all-visible files use Eye");
 });
 
+test("filter settings gear button toggles filter panel and reflects open state", () => {
+  const start = source.indexOf("onClick={() => explorerRef.current?.toggleFilterSettings()}");
+  const end = source.indexOf("</ToolbarIconButton>", start);
+  assert.ok(start >= 0 && end > start, "gear button must use ToolbarIconButton with toggleFilterSettings");
+  const gearButton = source.slice(start, end);
+  assert.match(gearButton, /title=\{t\("files\.filterSettings"\)\}/);
+  assert.match(gearButton, /ariaPressed=\{filterSettingsOpen\}/);
+  assert.match(gearButton, /color=\{filterSettingsOpen \? "var\(--accent\)" : "var\(--text-dim\)"\}/);
+  assert.match(gearButton, /background=\{filterSettingsOpen \? "var\(--bg-selected\)" : "none"\}/);
+  assert.match(source, /onFilterSettingsOpenChange=\{setFilterSettingsOpen\}/);
+});
+
 test("highlights active file and keyboard-selected search results", () => {
   assert.match(source, /const isActive = !node\.isDir && activeFilePath === fullPath;/);
   assert.match(source, /aria-current=\{isActive \? "true" : undefined\}/);

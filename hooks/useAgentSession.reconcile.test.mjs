@@ -91,9 +91,11 @@ test("a live submission retains its ownership across idle restoration", () => {
 
 function compactionHarness(runtimeState) {
   const h = { compacting: true, fetches: 0, intervals: 0, queueReads: 0, finishes: 0 };
+  const streamState = { isStreaming: false };
   const bindings = {
     useCallback: fn => fn, useEffect: effect => { h.cleanup = effect(); },
-    agentRunning: false, bashRunning: false, isCompacting: true, streamState: { isStreaming: false },
+    agentRunning: false, bashRunning: false, isCompacting: true, streamState,
+    streamingStore: { getState: () => streamState },
     agentRunningRef: { current: false }, bashRunningRef: { current: false }, activeToolIdsRef: { current: new Set() }, toolEventRevisionRef: { current: 0 },
     sessionRunningRef: { current: false }, localCompactionPendingRef: { current: false }, sessionIdRef: { current: "s" }, sessionHookMountedRef: { current: true },
     promptRunIdRef: { current: 1 }, stateRunRevisionRef: { current: 1 }, currentAgentRunIdRef: { current: "run-1" },

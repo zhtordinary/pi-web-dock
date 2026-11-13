@@ -13,6 +13,10 @@ function modelDefaultLevel(model: Model<Api>, pin?: string) {
   return clampThinkingLevel(model, selected);
 }
 
+function isTokenCapFailure(error: unknown): boolean {
+  return error instanceof Error && /generation hit the token cap and the summary is incomplete/i.test(error.message);
+}
+
 export function createCompactionModelExtension(settings: Pick<SettingsManager, "getRetrySettings">): InlineExtension {
   return {
     name: BUILTIN_RUNTIME_EXTENSION_NAMES.compactionModel,
@@ -52,15 +56,18 @@ export function createCompactionModelExtension(settings: Pick<SettingsManager, "
           const pin = ctx.scopedModels?.find((item) => item.model.provider === model.provider && item.model.id === model.id)?.thinkingLevel;
           const effectiveThinking = thinkingLevel === "auto" ? modelDefaultLevel(model, pin) : clampThinkingLevel(model, thinkingLevel ?? "off");
           let attribution = { provider: model.provider, modelId: model.id };
-          const result = await compact(
+          const runCompaction = (thinking: typeof effectiveThinking) => compact(
             event.preparation, model, undefined, undefined, event.customInstructions, event.signal,
-            effectiveThinking,
+            thinking,
             async (requestModel, context, options) => {
               const inputTokens = context.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
               if (inputTokens + (options?.maxTokens ?? 0) + 1024 > requestModel.contextWindow) {
                 throw new Error(`Compression model context is too small: ${requestModel.provider}/${requestModel.id} (${requestModel.contextWindow} tokens)`);
               }
-              const stream = ctx.modelRegistry.streamSimple(requestModel, context, { ...options, cacheRetention: "none" });
+              const streamOptions = { ...options, cacheRetention: "none" as const };
+              // A one-off summary cannot reuse a Codex WebSocket continuation; use its stable HTTP stream instead.
+              if (requestModel.api === "openai-codex-responses") streamOptions.transport = "sse";
+              const stream = ctx.modelRegistry.streamSimple(requestModel, context, streamOptions);
               const response = await stream.result();
               if (response.stopReason === "aborted") throw new Error("Compression cancelled");
               if (response.stopReason !== "error" && response.stopReason !== "length"
@@ -72,6 +79,15 @@ export function createCompactionModelExtension(settings: Pick<SettingsManager, "
             },
             undefined, settings.getRetrySettings(),
           );
+          let result: Awaited<ReturnType<typeof runCompaction>>;
+          try {
+            result = await runCompaction(effectiveThinking);
+          } catch (error) {
+            // Reasoning can consume the summary response budget before any summary text.
+            // Retry the same model once without reasoning; do not silently switch models.
+            if (event.signal.aborted || effectiveThinking === "off" || !isTokenCapFailure(error)) throw error;
+            result = await runCompaction("off");
+          }
           event.signal.throwIfAborted();
           return { compaction: {
             ...result,

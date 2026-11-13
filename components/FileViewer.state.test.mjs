@@ -121,7 +121,7 @@ test("keeps Markdown preview renderer identities stable across parent re-renders
   assert.notEqual(previewStart, -1, "MarkdownPreviewWithToc not found");
   const preview = source.slice(previewStart);
   assert.match(preview, /const markdownComponents = useMemo<Components>\(\(\) => \(\{/);
-  assert.match(preview, /const markdownComponents[\s\S]*?\}\), \[cwd, markdownDirectory, onOpenFile, remotePeer, scrollRef, sourceSessionId\]\);/);
+  assert.match(preview, /const markdownComponents[\s\S]*?\}\), \[markdownDirectory, onOpenFile, remotePeer, scrollRef, sourceSessionId\]\);/);
   assert.match(source, /const contentRef = useRef<HTMLDivElement \| null>\(null\)/);
   assert.match(source, /scrollRef=\{contentRef\}/);
 });

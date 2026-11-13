@@ -5,6 +5,7 @@ import test from "node:test"
 const sidebar = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8")
 const activity = await readFile(new URL("./SessionActivityPanel.tsx", import.meta.url), "utf8")
 const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8")
+const appShellWorktree = await readFile(new URL("./app-shell-worktree.tsx", import.meta.url), "utf8")
 const chatWindow = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8")
 const agentSession = await readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8")
 const rpcManager = await readFile(new URL("../lib/rpc-manager.ts", import.meta.url), "utf8")
@@ -227,10 +228,10 @@ test("forked and cloned sessions inherit their source subproject assignment", ()
   assert.match(rpcManager, /assignSession\(projectKey, targetSessionId, sourceSubproject.id\)/)
 
   assert.match(rpcManager, /subprojectAssignmentFailed/)
-  assert.match(appShell, /subprojectAssignmentFailed \? undefined : session\.subprojectId/)
+  assert.match(appShellWorktree, /subprojectAssignmentFailed \? undefined : session\.subprojectId/)
   assert.match(appShell, /const inheritedSubprojectId = sourceSession\?\.subprojectId \?\? null/)
   assert.match(appShell, /handleNewSession\(\"fork-draft\", cwd, inheritedSubprojectId \?\? undefined\)/)
-  assert.match(appShell, /handleNewActivitySession\(session\.cwd, device, session\.subprojectId\)/)
+  assert.match(appShellWorktree, /handleNewActivitySession\(session\.cwd, device, session\.subprojectId\)/)
 })
 
 

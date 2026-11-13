@@ -55,8 +55,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-function hook({ commands = [], pending = null, getCommands = async () => ({ commands: [] }), openSettings = true } = {}) {
-  const calls = { notices: [], opened: [], requests: [], lists: [], errors: [], loading: [] };
+function hook({ commands = [], pending = null, getCommands = async () => ({ commands: [] }), openSettings = true, runtimeAvailable = true } = {}) {
+  const calls = { notices: [], opened: [], requests: [], lists: [], errors: [], loading: [], reloadKeys: [] };
   const scope = {
     sessionIdRef: { current: "session-1" },
     branchScopeRef: { current: "peer:session-1" },
@@ -69,7 +69,10 @@ function hook({ commands = [], pending = null, getCommands = async () => ({ comm
     slashCommandsRef: { current: commands },
     slashCommandsLoadRef: { current: pending },
     slashCommandsGenerationRef: { current: 0 },
+    runtimeAvailableRef: { current: runtimeAvailable },
+    setRuntimeAvailable: (available) => { scope.runtimeAvailableRef.current = available; },
     setSlashCommands: (list) => calls.lists.push(list),
+    setSlashCommandsReloadKey: () => calls.reloadKeys.push("reload"),
     setSlashCommandsLoading: (loading) => calls.loading.push(loading),
     sendAgentCommand: async (sid, command) => {
       calls.requests.push(command.type);
@@ -148,6 +151,14 @@ test("a command list still loading is awaited, not guessed", async () => {
   assert.deepEqual(await opened, { handled: true, action: "openSettings" });
 });
 
+test("cold slash command loading initializes the runtime before reading commands", async () => {
+  const { scope, calls } = hook({ runtimeAvailable: false, getCommands: async () => ({ commands: [deploy] }) });
+  const commands = await scope.requestSlashCommands();
+  assert.deepEqual(commands, [deploy]);
+  assert.deepEqual(calls.requests, ["initialize_runtime", "get_commands"]);
+  assert.equal(scope.runtimeAvailableRef.current, true);
+});
+
 test("with no list yet, /mcp asks for one and keeps it", async () => {
   const { run, scope, calls } = hook({ getCommands: async () => ({ commands: [builtinMcp] }) });
   assert.deepEqual(await run("/mcp"), { handled: true, action: "openSettings" });
@@ -186,6 +197,7 @@ test("a list cleared by set_tools is not written back by a request it outdated",
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.requests, ["get_commands"]);
   scope.clearSlashCommands();
+  assert.equal(calls.reloadKeys.length, 1, "the open palette must receive a reload signal");
   assert.equal(scope.slashCommandsLoadRef.current, null, "the next reader asks again");
   answer.resolve({ commands: [otherMcp] });
   assert.equal(await outdated, null, "obsolete ownership cannot escape through the return value");

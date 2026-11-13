@@ -19,7 +19,7 @@ import type {
   ProjectTrustStatus,
 } from "@/lib/api-types";
 import { projectTrustReloadKey } from "./settings-ui-helpers";
-import { ConfigButton, ConfigFooter, ConfigScopeTag, ConfigSwitch } from "./SettingsUi";
+import { activateConfigRowOnKeyDown, ConfigButton, ConfigFooter, ConfigScopeTag, ConfigSwitch, useSettingsDetailNavigation } from "./SettingsUi";
 import { ConfigPanelRefreshButton, useConfigSidebarResize } from "./ConfigPanelShared";
 import type { BuiltinRuntimeExtensionInfo } from "@/lib/builtin-runtime-extensions";
 import { useI18n } from "@/hooks/useI18n";
@@ -1634,6 +1634,7 @@ export function PluginsConfig({
   const api = (path: string) => apiFor(remotePeerRef.current, path);
   const isMobile = useIsMobile();
   const { t } = useI18n();
+  const navigation = useSettingsDetailNavigation();
   const sidebarResizer = useConfigSidebarResize();
   useEffect(() => {
     notifyEmbeddedModalState(true);
@@ -2040,6 +2041,7 @@ export function PluginsConfig({
               onChange={(scope) => {
                 setViewScope(scope);
                 setAddMode(false);
+                navigation?.closeDetail();
               }}
             />
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
@@ -2170,10 +2172,10 @@ export function PluginsConfig({
           </div>
         )}
 
-        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
+        <div className="settings-phone-split" style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
           <div
             ref={sidebarResizer.panelRef}
-            className="config-sidebar config-resource-sidebar"
+            className="config-sidebar config-resource-sidebar settings-phone-list"
             style={{
               width: isMobile ? "100%" : "var(--config-sidebar-width, 240px)",
               maxHeight: isMobile ? "40vh" : undefined,
@@ -2303,11 +2305,15 @@ export function PluginsConfig({
                         return (
                           <div
                             key={key}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={activateConfigRowOnKeyDown}
                             onClick={() => {
                               setSelected(key);
                               setAddMode(false);
                               setActionError(null);
                               setActionMessage(null);
+                              navigation?.openDetail(pluginDisplayName(pkg));
                             }}
                             className="config-sidebar-item config-resource-item"
                             style={{
@@ -2392,6 +2398,7 @@ export function PluginsConfig({
                         setAddMode(false);
                         setActionError(null);
                         setActionMessage(null);
+                        navigation?.openDetail(extension.id);
                       }}
                     />
                   )}
@@ -2406,6 +2413,7 @@ export function PluginsConfig({
                         setAddMode(false);
                         setActionError(null);
                         setActionMessage(null);
+                        navigation?.openDetail(extension.name);
                       }}
                     />
                   )}
@@ -2420,6 +2428,7 @@ export function PluginsConfig({
                     setAddMode(true);
                     setActionError(null);
                     setActionMessage(null);
+                    navigation?.openDetail(t("i18n.addPlugin"));
                   }}
                   style={{
                     display: "flex",
@@ -2468,7 +2477,7 @@ export function PluginsConfig({
             />
           )}
 
-          <div style={{ flex: 1, overflowY: "auto", padding: "var(--config-detail-padding-top) 20px 20px" }}>
+          <div className="settings-phone-detail" style={{ flex: 1, overflowY: "auto", padding: "var(--config-detail-padding-top) 20px 20px" }}>
             {addMode && viewScope === "global" ? (
               <AddPluginPanel
                 cwd={cwd}

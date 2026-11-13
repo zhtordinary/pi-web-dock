@@ -1,5 +1,8 @@
 /** One notification transport per origin. SharedWorker owns the background stream;
  * the BroadcastChannel lease provides sharing in WebViews without SharedWorker. */
+const GLOBAL_WATCHDOG_MS = 75_000;
+const GLOBAL_WATCHDOG_CHECK_MS = 25_000;
+
 export function createReaderEventsClient(env) {
   const url = "/api/reader/events";
   const cursors = new Map();
@@ -47,17 +50,28 @@ export function createReaderEventsClient(env) {
   function fallback() {
     const id = env.crypto.randomUUID?.() ?? Array.from(env.crypto.getRandomValues(new Uint8Array(16)), x => x.toString(16).padStart(2, "0")).join("");
     const key = `pi-reader-owner:${url}`;
-    let channel = null, source = null, timer = null, claimTimer = null, reconnectTimer = null, watchdogTimer = null, stopped = false;
-    function clearWatchdog() { if (watchdogTimer !== null) env.clearTimeout(watchdogTimer); watchdogTimer = null; }
+    let channel = null, source = null, timer = null, claimTimer = null, reconnectTimer = null, watchdogTimer = null, lastSeenAt = 0, stopped = false;
+    function clearWatchdog() { if (watchdogTimer !== null) env.clearInterval(watchdogTimer); watchdogTimer = null; }
     function watch(candidate, connect, requiresOwnership) {
-      clearWatchdog();
-      watchdogTimer = env.setTimeout(() => {
-        watchdogTimer = null;
-        if (source !== candidate || stopped) return;
+      if (source !== candidate || stopped) return;
+      lastSeenAt = env.Date.now();
+      if (watchdogTimer !== null) return;
+      watchdogTimer = env.setInterval(() => {
+        if (source !== candidate || stopped || !lastSeenAt) return;
+        if (env.Date.now() - lastSeenAt < GLOBAL_WATCHDOG_MS) return;
+        clearWatchdog();
         candidate.close(); source = null; deliver({ kind: "error" });
         if (requiresOwnership) channel?.postMessage({ kind: "packet", sender: id, packet: { kind: "error" } });
         scheduleReconnect(connect, requiresOwnership);
-      }, 75000);
+      }, GLOBAL_WATCHDOG_CHECK_MS);
+    }
+    function recheck(connect, requiresOwnership) {
+      if (!source || stopped || !lastSeenAt || env.Date.now() - lastSeenAt < GLOBAL_WATCHDOG_MS) return;
+      const candidate = source;
+      clearWatchdog();
+      candidate.close(); source = null; deliver({ kind: "error" });
+      if (requiresOwnership) channel?.postMessage({ kind: "packet", sender: id, packet: { kind: "error" } });
+      scheduleReconnect(connect, requiresOwnership);
     }
     const ttl = 12000, reconnectDelay = 1000;
     try { channel = new env.BroadcastChannel(key); } catch { /* capability reported below */ }
@@ -76,6 +90,7 @@ export function createReaderEventsClient(env) {
       clearWatchdog();
       source?.close();
       source = null;
+      lastSeenAt = 0;
       cancelReconnect();
     }
     function scheduleReconnect(connect, requiresOwnership) {
@@ -91,6 +106,7 @@ export function createReaderEventsClient(env) {
       clearWatchdog();
       candidate.close();
       source = null;
+      lastSeenAt = 0;
       scheduleReconnect(connect, requiresOwnership);
     }
     function release() {
@@ -109,7 +125,7 @@ export function createReaderEventsClient(env) {
       source = candidate;
       watch(candidate, connect, true);
       candidate.addEventListener?.("ping", () => { if (source === candidate) watch(candidate, connect, true); });
-      candidate.onopen = () => { if (source === candidate) forward({ kind: "open", sharing: "broadcast" }); };
+      candidate.onopen = () => { if (source === candidate) { watch(candidate, connect, true); forward({ kind: "open", sharing: "broadcast" }); } };
       candidate.onerror = () => {
         if (source !== candidate) return;
         forward({ kind: "error" });
@@ -126,7 +142,7 @@ export function createReaderEventsClient(env) {
       source = candidate;
       watch(candidate, connectPage, false);
       candidate.addEventListener?.("ping", () => { if (source === candidate) watch(candidate, connectPage, false); });
-      candidate.onopen = () => { if (source === candidate) deliver({ kind: "open", sharing: "page" }); };
+      candidate.onopen = () => { if (source === candidate) { watch(candidate, connectPage, false); deliver({ kind: "open", sharing: "page" }); } };
       candidate.onerror = () => {
         if (source !== candidate) return;
         deliver({ kind: "error", sharing: "page" });
@@ -151,6 +167,16 @@ export function createReaderEventsClient(env) {
         if (!source && !claimTimer && reconnectTimer === null) claimTimer = env.setTimeout(() => { claimTimer = null; connect(); }, 100);
       } else closeSource();
     }
+    const onResume = () => {
+      if (stopped) return;
+      if (source) recheck(channel ? connect : connectPage, Boolean(channel));
+    };
+    const onVisibilityResume = () => {
+      if (!env.document || env.document.visibilityState === "visible") onResume();
+    };
+    env.addEventListener?.("online", onResume);
+    env.addEventListener?.("pageshow", onResume);
+    env.addEventListener?.("visibilitychange", onVisibilityResume);
     if (!channel) {
       // No cross-page IPC: keep notification ability, expose the capability limit.
       connectPage();
@@ -170,11 +196,15 @@ export function createReaderEventsClient(env) {
     }
     return () => {
       stopped = true;
+      env.removeEventListener?.("online", onResume);
+      env.removeEventListener?.("pageshow", onResume);
+      env.removeEventListener?.("visibilitychange", onVisibilityResume);
       if (timer) env.clearInterval(timer);
       if (claimTimer) env.clearTimeout(claimTimer);
       release(); channel?.close();
     };
   }
+  let resumeTransport = () => {};
   function start() {
     started = true;
     let worker = null, ready = false, disposed = false, timeout = null, fallbackStop = null;
@@ -195,9 +225,15 @@ export function createReaderEventsClient(env) {
       worker.port.start();
       worker.port.postMessage({ kind: "subscribe" });
       timeout = env.setTimeout(() => { if (!ready) downgrade(); }, 3000);
+      resumeTransport = () => {
+        if (!disposed && !fallbackStop) {
+          try { worker?.port.postMessage({ kind: "resume" }); } catch { /* worker already gone */ }
+        }
+      };
     } catch { downgrade(); }
     stopTransport = () => {
       disposed = true;
+      resumeTransport = () => {};
       if (timeout) env.clearTimeout(timeout);
       fallbackStop?.();
       try { worker?.port.postMessage({ kind: "unsubscribe" }); worker?.port.close(); } catch { /* worker already gone */ }
@@ -205,9 +241,15 @@ export function createReaderEventsClient(env) {
   }
   function suspend() { stopTransport?.(); stopTransport = null; started = false; connected = false; }
   const pageHide = () => suspend();
-  const pageShow = () => { if (listeners.size && !started) start(); };
+  const pageShow = () => { if (listeners.size && !started) start(); resumeTransport(); };
+  const onOnline = () => resumeTransport();
+  const onVisibilityResume = () => {
+    if (!env.document || env.document.visibilityState === "visible") resumeTransport();
+  };
   env.addEventListener?.("pagehide", pageHide);
   env.addEventListener?.("pageshow", pageShow);
+  env.addEventListener?.("online", onOnline);
+  env.addEventListener?.("visibilitychange", onVisibilityResume);
   return {
     subscribe(listener) {
       listeners.add(listener);
@@ -219,6 +261,8 @@ export function createReaderEventsClient(env) {
       listeners.clear(); suspend(); snapshots.clear(); activity.length = 0;
       env.removeEventListener?.("pagehide", pageHide);
       env.removeEventListener?.("pageshow", pageShow);
+      env.removeEventListener?.("online", onOnline);
+      env.removeEventListener?.("visibilitychange", onVisibilityResume);
     },
   };
 }

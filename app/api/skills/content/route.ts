@@ -2,7 +2,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import type { SkillViewScope } from "@/lib/api-types";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { samePath } from "@/lib/paths";
 import { readRegularFileText } from "@/lib/regular-file";
 import { isApiRequestAllowed } from "@/lib/request-security";
@@ -28,9 +28,8 @@ function physicalPath(filePath: string): string | undefined {
 
 /**
  * Resolve a requested path against the resource loader's actual loaded files.
- * The allowlist is evidence for which resource may be read; it is not itself
- * a filesystem authorization. Both the request and the selected resource are
- * resolved again before the regular-file and allowed-root checks below.
+ * The loaded resource list identifies the selected Skill; its physical path
+ * is resolved before the regular-file checks below.
  */
 function findLoadedSkillPath(
   requestedPath: string,
@@ -62,8 +61,7 @@ function readErrorResponse(error: unknown): NextResponse {
 // The resource loader is the candidate allowlist: accepting any readable
 // Markdown path would turn this panel into a general filesystem reader.
 // `sessionId`, `revision`, `trustKey` and `generation` remain request identity
-// fields for the peer/client chain; authorization still comes from cwd trust,
-// the selected resource scope and the physical file checks below.
+// fields for the peer/client chain; the selected Skill comes from its scope.
 export async function GET(req: Request) {
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
@@ -84,9 +82,8 @@ export async function GET(req: Request) {
   if (!scope) return NextResponse.json({ error: "scope must be global or project" }, { status: 400 });
 
   try {
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    if (!isExistingDirectory(cwd)) {
+      return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
     }
 
     // loadSkillsWithInstallInfo applies the same project-trust/resource-scope
@@ -102,29 +99,18 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Skill not found" }, { status: 404 });
     }
 
-    // Re-check the physical path at the read boundary. This rejects a loaded
-    // symlink whose target escapes the current allowed roots and prevents a
-    // string path in the loader result from becoming authorization by itself.
-    const resourceRoots = allowedRoots;
-    if (!isExistingFilePathAllowed(requestedFilePath, resourceRoots)
-      || !isExistingFilePathAllowed(loadedPath, resourceRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
     let target = loadedPath;
     if (document !== null) {
       const refuse = (status: number, error: string) => NextResponse.json({ error }, { status });
-      if (path.isAbsolute(document) || /[\\:\0]/.test(document) || document.split("/").includes("..")) {
-        return refuse(400, "Document path must stay inside the skill folder");
-      }
+      if (document.includes("\0")) return refuse(400, "Invalid document path");
       const MARKDOWN_FILE = /\.(md|markdown)$/i;
       if (!MARKDOWN_FILE.test(document)) return refuse(415, "Only Markdown documents can be opened");
       const skillDir = path.dirname(loadedPath);
-      target = path.join(skillDir, document);
+      target = path.resolve(skillDir, document);
       if (!existsSync(target)) return refuse(404, "Skill document not found");
       const resolvedTarget = physicalPath(target);
-      if (!resolvedTarget || !isExistingFilePathAllowed(resolvedTarget, new Set([skillDir])) || !MARKDOWN_FILE.test(resolvedTarget)) {
-        return refuse(403, "Document is outside the skill folder");
+      if (!resolvedTarget || !MARKDOWN_FILE.test(resolvedTarget)) {
+        return refuse(415, "Only Markdown documents can be opened");
       }
       const stats = statSync(target);
       if (!stats.isFile()) return refuse(400, "Skill document is not a regular file");

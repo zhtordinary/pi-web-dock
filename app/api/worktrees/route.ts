@@ -12,20 +12,16 @@ import {
   resolveProject,
   worktreeRemovalRequiresForce,
 } from "@/lib/worktree";
-import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { filterHiddenSessions } from "@/lib/hidden-filter";
 import { getSessionEntries, listAllSessions } from "@/lib/session-reader";
 import { findWorktreeCreationRecords } from "@/lib/worktree-creation-history";
+import { findWorktreeBindingRecords } from "@/lib/worktree-bindings";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
-/** Same gate as /api/files: only session cwds / project roots / explicitly
- *  allowed dirs may be inspected or mutated through this endpoint. */
-async function checkCwdAllowed(cwd: string, access: "read" | "write" = "read"): Promise<NextResponse | null> {
-  const allowedRoots = await getAllowedFileRoots(access);
-  if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
-    return NextResponse.json({ error: "Access denied" }, { status: 403 });
-  }
+function validateCwd(cwd: string): NextResponse | null {
+  if (!isExistingDirectory(cwd)) return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
   return null;
 }
 
@@ -42,7 +38,7 @@ async function readMutationBody(req: Request): Promise<MutationBody | NextRespon
   if (typeof body.cwd !== "string" || !body.cwd) {
     return NextResponse.json({ error: "cwd is required" }, { status: 400 });
   }
-  const denied = await checkCwdAllowed(body.cwd, "write");
+  const denied = validateCwd(body.cwd);
   if (denied) return denied;
   if (!existsSync(body.cwd)) {
     return NextResponse.json({ error: `Directory does not exist: ${body.cwd}` }, { status: 400 });
@@ -62,7 +58,7 @@ export async function GET(req: Request) {
     if (!cwd) {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
     }
-    const denied = await checkCwdAllowed(cwd);
+    const denied = validateCwd(cwd);
     if (denied) return denied;
 
     const inspectPath = searchParams.get("inspect");
@@ -97,6 +93,7 @@ export async function GET(req: Request) {
         .filter((session) => (session.projectKey ?? projectIdentityKey(session.projectRoot ?? session.cwd)) === projectKey);
       const paths = worktrees.map((worktree) => worktree.path);
       const records: Array<{ worktreePath: string; sessionId: string; createdAt: string; sessionName?: string }> = [];
+      const bindings: Array<{ worktreePath: string; sessionId: string; relation: "creator" | "task-root"; createdAt: string; sessionName?: string }> = [];
       let remainingBytes = 256 * 1024 * 1024;
       let partial = false;
       for (const session of sessions) {
@@ -105,14 +102,16 @@ export async function GET(req: Request) {
           // Bound one inspection to the existing session-read cache's 64 MiB file limit.
           if (size > 64 * 1024 * 1024 || size > remainingBytes) { partial = true; continue; }
           remainingBytes -= size;
-          for (const record of findWorktreeCreationRecords(getSessionEntries(session.path), session, paths, homedir())) {
+          const entries = getSessionEntries(session.path);
+          for (const record of findWorktreeCreationRecords(entries, session, paths, homedir())) {
             records.push({ ...record, ...(session.name ? { sessionName: session.name } : {}) });
           }
+          bindings.push(...findWorktreeBindingRecords(entries, session, project.projectRoot, paths));
         } catch {
           partial = true;
         }
       }
-      return NextResponse.json({ records, partial }, { headers: { "Cache-Control": "no-store" } });
+      return NextResponse.json({ records, bindings, partial }, { headers: { "Cache-Control": "no-store" } });
     }
     const graph = searchParams.get("graph") === "1" && isGit
       ? await buildWorktreeGraph(existsSync(cwd) ? cwd : project.projectRoot, { forceRefresh: searchParams.get("refresh") === "1" })

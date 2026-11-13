@@ -9,16 +9,18 @@ import { filterSessionsByCategory, sessionCategoryFromState } from "../../../lib
 import { isSessionStorageCategory, sessionStorageScopeFor } from "../../../lib/session-storage-scope.ts";
 
 const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
+const chatWindowSource = await readFile(new URL("../../../components/ChatWindow.tsx", import.meta.url), "utf8");
+const stopRouteSource = await readFile(new URL("../sessions/[id]/stop/route.ts", import.meta.url), "utf8");
 const activityStart = source.indexOf("function sessionActivity(");
 const activityEnd = source.indexOf("const archivedAncestorParentCache", activityStart);
 const start = source.indexOf("async function buildLocalResponse(");
 const end = source.indexOf("// Peers are fetched on demand", start);
 assert.ok(activityStart >= 0 && activityEnd > activityStart && start >= 0 && end > start, "activity response implementation must be present");
-const code = ts.transpileModule(`${source.slice(activityStart, activityEnd)}\n${source.slice(start, end)}\nglobalThis.build = buildLocalResponse;`, {
+const code = ts.transpileModule(`${source.slice(activityStart, activityEnd)}\n${source.slice(start, end)}\nglobalThis.build = buildLocalResponse;\nglobalThis.project = sessionActivity;`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
-function fixture({ initialFavorites = ["a"], finalFavorites = initialFavorites, initialReadError = false, finalReadError = false, hidden = [], hiddenProjects = [], visibleSessions = [], hiddenReadError = false, categories = { to_discuss: [], to_revise: [], completed: [] }, parents = {}, running = [], knownProjects = [], unstableList = false } = {}) {
+function fixture({ initialFavorites = ["a"], finalFavorites = initialFavorites, initialReadError = false, finalReadError = false, hidden = [], hiddenProjects = [], visibleSessions = [], hiddenReadError = false, categories = { to_discuss: [], to_revise: [], completed: [] }, parents = {}, running = [], waiting = [], retrying = [], knownProjects = [], unstableList = false } = {}) {
   const sessions = ["a", "b", "c"].map((id) => ({ id, path: `/fixture/${id}`, cwd: "/project", modified: "2026-01-01T00:00:00Z", ...(parents[id] ? { parentSessionId: parents[id] } : {}) }));
   const reads = [], subagentInputs = [], restoredInputs = [], listCalls = [], supplementaryProjects = [], knownProjectReads = [];
   let observations = 0, favoriteReads = 0, listVersion = 0;
@@ -53,14 +55,19 @@ function fixture({ initialFavorites = ["a"], finalFavorites = initialFavorites, 
     sessionCategoryFromState, filterSessionsByCategory,
     restorePersistedQuestionAnalysisJobs: (items) => { restoredInputs.push(Array.from(items, (item) => item.id)); },
     getSessionRunRecords: () => [], getRunningRpcSessionIds: () => running,
-    getWaitingForUserRpcSessionIds: () => [], getWaitingForUserRequests: () => [],
+    getWaitingForUserRpcSessionIds: () => waiting, getWaitingForUserRequests: () => [],
     getSubagentActivityForSessions: (items) => { subagentInputs.push(Array.from(items, (item) => item.id)); return new Map(); },
-    getRpcSession: (id) => running.includes(id) ? {
-      isStreaming: true, isPromptRunning: true, getExecutionState: () => ({ active: true, queuedCount: 1 }),
-      getUnattendedConfigured: () => false, getSchedulerState: () => null, isRetryInFlight: () => false, isUserPromptActive: () => true,
+    getRpcSession: (id) => running.includes(id) || retrying.includes(id) ? {
+      isStreaming: running.includes(id), isPromptRunning: running.includes(id),
+      getExecutionState: () => ({ active: true, parentActive: false, retrying: retrying.includes(id), unattended: false, backgroundRunIds: [], queuedCount: 1 }),
+      getUnattendedConfigured: () => false, getSchedulerState: () => retrying.includes(id) ? { active: true } : null,
+      isRetryInFlight: () => false, isUserPromptActive: () => running.includes(id),
     } : undefined,
     getPersistedUnattendedState: () => null,
-    projectSessionRuns: () => ({ runs: [], currentActivity: null }), shouldShowRetryingStatus: () => false,
+    projectSessionRuns: (records, sessionId, active) => ({
+      runs: records.filter((record) => record.sessionId === sessionId).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 8),
+      currentActivity: { active, runId: active ? records.find((record) => record.sessionId === sessionId && record.status === "running")?.runId ?? null : null },
+    }), shouldShowRetryingStatus: (signals) => signals.schedulerActive && !signals.userPromptActive,
     JUST_COMPLETED_MS: 300_000,
     sessionStorageScopeFor, isHiddenInState, isSessionStorageCategory,
     listKnownProjects: () => knownProjects.map((path) => ({ path, addedAt: "2026-01-01T00:00:00Z" })),
@@ -68,8 +75,213 @@ function fixture({ initialFavorites = ["a"], finalFavorites = initialFavorites, 
     getProjectIdentity: (value) => ({ key: "project", label: value }), listSubprojects: () => [], listSubprojectSortSettings: () => [],
   };
   vm.runInNewContext(code, ctx);
-  return { build: ctx.build, reads, subagentInputs, restoredInputs, listCalls, supplementaryProjects, knownProjectReads, get observations() { return observations; } };
+  return { build: ctx.build, project: ctx.project, reads, subagentInputs, restoredInputs, listCalls, supplementaryProjects, knownProjectReads, running, waiting, retrying, get observations() { return observations; } };
 }
+
+function projectedItem(f, {
+  status = "completed",
+  completedAgeMs = 60_000,
+  subagentActivity,
+  relationStatus,
+  nowMs = Date.parse("2026-01-01T00:10:00.000Z"),
+  records = "run",
+} = {}) {
+  const session = {
+    id: "parent",
+    path: "/fixture/parent",
+    cwd: "/project",
+    modified: "2026-01-01T00:00:00.000Z",
+    messages: [{ role: "assistant", stopReason: "stop" }],
+    ...(relationStatus ? { relation: { kind: "subagent", status: relationStatus } } : {}),
+  };
+  const completedAt = new Date(nowMs - completedAgeMs).toISOString();
+  const run = { runId: "parent-run", sessionId: session.id, cwd: session.cwd, startedAt: "2026-01-01T00:00:00.000Z", updatedAt: completedAt, completedAt, status };
+  const item = f.project(
+    session,
+    { id: "local", name: "Local" },
+    records === "run" ? [run] : records,
+    new Set(f.running),
+    new Set(f.waiting),
+    new Map(),
+    subagentActivity,
+    nowMs,
+    new Set(),
+    new Map(),
+    { hasErrorTail: false },
+  );
+  return { item, run, session };
+}
+
+test("a completed parent run remains completed when child stop evidence arrives before or after it", () => {
+  const f = fixture();
+  const parent = projectedItem(f);
+  assert.equal(parent.session.messages.at(-1)?.role, "assistant");
+  assert.equal(parent.session.messages.at(-1)?.stopReason, "stop");
+  const parentCompletedAt = Date.parse("2026-01-01T00:09:00.000Z");
+  for (const terminalAt of [parentCompletedAt - 1_000, parentCompletedAt + 1_000]) {
+    const { item, run } = projectedItem(f, {
+      subagentActivity: { active: false, terminalState: "stopped", terminalAt },
+    });
+    assert.equal(item.status, "just_completed");
+    assert.deepEqual(item.latestRun, run);
+    assert.deepEqual(item.runs, [run]);
+    assert.equal(item.subagentTerminalState, "stopped");
+    assert.equal(item.subagentTerminalAt, terminalAt);
+  }
+  const stale = projectedItem(f, {
+    completedAgeMs: 5 * 60 * 1000 + 1,
+    subagentActivity: { active: false, terminalState: "stopped", terminalAt: parentCompletedAt + 1_000 },
+  });
+  assert.equal(stale.item.status, "idle");
+  assert.equal(stale.item.latestRun.runId, "parent-run");
+});
+
+test("parent terminal outcomes stay authoritative while child abort relations remain additional facts", () => {
+  const f = fixture();
+  for (const status of ["aborted", "failed"]) {
+    assert.equal(projectedItem(f, { status }).item.status, status);
+  }
+  for (const relationStatus of ["aborted", "interrupted"]) {
+    const { item } = projectedItem(f, { relationStatus });
+    assert.equal(item.status, "just_completed");
+    assert.equal(item.latestRun.status, "completed");
+  }
+});
+
+test("child terminal status is projected only when the session has no parent run", () => {
+  const f = fixture();
+  const stopped = projectedItem(f, {
+    records: [],
+    subagentActivity: { active: false, terminalState: "stopped", terminalAt: Date.parse("2026-01-01T00:09:00.000Z") },
+  });
+  assert.equal(stopped.item.status, "aborted");
+  assert.equal(stopped.item.subagentTerminalState, "stopped");
+  for (const relationStatus of ["aborted", "interrupted"]) {
+    assert.equal(projectedItem(f, { records: [], relationStatus }).item.status, "aborted");
+  }
+});
+
+test("terminal child observations override stale active relation statuses", () => {
+  const f = fixture();
+  for (const relationStatus of ["starting", "queued", "running"]) {
+    const completed = projectedItem(f, {
+      records: [],
+      relationStatus,
+      subagentActivity: { active: false, terminalState: "completed", terminalAt: Date.parse("2026-01-01T00:09:00.000Z") },
+    });
+    assert.equal(completed.item.status, "just_completed", relationStatus);
+    assert.equal(completed.item.currentActivity.active, false, relationStatus);
+
+    const stopped = projectedItem(f, {
+      records: [],
+      relationStatus,
+      subagentActivity: { active: false, terminalState: "stopped", terminalAt: Date.parse("2026-01-01T00:09:00.000Z") },
+    });
+    assert.equal(stopped.item.status, "aborted", relationStatus);
+    assert.equal(stopped.item.currentActivity.active, false, relationStatus);
+  }
+});
+
+test("current activity, waiting user, and retrying outrank completed history", () => {
+  assert.equal(projectedItem(fixture({ running: ["parent"] })).item.status, "running");
+  assert.equal(projectedItem(fixture({ waiting: ["parent"] })).item.status, "waiting_user");
+  assert.equal(projectedItem(fixture({ retrying: ["parent"] })).item.status, "retrying");
+});
+
+test("the ChatWindow Stop handler reaches the same session stop route and runtime", async () => {
+  const stopRouteTree = ts.createSourceFile("stop-route.ts", stopRouteSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let postDeclaration;
+  const findPost = (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "POST") postDeclaration = node;
+    if (!postDeclaration) ts.forEachChild(node, findPost);
+  };
+  findPost(stopRouteTree);
+  assert.ok(postDeclaration, "the real session stop route must expose POST");
+  const stopRouteCode = ts.transpileModule(`${postDeclaration.getText(stopRouteTree).replace(/^export\s+/, "")}\nglobalThis.__stopPost = POST;`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const sessionId = "same-stop-session";
+  const trace = [];
+  const routeContext = {
+    NextResponse: { json: (body, options = {}) => ({ ok: (options.status ?? 200) < 400, status: options.status ?? 200, json: async () => body }) },
+    getRpcSession: (id) => {
+      assert.equal(id, sessionId);
+      return {
+        isAlive: () => true,
+        stopAllExecution: async () => {
+          trace.push({ phase: "stopAllExecution", sessionId: id, submissionId: "old-submission" });
+          return { stopped: true, state: { queuedCount: 2 }, errors: [] };
+        },
+      };
+    },
+    resolveSessionPathReadOnly: async () => null,
+    getSessionBackgroundRunIds: () => [],
+    controlSiblingSession: async (id, operation) => {
+      trace.push({ phase: "paired-stop", sessionId: id, operation });
+      return { stopped: true, queuedCount: 0, errors: [] };
+    },
+    hasJsonContentType: () => true,
+    isApiRequestAllowed: () => true,
+    URL,
+  };
+  vm.runInNewContext(stopRouteCode, routeContext);
+  const stopPost = routeContext.__stopPost;
+  const chatTree = ts.createSourceFile("ChatWindow.tsx", chatWindowSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let abortCallback;
+  const findAbort = (node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(chatTree) === "handleAbortSession") {
+      const initializer = node.initializer;
+      abortCallback = ts.isCallExpression(initializer) ? initializer.arguments[0] : initializer;
+    }
+    if (!abortCallback) ts.forEachChild(node, findAbort);
+  };
+  findAbort(chatTree);
+  assert.ok(abortCallback, "ChatWindow must expose the user Stop handler");
+  const ui = [];
+  const chatCode = ts.transpileModule(`(${abortCallback.getText(chatTree)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const handleStop = vm.runInNewContext(chatCode, {
+    sessionIdForAbnormal: sessionId,
+    stoppingExecution: false,
+    executionScopeRef: { current: `local:${sessionId}` },
+    remotePeer: null,
+    stopAutoRetry: () => ui.push("stopAutoRetry"),
+    setStoppingExecution: (value) => ui.push(["stopping", value]),
+    apiPathForPeer: (_peer, path) => `/${path}`,
+    fetch: async (url, options) => {
+      const endpoint = new URL(url, "http://reader.test");
+      const match = endpoint.pathname.match(/\/sessions\/([^/]+)\/stop$/);
+      assert.ok(match, `unexpected stop endpoint: ${endpoint.pathname}`);
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers["Content-Type"], "application/json");
+      assert.equal(options.body, "{}");
+      const id = decodeURIComponent(match[1]);
+      trace.push({ phase: "stop-request", sessionId: id });
+      return stopPost({ url: endpoint.href }, { params: Promise.resolve({ id }) });
+    },
+    latestUserMessageKey: "old-submission",
+    abnormalUserMessageKeyRef: { current: null },
+    setAbnormalRun: (value) => ui.push(["abnormal", value]),
+    setExecution: (value) => ui.push(["execution", value]),
+    setActivityActive: (value) => ui.push(["activity", value]),
+    clearSessionActivityCache: (url) => ui.push(["clear-cache", url]),
+    activityUrl: "/api/session-runs",
+    addNotice: (notice) => ui.push(["notice", notice]),
+    t: (key) => key,
+    URL,
+    encodeURIComponent,
+  });
+  await handleStop();
+  assert.deepEqual(trace, [
+    { phase: "stop-request", sessionId },
+    { phase: "stopAllExecution", sessionId, submissionId: "old-submission" },
+    { phase: "paired-stop", sessionId, operation: "stop" },
+  ]);
+  assert.ok(ui.some((entry) => entry[0] === "abnormal" && entry[1] === true));
+  const notice = ui.find((entry) => entry[0] === "notice");
+  assert.equal(notice?.[1]?.type, "warning", "a retained queue is reported as a warning, not a stop failure");
+});
 
 test("favorites activity reads histories only for candidates that can be returned", async () => {
   const f = fixture({ initialFavorites: ["a", "b"], hidden: ["b"] });

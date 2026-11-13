@@ -272,6 +272,42 @@ html.dark,
   padding-left: 26px;
 }
 
+.models-sidebar-model-footer {
+  display: flex;
+  align-items: center;
+}
+
+.models-sidebar-sort-button {
+  flex-shrink: 0;
+  width: 36px;
+  height: 30px;
+  margin-right: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.models-sidebar-sort-button:not(:disabled):hover,
+.models-sidebar-sort-button:not(:disabled):focus-visible {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.models-sidebar-sort-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.models-sidebar-sort-button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
 .models-sidebar-add-item {
   color: var(--text-dim);
 }
@@ -2964,4 +3000,76 @@ html.dark,
   .prompts-config-card { padding: 6px 8px 8px; }
   .prompts-config-editor-backdrop { padding: 12px; }
   .prompts-config-editor-dialog { width: 100%; max-height: calc(100dvh - 24px); padding: 14px; }
+}
+
+@media (max-width: 640px) {
+  .settings-phone-title {
+    position: absolute;
+    left: 50%;
+    max-width: 42%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+
+  .settings-phone-back {
+    display: flex;
+    align-items: center;
+    max-width: 28%;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .settings-phone-back span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .settings-phone-home {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px 12px;
+  }
+
+  .settings-phone-home-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 50px;
+    padding: 8px 10px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+
+  .settings-phone-home-item span { flex: 1; }
+  .settings-phone-home-item svg:last-child { color: var(--text-muted); }
+  .settings-phone-home-item:focus-visible, .settings-phone-back:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .settings-phone-split { min-height: 0; }
+  [data-phone-settings-level="section"] .settings-phone-split > .settings-phone-list,
+  [data-phone-settings-level="section"] .config-split-view > .config-sidebar {
+    flex: 1 1 auto !important;
+    min-height: 0;
+    max-height: none !important;
+    border: 0 !important;
+  }
+  [data-phone-settings-level="section"] .settings-phone-split > .settings-phone-detail,
+  [data-phone-settings-level="section"] .config-split-view > .config-detail,
+  [data-phone-settings-level="detail"] .settings-phone-split > .settings-phone-list,
+  [data-phone-settings-level="detail"] .config-split-view > .config-sidebar { display: none !important; }
 }

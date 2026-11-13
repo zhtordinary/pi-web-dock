@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getFileTabId, openFileTab, replaceFileTab, saveFileViewerState } from "./file-tab-state.ts";
+import { clearFileTabAnchor, getFileTabId, openFileTab, replaceFileTab, saveFileViewerState } from "./file-tab-state.ts";
 
 const tabA = {
   id: "file:/repo/a.ts",
@@ -135,6 +135,33 @@ test("a remounted viewer ignores the previous revision's late cleanup", () => {
   const stale = saveFileViewerState(reopened, tabA.id, 0, tabA.viewerState);
   assert.strictEqual(stale, reopened);
   assert.equal(stale[0].viewerState.displayMode, "diff");
+});
+
+test("a Markdown fragment selects preview and remounts an existing tab", () => {
+  const [first] = openFileTab([tabA], { ...openA, anchor: "#target-heading" });
+  assert.equal(first.anchor, "#target-heading");
+  assert.equal(first.viewerRevision, 1);
+  assert.equal(first.viewerState.displayMode, "preview");
+  assert.equal(first.viewerState.scrollTop, 0);
+  assert.equal(first.viewerState.wrapLines, true);
+  const [second] = openFileTab([first], { ...openA, anchor: "#target-heading" });
+  assert.equal(second.viewerRevision, 2, "the same link can jump again after scrolling");
+});
+
+test("a new tab retains its requested Markdown fragment", () => {
+  const [next] = openFileTab([], { ...openA, anchor: "#target-heading" });
+  assert.equal(next.anchor, "#target-heading");
+  assert.equal(next.initialDisplayMode, "preview");
+});
+
+test("only the current revision consumes an applied Markdown fragment", () => {
+  const [opened] = openFileTab([tabA], { ...openA, anchor: "#target-heading" });
+  const saved = saveFileViewerState([opened], tabA.id, 1, opened.viewerState);
+  assert.equal(saved[0].anchor, "#target-heading", "saving before rendering must not consume the fragment");
+  assert.strictEqual(clearFileTabAnchor(saved, tabA.id, 0), saved);
+  const cleared = clearFileTabAnchor(saved, tabA.id, 1);
+  assert.equal(cleared[0].anchor, undefined);
+  assert.equal(cleared[0].viewerState.displayMode, "preview");
 });
 
 test("a PDF page link remounts the viewer so the document jumps", () => {

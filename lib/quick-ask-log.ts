@@ -34,6 +34,10 @@ export type QuickAskRunStatus = "running" | "completed" | "failed" | "cancelled"
 export interface QuickAskRunSnapshot extends QuickAskScope {
   id: string;
   status: QuickAskRunStatus;
+  /** Live-only: cancellation was requested but owned work has not settled. */
+  settling?: boolean;
+  /** Live-only tool names, without arguments or results. */
+  activeTools?: string[];
   question: string;
   images: Base64ImageAttachment[];
   answer: string;
@@ -180,6 +184,7 @@ function rechain(entries: readonly SessionEntry[]): SessionEntry[] {
 
 /** What a model call is told where the frozen anchor sits mid tool call; the SDK would otherwise report a failed call. */
 export const QUICK_ASK_PENDING_TOOL_RESULT = "（创建侧边提问时，该工具调用仍在执行，结果尚未返回；之后的结果不在本侧问上下文中。）";
+export const QUICK_ASK_BOUNDARY_PROMPT = "这是应用的说明，不是用户的发言。以上内容是侧问发起时冻结的主会话背景，不是你当前的任务，其中未完成的工作也不需要你继续。只有此提示之后的消息才是当前要处理的内容。";
 
 /** Calls of the newest assistant turn that had no result when the anchor was frozen. A later user message means abandoned, not in flight. */
 function pendingToolResults(path: readonly SessionEntry[], idPrefix: string): SessionEntry[] {
@@ -228,15 +233,25 @@ export function quickAskBranchManager(
       timestamp: new Date(branch.createdAt).toISOString(), message: branch.sourceSystem });
   }
   const selected = structuredClone([...seed, ...contextPath]);
-  if (settleInFlightTools) selected.push(...pendingToolResults(selected, branch.id));
+  if (settleInFlightTools) {
+    selected.push(...pendingToolResults(selected, branch.id));
+    selected.push({
+      type: "message",
+      id: `${branch.id}-boundary`,
+      parentId: null,
+      timestamp: new Date(branch.createdAt).toISOString(),
+      message: { role: "user", content: [{ type: "text", text: QUICK_ASK_BOUNDARY_PROMPT }], timestamp: branch.createdAt },
+    });
+  }
   for (const item of items) {
     const native = item.data.nativeEntries?.length
       ? structuredClone(item.data.nativeEntries)
       : legacyQuickAskEntries(item);
     if (copyUsage) for (const entry of native) {
-      if (entry.type === "message" && entry.message.role === "assistant") Object.assign(entry.message, {
-        usageEvent: createQuickAskDerivativeUsageEvent(source.getSessionId(), item.id, item.usageEvent, "copy"),
-      });
+      if (entry.type === "message" && entry.message.role === "assistant") {
+        const original = (entry.message as AssistantMessage & { usageEvent?: QuickAskUsageEvent }).usageEvent ?? item.usageEvent;
+        Object.assign(entry.message, { usageEvent: createQuickAskDerivativeUsageEvent(source.getSessionId(), item.id, original, "copy") });
+      }
     }
     selected.push(...native);
   }
@@ -273,6 +288,7 @@ function quickAskOutcomeEntries(source: SessionManager, branch: QuickAskBranch, 
   const records = entries.slice(Math.max(born + 1, reset + 1), end);
   const admissions = new Map<string, { entry: SessionEntry; data: NativeOutcomeData }>();
   const outcomes = new Map<string, { entry: SessionEntry; data: NativeOutcomeData }>();
+  const steps = new Map<string, SessionEntry[]>();
   const completed = new Set<string>();
   for (const entry of records) {
     if (entry.type !== "custom" || !entry.data) continue;
@@ -284,17 +300,24 @@ function quickAskOutcomeEntries(source: SessionManager, branch: QuickAskBranch, 
       admissions.set(data.id, { entry, data });
     }
     if (entry.customType === "quick_ask_outcome" && data.runId) outcomes.set(data.runId, { entry, data });
+    if (entry.customType === "quick_ask_step" && data.runId && Array.isArray(data.nativeEntries)) {
+      steps.set(data.runId, [...(steps.get(data.runId) ?? []), ...data.nativeEntries]);
+    }
   }
   return quickAskRunSnapshots(records, [], false).flatMap((run): SessionEntry[] => {
     const admission = admissions.get(run.id);
     if (!admission || completed.has(run.id) || !sameQuickAskScope(run, branch)) return [];
     const outcome = outcomes.get(run.id);
-    const nativeEntries = structuredClone([...(admission.data.nativeEntries ?? []), ...(outcome?.data.nativeEntries ?? [])]);
+    const nativeEntries = structuredClone([...(admission.data.nativeEntries ?? []),
+      ...(outcome?.data.nativeEntries ?? steps.get(run.id) ?? [])]);
     const usageEvent = outcome?.data.usageEvent && copyUsage
       ? createQuickAskDerivativeUsageEvent(source.getSessionId(), outcome.entry.id, outcome.data.usageEvent, "copy")
       : outcome?.data.usageEvent;
-    if (usageEvent) for (const entry of nativeEntries) {
-      if (entry.type === "message" && entry.message.role === "assistant") Object.assign(entry.message, { usageEvent });
+    for (const entry of nativeEntries) {
+      if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+      const original = (entry.message as AssistantMessage & { usageEvent?: QuickAskUsageEvent }).usageEvent ?? outcome?.data.usageEvent;
+      if (original) Object.assign(entry.message, { usageEvent: copyUsage && outcome
+        ? createQuickAskDerivativeUsageEvent(source.getSessionId(), outcome.entry.id, original, "copy") : original });
     }
     return [{ type: "custom", id: `${admission.entry.id}-outcome`, parentId: null,
       timestamp: outcome?.entry.timestamp ?? admission.entry.timestamp, customType: "reader.side_ask_outcome",

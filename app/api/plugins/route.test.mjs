@@ -27,8 +27,6 @@ const disabledEntry = (source) => ({
 await writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
-allowFileRoot(cwd);
 const { GET, POST } = await jiti.import("./route.ts");
 test.after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -241,7 +239,6 @@ test("bulk toggles refuse an untrusted project's packages without stopping globa
   await mkdir(join(untrusted, ".pi"), { recursive: true });
   const projectSettings = JSON.stringify({ packages: ["npm:project-only"] });
   await writeFile(join(untrusted, ".pi", "settings.json"), projectSettings);
-  allowFileRoot(untrusted);
   await writeFile(settingsPath, JSON.stringify({ packages: [alpha] }));
 
   const response = await postPlugins({
@@ -348,8 +345,6 @@ test("bulk plugin disable preserves filters and enable restores them exactly", a
     const original = { source: pkg, skills: ["skills/a", "+skills/b"], autoload: false };
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: [original] }));
     const instance = createJiti(import.meta.url, { alias: { "@": process.cwd() }, moduleCache: false });
-    const { allowFileRoot } = await instance.import("../../../lib/file-access.ts");
-    allowFileRoot(cwd);
     const { POST } = await instance.import("./route.ts");
     const toggle = (enabled) => POST(new Request("http://localhost/api/plugins", {
       method: "POST", headers: { host: "localhost", "content-type": "application/json" },

@@ -1,15 +1,15 @@
 import { appendFile, chmod, mkdir, stat } from "fs/promises";
 import { homedir } from "os";
 import { dirname, join, resolve } from "path";
-import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { isFastModeDefault, isFastModeSupported } from "@/lib/fast-mode";
 import { loadModelsWithCache, withModelRuntimeError, type ModelErrorInfo, type ModelListEntry, type ModelsData } from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { filterHiddenModels, normalizeHiddenModelReferences } from "@/lib/model-visibility";
 import { getModelThinkingDefaults, readModelsConfig } from "@/lib/models-config-store";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { createReaderAgentSessionServices } from "@/lib/model-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -84,7 +84,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   // runs a repository's .pi/extensions factories, so honor project trust here
   // too (see lib/project-trust.ts, #236).
   const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
-  const services = await createAgentSessionServices({
+  const services = await createReaderAgentSessionServices({
     cwd,
     agentDir,
     ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
@@ -190,13 +190,6 @@ export async function GET(req: Request) {
   if (!cwdStat.isDirectory()) {
     return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
   }
-  if (cwdParam) {
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return Response.json({ error: "Access denied" }, { status: 403 });
-    }
-  }
-
   try {
     return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
   } catch (error) {

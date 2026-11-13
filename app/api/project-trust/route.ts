@@ -24,24 +24,18 @@ function refusal(status: number, reason: McpRefusalReason, error: string) {
   return NextResponse.json({ error, reason } satisfies McpErrorResponse, { status });
 }
 
-/**
- * The folder, checked as Settings › MCP's routes check theirs
- * (`validateMcpProject()`): absolute, inside the allowed roots as given, then
- * a directory. A relative path is refused rather than resolved against the
- * server process's own folder, and a folder outside the roots gets 403
- * whether or not it exists.
- */
+/** Validate the project directory using the same rules as Settings › MCP. */
 async function validateCwd(value: unknown): Promise<
-  { cwd: string; allowedRoots: Set<string> } | { response: NextResponse }
+  { cwd: string } | { response: NextResponse }
 > {
   const result = await validateMcpProject(value);
   if (isMcpEntryRefusal(result)) return { response: NextResponse.json(result.body, { status: result.status }) };
   return result;
 }
 
-async function listProjectMcpServers(agentDir: string, cwd: string, allowedRoots: Set<string>): Promise<ProjectMcpListing> {
+async function listProjectMcpServers(agentDir: string, cwd: string): Promise<ProjectMcpListing> {
   try {
-    const { file, servers } = await readProjectMcpServers({ agentDir, cwd, allowedRoots });
+    const { file, servers } = await readProjectMcpServers({ agentDir, cwd });
     return { mcpFile: file, mcpServers: servers };
   } catch (error) {
     return { mcpServers: [], mcpError: errorMessage(error) };
@@ -59,7 +53,7 @@ export async function GET(req: Request) {
   const agentDir = getAgentDir();
   // Listed whatever the trust store says: the listing does not depend on it,
   // and a dialog left without one would offer Trust with nothing listed.
-  const listing = await listProjectMcpServers(agentDir, result.cwd, result.allowedRoots);
+  const listing = await listProjectMcpServers(agentDir, result.cwd);
   try {
     return NextResponse.json({ ...getProjectTrustStatus(result.cwd, agentDir), ...listing } satisfies ProjectTrustResponse);
   } catch (error) {

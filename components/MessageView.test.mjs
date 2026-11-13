@@ -13,6 +13,7 @@ const jiti = createJiti(import.meta.url, {
 await installEnglishTestLocale(jiti);
 const en = testTranslator("en");
 const {
+  AssistantMessageHeader,
   MessageView,
   TurnResourcesPanel,
   getEditNavigationEntryId,
@@ -32,6 +33,27 @@ function renderMessage(message, props = {}) {
     ),
   );
 }
+
+test("streaming headers keep a stable line and only show non-empty metrics", () => {
+  const renderHeader = (props) => renderToStaticMarkup(React.createElement(
+    I18nProvider, null, React.createElement(AssistantMessageHeader, { modelName: "Test Model", ...props }),
+  ));
+  for (const props of [{}, { estimatedTokens: 0, tps: 20 }]) {
+    const html = renderHeader(props);
+    assert.match(html, />Test Model<\/span>/);
+    assert.doesNotMatch(html, /t\/s|Estimated token count while streaming/);
+  }
+  const tokensOnly = renderHeader({ estimatedTokens: 100 });
+  assert.match(tokensOnly, />100<\/span>/);
+  assert.doesNotMatch(tokensOnly, /t\/s/);
+  const streaming = renderHeader({ estimatedTokens: 1234567, tps: 12345.6 });
+  assert.match(streaming, />1234567<\/span>/);
+  assert.match(streaming, /12345\.6 t\/s/);
+
+  const message = { role: "assistant", provider: "test", model: "model", content: [{ type: "text", text: "Response" }] };
+  assert.doesNotMatch(renderMessage(message), /Estimated token count while streaming/);
+  assert.match(renderMessage(message, { isStreaming: true }), /Estimated token count while streaming/);
+});
 
 test("marks visible user and assistant text for session search", () => {
   const userHtml = renderMessage({ role: "user", content: "visible user text" });
@@ -685,6 +707,19 @@ test("renders custom-message images as buttons that open a larger preview", () =
 
   assert.match(html, /<button[^>]+aria-label="(Preview image|预览图片|Open image preview)"[^>]*>/);
   assert.match(html, /<img[^>]+src="data:image\/png;base64,YWJj"/);
+});
+
+test("extension text keeps terminal layout without changing peer collaboration or remote media", () => {
+  const content = "Status\n  │ ready │\n  └───────┘";
+  const extension = renderMessage({ role: "custom", customType: "extension", content, display: true });
+  assert.match(extension, /class="markdown-body markdown-custom-message is-terminal-layout"/);
+  assert.match(extension, /Status<br\/> {2}│ ready │<br\/> {2}└───────┘/);
+  const remote = renderMessage({ role: "custom", customType: "extension", content: "![chart](/Volumes/project/chart.png)", display: true }, {
+    sessionId: "session-1", remotePeer: "air",
+  });
+  assert.match(remote, /\/api\/remote\/files\/Volumes\/project\/chart\.png\?type=read&amp;sessionId=session-1&amp;peer=air/);
+  const peer = renderMessage({ role: "custom", customType: "pi-web:session-peer", content, display: true });
+  assert.doesNotMatch(peer, /is-terminal-layout/);
 });
 
 test("renders native peer messages as a collapsible Agent collaboration card", () => {

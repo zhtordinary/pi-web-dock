@@ -4,11 +4,9 @@ import test from "node:test";
 
 const source = await readFile(new URL("./[...path]/route.ts", import.meta.url), "utf8");
 
-test("HTML preview resources keep the existing file authorization boundary", () => {
-  assert.match(source, /getAllowedFileRoots/);
-  assert.match(source, /isFilePathAllowed\(filePath, allowedRoots\)/);
-  assert.match(source, /isExistingFilePathAllowed\(filePath, allowedRoots\)/);
-  assert.doesNotMatch(source, /isFilePathReferencedBySession/);
+test("HTML preview resources follow operating-system permissions", () => {
+  assert.doesNotMatch(source, /getAllowedFileRoots|isFilePathAllowed|isFilePathReferencedBySession/);
+  assert.match(source, /Invalid HTML preview resource path/);
 });
 
 test("HTML preview resources are bounded and served inline without sniffing", () => {

@@ -16,7 +16,7 @@ export const log = await jiti.import("../lib/quick-ask-log.ts");
 export const context = await jiti.import("../lib/quick-ask-context.ts");
 export const observers = await jiti.import("../lib/quick-ask-observer.ts");
 const zhCNLocale = await jiti.import("../lib/i18n/messages/zh-CN.ts");
-const { QuickAskRuntime } = await jiti.import("../lib/quick-ask-runtime.ts");
+const { QuickAskRuntime, getClosingQuickAsk } = await jiti.import("../lib/quick-ask-runtime.ts");
 const { acquireSessionRuntimeOwnership } = await jiti.import("../lib/session-runtime-ownership.ts");
 const eventStream = await jiti.import("../lib/quick-ask-event-stream.ts");
 const routeSource = await readFile(new URL("../app/api/sessions/[id]/quick-ask/route.ts", import.meta.url), "utf8");
@@ -59,7 +59,7 @@ export async function quickAskFixture(options = {}) {
   const file = manager.getSessionFile();
   const state = { visible: true, closed: false, mainRunning: false, creates: 0, starts: 0, disposes: 0, aborts: 0, shutdowns: 0 };
   const runs = [];
-  const tools = [{ name: "fixture-tool", description: "Declared but never executable in Side Ask", parameters: { type: "object", properties: {} } }];
+  const tools = [{ name: "fixture-tool", description: "Declared by a fixture host without an execution session", parameters: { type: "object", properties: {} } }];
   const system = options.system ?? createInitialSystemMessage("Stable synthetic instructions", tools);
   const methods = rpcSource.slice(rpcSource.indexOf("  private appendSideAskRecord("), rpcSource.indexOf("  private currentSystemPrompt("))
     + rpcSource.slice(rpcSource.indexOf("  persistSessionFileNow("), rpcSource.indexOf("  onEvent("));
@@ -140,6 +140,7 @@ export async function quickAskFixture(options = {}) {
       startRpcSession: async () => { state.starts++; state.visible = true; return { session: owner }; } },
     "@/lib/quick-ask-context": context, "@/lib/quick-ask-log": log,
     "@/lib/quick-ask-storage": storage, "@/lib/quick-ask-event-stream": eventStream,
+    "@/lib/quick-ask-runtime": { getClosingQuickAsk },
     "@/lib/i18n/messages/zh-CN": zhCNLocale,
   };
   const mod = { exports: {} };

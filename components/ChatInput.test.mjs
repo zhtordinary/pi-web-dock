@@ -15,17 +15,20 @@ const jiti = createJiti(import.meta.url, {
 });
 await installEnglishTestLocale(jiti);
 const en = testTranslator("en");
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, filterModelOptionsByProvider, getSlashCommandTrigger, buildSlashCommandValue, buildSlashCommandSelectionValue, buildCustomPromptValue, getCustomPromptsFromResponse, resolveSlashFavoriteLoad, filterSlashCommandsByTab, getSlashTabCounts, sortSlashCommandItems, getSlashCommandFavoriteKey, getSlashCommandDetails, normalizeSlashFavoriteKeys, reorderSlashFavoritesByDrop, isAsciiSlashKey, isSlashCommandInsertionPoint, getUpwardMenuMaxHeight, SlashCommandDetailsDialog, getUserMessageText, getUserMessageDraftImages, getDefaultGenOptions, getSessionGenOptions, insertAtSelection, getEditorSuggestionSuffix, getMarkdownListContinuation, appendTermsToDraft, stripTrailingTerms, createDraftPromptRequestController, canRunBuiltinSlashCommandWhileStreaming, offersBuiltinSlashCommandWhileStreaming, submitsSlashCommandOnEnter, canClearBuiltinCommandInput, hasStreamingMessagePayload } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, filterModelOptionsByProvider, getSlashCommandTrigger, buildSlashCommandValue, buildSlashCommandSelectionValue, buildCustomPromptValue, getCustomPromptsFromResponse, resolveSlashFavoriteLoad, filterSlashCommandsByTab, getSlashTabCounts, sortSlashCommandItems, getSlashCommandFavoriteKey, getSlashCommandDetails, normalizeSlashFavoriteKeys, reorderSlashFavoritesByDrop, isAsciiSlashKey, isSlashCommandInsertionPoint, getUpwardMenuMaxHeight, SlashCommandDetailsDialog, getUserMessageText, getUserMessageDraftImages, getDefaultGenOptions, getSessionGenOptions, insertAtSelection, getEditorSuggestionSuffix, getMarkdownListContinuation, appendTermsToDraft, stripTrailingTerms, createDraftPromptRequestController, canRunBuiltinSlashCommandWhileStreaming, offersBuiltinSlashCommandWhileStreaming, submitsSlashCommandOnEnter, canClearBuiltinCommandInput, hasStreamingMessagePayload, withQuoteContext } = await jiti.import("./ChatInput.tsx");
 const { getMarkdownListContinuation: getMarkdownListEdit } = await jiti.import("../lib/markdown-list-continuation.ts");
 const { isBareMcpCommand } = await jiti.import("../lib/mcp-command.ts");
 const { buildAtInsertText, extractAtQuery } = await jiti.import("../lib/file-fuzzy.ts");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+const draftPromptSource = await readFile(new URL("./chat-input-draft-prompts.ts", import.meta.url), "utf8");
+const promptLifecycleSource = `${chatInputSource}\n${draftPromptSource}`;
 const slashDetailsSurfaceSource = await readFile(new URL("./SlashCommandDetailsSurface.tsx", import.meta.url), "utf8");
 const fileViewerModalSource = await readFile(new URL("./FileViewerModal.tsx", import.meta.url), "utf8");
 const globalsCssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const chatWindowSourceForTest = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+const useAgentSessionSourceForTest = await readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8");
 
 test("inserts newline at the current selection without losing surrounding draft", () => {
   assert.deepEqual(insertAtSelection("alpha beta", 5, 5, "\n"), {
@@ -36,6 +39,55 @@ test("inserts newline at the current selection without losing surrounding draft"
     value: "\n beta",
     cursor: 1,
   });
+});
+
+test("recovers a browser-dropped text paste without duplicating native or image insertion", () => {
+  const source = ts.createSourceFile("ChatInput.tsx", chatInputSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findHandler(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "handlePaste") return node.initializer.arguments[0];
+    return ts.forEachChild(node, findHandler);
+  }
+  const script = new Script(ts.transpileModule(findHandler(source).getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+
+  function paste({ text, inputFollows = false, editBeforeTimeout = false, switchTarget = false, image = false }) {
+    const timers = [];
+    const inserted = [];
+    const files = [];
+    const pendingPasteRef = { current: null };
+    const textarea = { value: "a draft", selectionStart: 2, selectionEnd: 5, isConnected: true };
+    const handler = script.runInNewContext({
+      processImageFiles: (next) => files.push(...next),
+      pendingPasteRef,
+      replaceTextareaRange: (ta, start, end, value) => inserted.push([ta, start, end, value]),
+      setTimeout: (callback, delay) => { timers.push([callback, delay]); },
+    });
+    const nativeEvent = { defaultPrevented: false };
+    handler({
+      clipboardData: {
+        items: image ? [{ type: "image/png", getAsFile: () => "image-file" }] : [],
+        getData: (kind) => kind === "text/plain" ? text : "",
+      },
+      currentTarget: textarea,
+      nativeEvent,
+      preventDefault: () => { nativeEvent.defaultPrevented = true; },
+    });
+    if (inputFollows || switchTarget) pendingPasteRef.current = null;
+    if (editBeforeTimeout) textarea.value = "new user edit";
+    for (const [callback, delay] of timers) {
+      assert.equal(delay, 0);
+      callback();
+    }
+    return { inserted: inserted.map(([, start, end, value]) => [start, end, value]), files, prevented: nativeEvent.defaultPrevented };
+  }
+
+  assert.deepEqual(paste({ text: "dictated", inputFollows: true }), { inserted: [], files: [], prevented: false });
+  assert.deepEqual(paste({ text: "dictated" }), { inserted: [[2, 5, "dictated"]], files: [], prevented: false });
+  assert.deepEqual(paste({ text: "dictated", editBeforeTimeout: true }), { inserted: [], files: [], prevented: false });
+  assert.deepEqual(paste({ text: "dictated", switchTarget: true }), { inserted: [], files: [], prevented: false });
+  assert.deepEqual(paste({ text: "picture", image: true }), { inserted: [], files: ["image-file"], prevented: true });
+  assert.deepEqual(paste({ text: "" }), { inserted: [], files: [], prevented: false });
 });
 
 test("shows only the untyped suffix of a compatible editor suggestion", () => {
@@ -116,6 +168,15 @@ test("button and typed slash share the searchable panel", () => {
   assert.match(chatInputSource, /activeSlashTab === "all" && favoriteCommands\.length > 0/);
 });
 
+test("retries slash resources after the session resource list is reset while the panel stays open", () => {
+  assert.match(chatInputSource, /slashCommandsReloadKey\?: number/);
+  assert.match(chatInputSource, /slashCommandsRequestedRef\.current = false;\s*\}, \[slashCommandsReloadKey, sessionId, cwd, remotePeer\]\);/);
+  assert.match(chatInputSource, /\[slashQuery, slashMenuOpenedByButton, onLoadSlashCommands, slashCommandsReloadKey, sessionId, cwd, remotePeer\]/);
+  assert.match(chatWindowSourceForTest, /slashCommandsReloadKey=\{slashCommandsReloadKey\}/);
+  assert.match(useAgentSessionSourceForTest, /const \[slashCommandsReloadKey, setSlashCommandsReloadKey\] = useState\(0\);/);
+  assert.match(useAgentSessionSourceForTest, /setSlashCommandsReloadKey\(\(value\) => value \+ 1\);/);
+});
+
 test("opens the slash command panel directly without changing composer text or selection", () => {
   const handler = chatInputSource.match(/const openSlashCommandMenu = useCallback\(\(\) => \{[\s\S]*?\n  \}, \[\]\);/);
   assert.ok(handler, "the slash button should use a dedicated open action");
@@ -166,13 +227,13 @@ test("both slash entry actions select custom prompts", () => {
 });
 
 test("offers prompt diagnosis and rewrite inside the composer", () => {
-  assert.match(chatInputSource, /analyze_question_draft/);
-  assert.match(chatInputSource, /DraftQuestionAnalysisDialog/);
-  assert.match(chatInputSource, /draftAnalysisDialogOpen/);
-  assert.match(chatInputSource, /contextMode: mode/);
-  assert.match(chatInputSource, /type: "rewrite_question"/);
-  assert.match(chatInputSource, /type: "rewrite_ste100"/);
-  assert.match(chatInputSource, /createDraftPromptRequestController\(/);
+  assert.match(promptLifecycleSource, /analyze_question_draft/);
+  assert.match(promptLifecycleSource, /DraftQuestionAnalysisDialog/);
+  assert.match(promptLifecycleSource, /draftAnalysisDialogOpen/);
+  assert.match(promptLifecycleSource, /contextMode: mode/);
+  assert.match(promptLifecycleSource, /type: "rewrite_question"/);
+  assert.match(promptLifecycleSource, /type: "rewrite_ste100"/);
+  assert.match(promptLifecycleSource, /createDraftPromptRequestController\(/);
   assert.match(chatInputSource, /draftSte100Rewrite/);
   assert.match(chatInputSource, /chat\.promptToolsSte100/);
   const termRewriteHandler = chatInputSource.slice(chatInputSource.indexOf("const runDraftRewrite"), chatInputSource.indexOf("const runDraftSte100Rewrite"));
@@ -679,6 +740,7 @@ test("generation-option writes do not block ordinary prompt admission", async ()
     value: "发布",
     attachedImages: [],
     quotes: [],
+    withQuoteContext,
     onAudioUnlock() {},
     isStreaming: false,
     statePending: false,
@@ -908,6 +970,10 @@ test("filters hidden providers from the model selector", () => {
     filterModelOptionsByProvider(options, new Set(["Sub2API Grok"])),
     [options[0], options[2]],
   );
+  assert.deepEqual(
+    filterModelOptionsByProvider(options, new Set(["Sub2API Grok"]), options[1]),
+    [options[0], options[1], options[2]],
+  );
 });
 
 test("caps an upward menu to the visible space above its anchor", () => {
@@ -972,6 +1038,7 @@ test("while a run streams, a bare /mcp opens Settings or is queued as before", a
       valueRef: { current: value },
       attachedImagesRef: { current: images },
       quotesRef: { current: quotes },
+      withQuoteContext,
       hasStreamingMessagePayload,
       onAudioUnlock() {},
       clearInput() { calls.cleared += 1; },
@@ -1006,6 +1073,8 @@ test("handleSend lets a handled /mcp through while streaming and sends an unowne
     const handleSend = chatInputCallback("handleSend", {
       value,
       attachedImages: [],
+      quotes: [],
+      withQuoteContext,
       onAudioUnlock() {},
       isStreaming,
       statePending: false,
@@ -1157,6 +1226,25 @@ test("preserves duplicate image attachments when restoring a submission", () => 
   const restored = mergeRestoredSubmissionDraft("", [image, image], "", [image]);
 
   assert.deepEqual(restored.images, [image, image, image]);
+});
+
+test("keeps all recovery images and the historical edit identity in storage", () => {
+  const images = Array.from({ length: 12 }, () => ({ data: "AQID", mimeType: "image/png" }));
+  const restored = mergeRestoredSubmissionDraft("old", images.slice(0, 6), "new", images.slice(6));
+  assert.equal(restored.images.length, 12);
+  const key = "history-edit-draft";
+  clearDraft(key);
+  setDraft(key, { ...restored, historyEdit: { entryId: "old-entry", clientMessageId: "edit-client" } });
+  assert.deepEqual(getDraft(key).historyEdit, { entryId: "old-entry", clientMessageId: "edit-client" });
+  assert.equal(getDraft(key).images.length, 12);
+  setDraft(key, { ...getDraft(key), historyEdit: null });
+  assert.equal(getDraft(key).historyEdit, undefined);
+  clearDraft(key);
+});
+
+test("does not re-trim recovered images when rebuilding the composer", () => {
+  assert.doesNotMatch(chatInputSource, /function draftImagesToAttachedImages[\s\S]*?slice\(0, MAX_ATTACHED_IMAGES\)/);
+  assert.match(chatInputSource, /const restoredImages = images\?\.length[\s\S]*?\[\.\.\.draftImagesToAttachedImages\(images\), \.\.\.attachedImagesRef\.current\]/);
 });
 
 test("moves a provisional new-session draft to the real session key", () => {
@@ -1348,7 +1436,7 @@ test("streaming model reasoning and Fast controls remain enabled until a configu
 
 test("user draft injection focuses committed value and explicitly selects its final character", () => {
   const effect = chatInputSource.slice(chatInputSource.indexOf("    const pending = pendingDraftFocusRef.current;"), chatInputSource.indexOf("  useImperativeHandle(ref"));
-  assert.match(effect, /pending.key !== draftKey \|\| pending.value !== value/);
+  assert.match(effect, /!sameDraftKey\(pending.key, draftKey\) \|\| pending.value !== value/);
   assert.match(effect, /ta.focus\(\)/);
   assert.match(effect, /ta.setSelectionRange\(ta.value.length, ta.value.length\)/);
   assert.match(effect, /resizeChatInput\(ta, true\)/);
@@ -1642,7 +1730,7 @@ test("an unowned MCP command queues its captured message without clearing a newe
   const context = {
     value: "/mcp", attachedImages: images, quotes: [],
     valueRef: { current: "/mcp" }, attachedImagesRef: { current: images },
-    quotesRef: { current: [] }, hasStreamingMessagePayload,
+    quotesRef: { current: [] }, withQuoteContext, hasStreamingMessagePayload,
     onAudioUnlock() {}, onBuiltinCommand() {},
     canRunBuiltinSlashCommandWhileStreaming, isBareMcpCommand,
     runBuiltinCommand: () => new Promise(r => { resolve = r; }),
@@ -1675,6 +1763,7 @@ test("queues selected conversation without typed text", () => {
   const context = {
     value: "", attachedImages: images, quotes,
     valueRef: { current: "" }, attachedImagesRef: { current: images }, quotesRef: { current: quotes },
+    withQuoteContext,
     hasStreamingMessagePayload,
     onAudioUnlock() {},
     clearInput() { cleared++; },
@@ -1705,6 +1794,7 @@ test("queues a message with only an attached image", () => {
   const context = {
     value: "", attachedImages: images, quotes,
     valueRef: { current: "" }, attachedImagesRef: { current: images }, quotesRef: { current: quotes },
+    withQuoteContext,
     hasStreamingMessagePayload,
     onAudioUnlock() {},
     clearInput() { cleared++; },

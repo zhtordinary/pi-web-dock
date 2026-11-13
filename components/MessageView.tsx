@@ -180,6 +180,11 @@ function SafeMarkdownBody({ children, className, ...props }: ComponentProps<type
 // push the conversation off screen; overflow scrolls inside the bubble.
 const USER_BUBBLE_MAX_HEIGHT = 300;
 
+// The session identifier is part of the fixed Reader API path.
+function isSafeQuestionAnalysisSessionId(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && !/[/?#\u0000-\u001f]/.test(value);
+}
+
 interface Props {
   message: AgentMessage;
   isStreaming?: boolean;
@@ -226,6 +231,8 @@ interface Props {
   compactError?: string | null;
   onStartSideBranch?: (entryId: string, previewText: string, beforeEntryId?: string) => void;
   isSideBranch?: boolean;
+  /** Optional QA probe for counting production component renders. */
+  renderProbe?: (component: "ChatWindow" | "MessageView" | "StreamingReply", entryId?: string, streaming?: boolean) => void;
 }
 
 function formatTime(ts?: number): string | null {
@@ -274,7 +281,8 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, previousEntryId, isFirstUserMessage = false, onEditContent, onCancelEdit, isEditing, showTimestamp, sessionId, questionAnalysisJob, questionDraftView, remotePeer, imageGenerationCosts, calculatedCost, compactionCost, compactionContext, turnUsage, turnResources, responseDurationMs, modelWaitPercent, writtenFiles, turnDurationMs, onCompact, isCompacting, compactError, onStartSideBranch, isSideBranch }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, previousEntryId, isFirstUserMessage = false, onEditContent, onCancelEdit, isEditing, showTimestamp, sessionId, questionAnalysisJob, questionDraftView, remotePeer, imageGenerationCosts, calculatedCost, compactionCost, compactionContext, turnUsage, turnResources, responseDurationMs, modelWaitPercent, writtenFiles, turnDurationMs, onCompact, isCompacting, compactError, onStartSideBranch, isSideBranch, renderProbe }: Props) {
+  renderProbe?.("MessageView", entryId, Boolean(isStreaming));
   if (message.role === "user") {
     if (isSubagentWakeMessage(message)) return null;
     return <UserMessageView message={message as UserMessage} cwd={cwd} sessionId={sessionId} questionAnalysisJob={questionAnalysisJob} questionDraftView={questionDraftView} remotePeer={remotePeer} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} previousEntryId={previousEntryId} isFirstUserMessage={isFirstUserMessage} onEditContent={onEditContent} onCancelEdit={onCancelEdit} isEditing={isEditing} onStartSideBranch={onStartSideBranch} />;
@@ -323,6 +331,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.questionDraftView === next.questionDraftView
     && prev.onStartSideBranch === next.onStartSideBranch
     && prev.isSideBranch === next.isSideBranch
+    && prev.renderProbe === next.renderProbe
     && prev.writtenFiles === next.writtenFiles
     && prev.turnDurationMs === next.turnDurationMs
     && prev.onCompact === next.onCompact
@@ -516,7 +525,7 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
   }, []);
 
   const pollQuestionAnalysisJob = useCallback(async (jobId: string, mode: QuestionAnalysisMode) => {
-    if (!sessionId || !entryId) return;
+    if (!sessionId || !entryId || !jobId || !isSafeQuestionAnalysisSessionId(sessionId)) return;
     questionAnalysisPollRef.current?.abort();
     const controller = new AbortController();
     questionAnalysisPollRef.current = controller;
@@ -525,7 +534,11 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
       if (controller.signal.aborted) return;
       try {
         const params = new URLSearchParams({ entryId, jobId });
-        const res = await fetch(apiPathForPeer(remotePeer, `sessions/${encodeURIComponent(sessionId)}/question-analysis?${params}`), {
+        const questionAnalysisPath = apiPathForPeer(
+          remotePeer,
+          `sessions/${encodeURIComponent(sessionId)}/question-analysis?${params.toString()}`,
+        );
+        const res = await fetch(questionAnalysisPath, {
           cache: "no-store",
           signal: controller.signal,
         });
@@ -784,7 +797,8 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
           }}>
             <button
               onClick={copyContent}
-               title={t("i18n.copyMessage")}
+              title={t("i18n.copyMessage")}
+              aria-label={copied ? t("i18n.copied") : t("i18n.copyMessage")}
               style={{
                 display: "flex", alignItems: "center", gap: 4,
                 padding: "3px 8px", height: 22,
@@ -809,7 +823,7 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                 </svg>
               )}
-               {copied ? t("i18n.copied") : t("i18n.copy")}
+              <span className="message-action-label">{copied ? t("i18n.copied") : t("i18n.copy")}</span>
             </button>
             <button
               type="button"
@@ -838,7 +852,7 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
                 <path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Z" />
                 <path d="m19 16 .7 2.3L22 19l-.7-2.3L16 19l2.3-.7L19 16Z" />
               </svg>
-              {analysisButtonLabel}
+              <span className="message-action-label">{analysisButtonLabel}</span>
             </button>
           </div>
           {(canFork || canNavigate || canEdit || canCancelEdit) && (
@@ -855,6 +869,7 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
                     });
                   }}
                   title={canSideBranch ? t("chat.startSideBranchTitle") : t("message.pullBackEditTitle")}
+                  aria-label={canSideBranch ? t("chat.startSideBranchTitle") : t("message.pullBackEditTitle")}
                   style={{
                     display: "flex", alignItems: "center", gap: 4,
                     padding: "3px 8px", height: 22,
@@ -875,7 +890,7 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
                     <circle cx="6" cy="18" r="3" />
                     <path d="M18 9a9 9 0 0 1-9 9" />
                   </svg>
-                  {isFirstUserMessage ? t("message.pullBackEdit") : t("message.inPageFork")}
+                  <span className="message-action-label">{isFirstUserMessage ? t("message.pullBackEdit") : t("message.inPageFork")}</span>
                 </button>
               )}
               {canCancelEdit && (
@@ -898,7 +913,7 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
                     <path d="M6 6l12 12M18 6L6 18" />
                   </svg>
-                  {t("i18n.cancel")}
+                  <span className="message-action-label">{t("i18n.cancel")}</span>
                 </button>
               )}
               {canFork && (
@@ -906,6 +921,7 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
                   onClick={() => { onFork!(entryId!); }}
                   disabled={forking}
                   title={forking ? t("message.creatingIndependentSession") : t("message.newSessionForkTitle")}
+                  aria-label={forking ? t("message.creatingIndependentSession") : t("message.newSessionForkTitle")}
                   style={{
                     display: "flex", alignItems: "center", gap: 4,
                     padding: "3px 8px", height: 22,
@@ -927,12 +943,12 @@ function UserMessageView({ message, cwd, sessionId, questionAnalysisJob, questio
                     <path d="M18 9v1a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9" />
                     <path d="M12 12v3" />
                   </svg>
-                  {t("message.newSessionFork")}
+                  <span className="message-action-label">{t("message.newSessionFork")}</span>
                 </button>
               )}
             </div>
           )}
-          {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
+          {time && <span style={{ fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap" }}>{time}</span>}
         </div>
       )}
       {questionAnalysisOpen && questionAnalysis.status !== "idle" && (
@@ -1139,6 +1155,37 @@ function QuestionAnalysisDialog({ labels, mode, canUseContext, onModeChange, onC
   );
 }
 
+export function AssistantMessageHeader({ modelName, estimatedTokens = 0, tps = null }: {
+  modelName?: string;
+  estimatedTokens?: number;
+  tps?: number | null;
+}) {
+  const { t } = useI18n();
+  const background = tps !== null
+    ? (tps >= 50 ? "#53b3cb" : tps >= 30 ? "#9bc53d" : tps >= 15 ? "#f9c22e" : "#e01a4f")
+    : undefined;
+  return (
+    <div style={{ fontSize: 11, lineHeight: 1.5, minHeight: "calc(1.5em + 2px)", color: "var(--text-dim)", marginBottom: 4, display: "flex", alignItems: "center", gap: 6, fontVariantNumeric: "tabular-nums" }}>
+      {modelName && <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{modelName}</span>}
+      {estimatedTokens > 0 && (
+        <span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0, whiteSpace: "nowrap", color: "var(--text)" }} title={t("i18n.estimatedTokens")}>
+          <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
+            </svg>
+            <span style={{ minWidth: "calc(6ch + 1px)" }}>{estimatedTokens}</span>
+          </span>
+          {tps !== null && (
+            <span style={{ marginLeft: 6, padding: "1px 6px", minWidth: "calc(9ch + 1px)", boxSizing: "content-box", textAlign: "center", borderRadius: 4, background, color: "#fff", fontSize: 11, fontWeight: 400 }}>
+              {tps.toFixed(1)} t/s
+            </span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function AssistantMessageView({
   message,
   isStreaming,
@@ -1341,47 +1388,11 @@ function AssistantMessageView({
 
   return (
     <div className="chat-message chat-message-assistant" style={{ marginBottom: 16 }}>
-      {/* Model label */}
-      <div
-        style={{
-          fontSize: 11,
-          color: "var(--text-dim)",
-          marginBottom: 4,
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-        }}
-      >
-        {message.provider && (
-          <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
-        )}
-        {isStreaming && (() => {
-          const est = Math.round(estimatedTokens);
-          return (
-            <>
-
-              {est > 0 && (
-                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title={t("i18n.estimatedTokens")}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                    {est}
-                  </span>
-                  {tps !== null && (() => {
-                    const bg = tps >= 50 ? "#53b3cb" : tps >= 30 ? "#9bc53d" : tps >= 15 ? "#f9c22e" : "#e01a4f";
-                    return (
-                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: bg, color: "#fff", fontSize: 11, fontWeight: 400 }}>
-                        {tps.toFixed(1)} t/s
-                      </span>
-                    );
-                  })()}
-                </span>
-              )}
-            </>
-          );
-        })()}
-      </div>
+      <AssistantMessageHeader
+        modelName={message.provider ? (modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model) : undefined}
+        estimatedTokens={isStreaming ? Math.round(estimatedTokens) : 0}
+        tps={isStreaming ? tps : null}
+      />
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {isStreaming && blockItems.length === 0 && (
@@ -1494,6 +1505,7 @@ function AssistantMessageView({
               className="chat-message-action"
               onClick={() => onStartSideBranch(entryId, textContent || "")}
               title={t("chat.startSideBranchTitle")}
+              aria-label={t("chat.startSideBranchTitle")}
               style={{
                 display: "flex", alignItems: "center", gap: 4,
                 padding: "3px 8px", height: 22,
@@ -1514,7 +1526,7 @@ function AssistantMessageView({
                 <circle cx="6" cy="18" r="3" />
                 <path d="M18 9a9 9 0 0 1-9 9" />
               </svg>
-              {t("message.inPageFork")}
+              <span className="message-action-label">{t("message.inPageFork")}</span>
             </button>
           )}
           {onFork && entryId && !isStreaming && (
@@ -1523,6 +1535,7 @@ function AssistantMessageView({
               onClick={() => { onFork(entryId); }}
               disabled={forking}
               title={forking ? t("message.creatingIndependentSession") : t("message.newSessionForkTitle")}
+              aria-label={forking ? t("message.creatingIndependentSession") : t("message.newSessionForkTitle")}
               style={{
                 display: "flex", alignItems: "center", gap: 4,
                 padding: "3px 8px", height: 22,
@@ -1544,7 +1557,7 @@ function AssistantMessageView({
                 <path d="M18 9v1a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9" />
                 <path d="M12 12v3" />
               </svg>
-              {t("message.newSessionFork")}
+              <span className="message-action-label">{t("message.newSessionFork")}</span>
             </button>
           )}
           {textContent && !isStreaming && (
@@ -1552,6 +1565,7 @@ function AssistantMessageView({
               className="chat-message-action"
               onClick={copyContent}
               title={t("i18n.copyMessage")}
+              aria-label={copied ? t("i18n.copied") : t("i18n.copyMessage")}
               style={{
                 display: "flex", alignItems: "center", gap: 4,
                 padding: "3px 8px", height: 22,
@@ -1576,7 +1590,7 @@ function AssistantMessageView({
                   <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                 </svg>
               )}
-              {copied ? t("i18n.copied") : t("i18n.copy")}
+              <span className="message-action-label">{copied ? t("i18n.copied") : t("i18n.copy")}</span>
             </button>
           )}
         </div>
@@ -2526,7 +2540,7 @@ function CustomMessageView({ message, cwd, sessionId, remotePeer, onOpenFile }: 
                 ))}
               </div>
             )}
-             {text ? <MarkdownBody className="markdown-custom-message" cwd={cwd} remotePeer={remotePeer} sessionId={sessionId} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noMessage")}</span>}
+             {text ? <MarkdownBody className={`markdown-custom-message${isAgentCollaboration ? "" : " is-terminal-layout"}`} keepTextLayout={!isAgentCollaboration} cwd={cwd} remotePeer={remotePeer} sessionId={sessionId} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noMessage")}</span>}
           </div>
         ) : (
           <button

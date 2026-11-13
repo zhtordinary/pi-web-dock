@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
-import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
+import { isWindowsAbsolutePath } from "@/lib/paths";
 import { getGitCommitDetail, getGitHistory } from "@/lib/git-changes";
 import { isApiRequestAllowed } from "@/lib/request-security";
 
@@ -25,10 +25,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "hash must be a Git commit hash" }, { status: 400 });
     }
 
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
     let stat: fs.Stats;
     try {
       stat = fs.statSync(cwd);

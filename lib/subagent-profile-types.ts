@@ -5,9 +5,23 @@ export type SubagentModelSourceScope = "user" | "project" | "provider";
 
 export const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type SubagentThinkingLevel = typeof VALID_THINKING_LEVELS[number];
+export type ReaderSubagentCodemode = "inherit" | "on" | "off";
+export type ReaderSubagentMcp = "on" | "off";
+
+/** Reader-native capability settings; context and background are projected from the profile-wide defaults. */
+export interface ReaderNativeProfileOptions {
+  loadSkills: boolean;
+  loadExtensions: boolean;
+  codemode: ReaderSubagentCodemode;
+  mcp: ReaderSubagentMcp;
+  maxTurns?: number;
+  promptMode?: "append" | "replace";
+  inheritContext: boolean;
+  runInBackground: boolean;
+}
 
 export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
-export const READ_ONLY_TOOLS = ["read", "bash", "grep", "find", "ls"] as const;
+export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 
 export interface SubagentProfile {
   name: string;
@@ -29,6 +43,8 @@ export interface SubagentProfile {
   modelSourceScope?: SubagentModelSourceScope;
   /** Editable Pi/Reader user override, deliberately separate from the effective model. */
   modelOverride?: string;
+  /** Reader-native execution options, kept separate from pi-subagents fields. */
+  reader?: ReaderNativeProfileOptions;
   thinking?: string;
   /** false explicitly clears a native runtime profile pin and follows the parent session. */
   thinkingOverride?: string | false;
@@ -39,5 +55,7 @@ export interface SubagentProfile {
   inheritGlobalContext: boolean;
   inheritSkills: boolean;
   acceptanceRole?: "read-only" | "writer";
+  /** Source identity used only while saving a copy; never a filesystem path. */
+  copyFrom?: { scope: AgentScope; name: string };
   filePath?: string;
 }

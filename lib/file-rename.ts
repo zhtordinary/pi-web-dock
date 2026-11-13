@@ -304,11 +304,36 @@ export function renamePathNoClobberSync(
 
   try {
     const sourceStat = fs.lstatSync(sourcePath);
-    if (!sourceStat.isFile() && !sourceStat.isDirectory()) {
-      throw new Error("Only files and folders can be renamed");
+    if (!sourceStat.isFile() && !sourceStat.isDirectory() && !sourceStat.isSymbolicLink()) {
+      throw new Error("Only files, folders, and symbolic links can be renamed");
     }
 
     options.beforeReservation?.();
+
+    if (sourceStat.isSymbolicLink()) {
+      const link = fs.readlinkSync(sourcePath);
+      let type: "file" | "dir" = "file";
+      try { if (fs.statSync(sourcePath).isDirectory()) type = "dir"; } catch { /* dangling link */ }
+      try {
+        fs.symlinkSync(link, targetPath, type);
+      } catch (error) {
+        if (isCollisionError(error)) throw new FileRenameCollisionError();
+        throw error;
+      }
+      const created = fs.lstatSync(targetPath);
+      try {
+        options.afterFileLink?.();
+        if (!sameDirectoryEntry(fs.lstatSync(sourcePath), sourceStat)
+          || !sameDirectoryEntry(fs.lstatSync(targetPath), created)) throw new FileRenameCollisionError();
+        fs.unlinkSync(sourcePath);
+      } catch (error) {
+        try {
+          if (sameDirectoryEntry(fs.lstatSync(targetPath), created)) fs.unlinkSync(targetPath);
+        } catch { /* preserve a destination no longer owned by this operation */ }
+        throw error;
+      }
+      return;
+    }
 
     if (sourceStat.isFile()) {
       try {

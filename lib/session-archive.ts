@@ -485,6 +485,84 @@ export function deletePiSessionTree(
   }
 }
 
+/** The writer sidecar is runtime coordination, not a persisted child transcript. */
+const SESSION_WRITER_SIDECAR = "session.jsonl.writer.sqlite";
+
+function hasPersistentSessionFiles(root: string): boolean {
+  return existsSync(root) && isRealDirectory(root) && listSessionFiles(root).length > 0;
+}
+
+function isIgnorableWriterResidue(path: string): boolean {
+  let stat;
+  try { stat = lstatSync(path); } catch { return false; }
+  if (stat.isSymbolicLink()) return false;
+  if (stat.isFile()) return basename(path) === SESSION_WRITER_SIDECAR;
+  if (!stat.isDirectory()) return false;
+  let entries;
+  try { entries = readdirSync(path, { withFileTypes: true }); } catch { return false; }
+  return entries.every((entry) => isIgnorableWriterResidue(join(path, entry.name)));
+}
+
+function assertMergeableChildRoot(root: string, label: string, targetCollision = false): void {
+  let entries;
+  try { entries = readdirSync(root, { withFileTypes: true }); }
+  catch { throw new SessionArchiveConflictError(`Cannot inspect ${label} child tree: ${root}`); }
+  const reject = (entryPath: string) => {
+    throw new SessionArchiveConflictError(targetCollision
+      ? `Session child ${label} target already exists: ${root}`
+      : `Unexpected ${label} child residue: ${entryPath}`);
+  };
+  for (const entry of entries) {
+    const entryPath = join(root, entry.name);
+    if (entry.isSymbolicLink()) reject(entryPath);
+    if (entry.isDirectory()) {
+      if (hasPersistentSessionFiles(entryPath) || isIgnorableWriterResidue(entryPath)) continue;
+      reject(entryPath);
+    } else if (!isIgnorableWriterResidue(entryPath)) {
+      reject(entryPath);
+    }
+  }
+}
+
+interface MovedChildEntry {
+  sourcePath: string;
+  targetPath: string;
+}
+
+/**
+ * Merge disjoint persisted child runs left by a legacy child-only move. A
+ * child run that exists on both sides is ambiguous and remains fail-closed;
+ * writer sidecars alone are ignored because they are not session history.
+ */
+function mergeExistingChildRoot(sourceRoot: string, targetRoot: string, targetLabel: string): MovedChildEntry[] {
+  if (!isRealDirectory(sourceRoot) || !isRealDirectory(targetRoot)) {
+    throw new SessionArchiveConflictError(`Session child ${targetLabel} target is not a directory: ${targetRoot}`);
+  }
+  if (!hasPersistentSessionFiles(sourceRoot)) {
+    assertMergeableChildRoot(sourceRoot, "source");
+    assertMergeableChildRoot(targetRoot, targetLabel, true);
+    return [];
+  }
+  assertMergeableChildRoot(sourceRoot, "source");
+  assertMergeableChildRoot(targetRoot, targetLabel, true);
+  const moved: MovedChildEntry[] = [];
+  for (const entry of readdirSync(sourceRoot, { withFileTypes: true })) {
+    const sourcePath = join(sourceRoot, entry.name);
+    if (!entry.isDirectory() || !hasPersistentSessionFiles(sourcePath)) continue;
+    const targetPath = join(targetRoot, entry.name);
+    if (existsSync(targetPath)) {
+      if (!isRealDirectory(targetPath)) {
+        throw new SessionArchiveConflictError(`Session child ${targetLabel} target already exists: ${targetPath}`);
+      }
+      moved.push(...mergeExistingChildRoot(sourcePath, targetPath, targetLabel));
+      continue;
+    }
+    renameSync(sourcePath, targetPath);
+    moved.push({ sourcePath, targetPath });
+  }
+  return moved;
+}
+
 /** Move a Pi session jsonl and its parent-owned persistent child session tree. */
 export function movePiSessionFile(
   filePath: string,
@@ -506,11 +584,17 @@ export function movePiSessionFile(
     if (root.isTarget) return filePath;
     const targetPath = join(targetRoot, rel);
     const sourceChildRoot = join(dirname(filePath), basename(filePath, ".jsonl"));
-    const childExists = existsSync(sourceChildRoot);
-    if (childExists && !isRealDirectory(sourceChildRoot)) {
+    const sourceChildRootExists = existsSync(sourceChildRoot);
+    if (sourceChildRootExists && !isRealDirectory(sourceChildRoot)) {
       throw new Error(`Session child path exists but is not a directory: ${sourceChildRoot}`);
     }
     const targetChildRoot = join(dirname(targetPath), basename(targetPath, ".jsonl"));
+    const targetChildRootExists = existsSync(targetChildRoot);
+    if (targetChildRootExists && !isRealDirectory(targetChildRoot)) {
+      throw new Error(`Session child ${targetLabel} target is not a directory: ${targetChildRoot}`);
+    }
+    const sourceChildHasPersistentFiles = hasPersistentSessionFiles(sourceChildRoot);
+    const targetChildHasPersistentFiles = hasPersistentSessionFiles(targetChildRoot);
     if (!existsSync(filePath)) {
       if (existsSync(targetPath)) return targetPath;
       throw new Error(`Session file not found: ${filePath}`);
@@ -540,11 +624,11 @@ export function movePiSessionFile(
           // The move has not happened yet, or its target was recreated by a
           // late writer. Preserve the residue and continue with the session.
           quarantineArchiveCollision(targetPath, "stale-fragment");
-        } else if (!childExists || existsSync(targetChildRoot)) {
+        } else if (!sourceChildHasPersistentFiles || targetChildHasPersistentFiles) {
           // The move already completed; preserve the residue and settle on the
-          // path that still holds the session. The child tree must be either
-          // absent or already at the target, otherwise the earlier move was
-          // interrupted and the stranded subtree keeps this fail-closed.
+          // path that still holds the session. A persisted child tree at the
+          // target proves the bundle move completed; writer sidecars alone do
+          // not make the move ambiguous.
           quarantineArchiveCollision(filePath, "stale-fragment");
           return targetPath;
         } else {
@@ -553,14 +637,11 @@ export function movePiSessionFile(
       } else if (sourceIsFragment && targetIsFragment) {
         // Neither side is a session: do not guess which residue is the real content.
         throw new SessionArchiveConflictError(`Session ${targetLabel} target already exists: ${targetPath}`);
-      } else if (childExists || existsSync(targetChildRoot)) {
+      } else if (sourceChildHasPersistentFiles || targetChildHasPersistentFiles) {
         throw new SessionArchiveConflictError(`Session child ${targetLabel} target already exists: ${targetChildRoot}`);
       } else {
         return reconcileDuplicateSessionFile(filePath, targetPath);
       }
-    }
-    if (childExists && existsSync(targetChildRoot)) {
-      throw new SessionArchiveConflictError(`Session child ${targetLabel} target already exists: ${targetChildRoot}`);
     }
 
     for (const change of siblingChanges) {
@@ -574,21 +655,29 @@ export function movePiSessionFile(
         throw new Error(`Sibling changed during session move preparation: ${change.path}`);
       }
     }
-    const patches = childExists
-      ? collectSessionHeaderPatches(sourceChildRoot, targetChildRoot, filePath, targetPath)
-      : [];
+    const patches = [
+      ...(sourceChildHasPersistentFiles
+        ? collectSessionHeaderPatches(sourceChildRoot, targetChildRoot, filePath, targetPath)
+        : []),
+      ...(targetChildHasPersistentFiles
+        ? collectSessionHeaderPatches(targetChildRoot, targetChildRoot, filePath, targetPath)
+        : []),
+    ];
     const appliedPatches: SessionHeaderPatch[] = [];
+    const movedChildEntries: MovedChildEntry[] = [];
     let parentMoved = false;
     let childMoved = false;
     try {
       for (const change of siblingChanges) writeFileSync(change.path, change.nextContent);
       mkdirSync(dirname(targetPath), { recursive: true });
-      renameSync(filePath, targetPath);
-      parentMoved = true;
-      if (childExists) {
+      if (sourceChildHasPersistentFiles && targetChildRootExists) {
+        movedChildEntries.push(...mergeExistingChildRoot(sourceChildRoot, targetChildRoot, targetLabel));
+      } else if (sourceChildHasPersistentFiles) {
         renameSync(sourceChildRoot, targetChildRoot);
         childMoved = true;
       }
+      renameSync(filePath, targetPath);
+      parentMoved = true;
       for (const patch of patches) {
         writeFileSync(patch.targetPath, patch.content);
         appliedPatches.push(patch);
@@ -599,6 +688,9 @@ export function movePiSessionFile(
       }
       for (const patch of appliedPatches) {
         try { writeFileSync(patch.targetPath, patch.previousContent); } catch { /* best effort rollback */ }
+      }
+      for (const moved of [...movedChildEntries].reverse()) {
+        try { renameSync(moved.targetPath, moved.sourcePath); } catch { /* preserve original error */ }
       }
       if (childMoved) {
         try { renameSync(targetChildRoot, sourceChildRoot); } catch { /* preserve original error */ }

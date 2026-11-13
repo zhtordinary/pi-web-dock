@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { statSync, type Stats } from "fs";
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
-import { allowFileRoot, getAllowedFileRoots } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { resolveProject } from "@/lib/worktree";
@@ -27,10 +26,6 @@ export async function POST(req: Request) {
     }
 
     const normalizedCwd = normalizeCwd(cwd);
-    if (normalizedCwd === "/" || resolve(normalizedCwd) === "/") {
-      return NextResponse.json({ error: "Root directory cannot be used as project workspace" }, { status: 400 });
-    }
-
     let stat: Stats;
     try {
       stat = statSync(normalizedCwd);
@@ -42,10 +37,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Path is not a directory: ${cwd}` }, { status: 400 });
     }
 
-    if (body.grant === true) {
-      await getAllowedFileRoots();
-      allowFileRoot(normalizedCwd);
-    }
     const project = await resolveProject(normalizedCwd);
     return NextResponse.json({
       success: true,

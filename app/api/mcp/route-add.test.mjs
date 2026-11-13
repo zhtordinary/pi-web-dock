@@ -30,9 +30,7 @@ delete process.env.PI_WEB_DISABLE_MCP;
 await mkdir(agentDir, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { GET, POST } = await jiti.import("./route.ts");
-for (const folder of [trusted, untrusted, fresh, outer, inner, root]) allowFileRoot(folder);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -226,8 +224,10 @@ test("a fresh folder holding a project Pi Web never opened is not offered the st
   assert.equal(existsSync(projectPath(fresh)), false);
 });
 
-test("a folder whose trust would reach other folders is never trusted by the step", async (t) => {
-  // `outer` holds `inner`, a folder Pi Web knows (an allowed root, as a session's folder is).
+test("a folder whose trust would reach other known projects is never trusted by the step", async (t) => {
+  await writeFile(projectsPath, JSON.stringify({ projects: [{ path: inner, addedAt: "2026-01-01" }] }));
+  t.after(() => rm(projectsPath, { force: true }));
+  // `outer` holds `inner`, a project Pi Web knows.
   let response = await add({ text: "npx -y @scope/lint-mcp", scope: "project", cwd: outer, trustFolder: true });
   assert.deepEqual([response.status, response.body.reason], [409, "trust-too-broad"]);
   assert.deepEqual(response.body.breadth, { kind: "contains-folder", path: inner });
@@ -245,7 +245,6 @@ test("a folder whose trust would reach other folders is never trusted by the ste
   // The home folder itself.
   const home = join(root, "home");
   await mkdir(home, { recursive: true });
-  allowFileRoot(home);
   const previousHome = process.env.HOME;
   process.env.HOME = home;
   t.after(() => {
@@ -259,17 +258,15 @@ test("a folder whose trust would reach other folders is never trusted by the ste
   for (const folder of [outer, root, home]) assert.equal(existsSync(projectPath(folder)), false);
 });
 
-test("a known nested project prevents broad trust even when only its parent is a file root", async (t) => {
-  const original = await readFile(policyPath, "utf8");
-  await writeFile(policyPath, JSON.stringify({ version: 1, read: [outer], write: [] }));
+test("a known nested project prevents broad trust without a file permission list", async (t) => {
   await writeFile(projectsPath, JSON.stringify({ projects: [{ path: inner, addedAt: "2026-01-01" }] }));
-  t.after(async () => { await writeFile(policyPath, original); await rm(projectsPath, { force: true }); });
+  t.after(() => rm(projectsPath, { force: true }));
 
   const listed = await (await GET(new Request(`http://localhost/api/mcp?cwd=${encodeURIComponent(outer)}`, { headers: { host: "localhost" } }))).json();
   assert.deepEqual(listed.project.trustFolder, { allowed: false, reason: "trust-too-broad", breadth: { kind: "contains-folder", path: inner } });
   const result = await add({ text: "npx -y @scope/lint-mcp", scope: "project", cwd: outer, trustFolder: true });
   assert.deepEqual([result.status, result.body.reason, result.body.breadth], [409, "trust-too-broad", { kind: "contains-folder", path: inner }]);
-  assert.deepEqual(JSON.parse(await readFile(policyPath, "utf8")).read, [outer], "known projects never expand file access");
+  assert.equal(existsSync(policyPath), false, "known projects do not create a file permissions list");
   assert.deepEqual(await trustFile(), { [trusted]: true });
 });
 

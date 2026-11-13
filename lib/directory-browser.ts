@@ -1,8 +1,8 @@
 import { mkdir, readdir, realpath, stat } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
-import { hasParentDirectorySegment, isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { getFileTreeVisibility } from "./file-tree-visibility";
+import { hasParentDirectorySegment } from "./path-security";
 
 export interface BrowsableDirectory {
   name: string;
@@ -63,19 +63,14 @@ export function isValidDirectoryName(name: string): boolean {
   return Boolean(name) && name !== "." && name !== ".." && !/[\\/\0]/.test(name);
 }
 
-export async function createDirectory(parentDirectory: string, name: string, allowedRoots?: Set<string>): Promise<string> {
+export async function createDirectory(parentDirectory: string, name: string): Promise<string> {
+  if (hasParentDirectorySegment(parentDirectory)) throw Object.assign(new Error("Invalid parent directory"), { code: "EINVAL" });
   const directoryName = name.trim();
   if (!isValidDirectoryName(directoryName)) {
     throw new Error("Directory name must be a single folder name");
   }
 
-  if (allowedRoots && (hasParentDirectorySegment(parentDirectory) || !isPathWithinRoots(normalizeDirectory(parentDirectory), allowedRoots))) {
-    throw Object.assign(new Error("Access denied"), { code: "EACCES" });
-  }
   const resolvedParent = await resolveDirectory(parentDirectory);
-  if (allowedRoots && !isExistingPathWithinRoots(resolvedParent, allowedRoots)) {
-    throw Object.assign(new Error("Access denied"), { code: "EACCES" });
-  }
   const parentStat = await stat(resolvedParent);
   if (!parentStat.isDirectory()) throw new Error("Parent path is not a directory");
 

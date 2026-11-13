@@ -10,6 +10,12 @@ const apiKeyDetail = readerSource.slice(
   readerSource.indexOf("// ── Add provider picker"),
 );
 
+test("provider picker uses the stacked Escape handler, including IME composition", () => {
+  const picker = readerSource.slice(readerSource.indexOf("function AddProviderPicker("), readerSource.indexOf("export function ModelsConfig("));
+  assert.match(picker, /useEffect\(\(\) => listenForStackedDialogEscape\(document, onClose\), \[onClose\]\)/);
+  assert.doesNotMatch(picker, /if \(e\.key === "Escape"\) onClose\(\)/);
+});
+
 test("provider search includes OAuth IDs and model rows display names without changing identity", () => {
   assert.match(readerSource, /!p\.loggedIn && \(!q \|\| p\.name\.toLowerCase\(\)\.includes\(q\) \|\| p\.id\.toLowerCase\(\)\.includes\(q\)\)/);
   assert.match(readerSource, /m\.name\?\.trim\(\) \|\| m\.id \|\| t\("i18n\.newModel"\)/);
@@ -25,6 +31,19 @@ test("provider detail keeps the enable switch after the delete action", () => {
   assert.ok(detail.indexOf('<ConfigButton variant="danger"') < detail.indexOf("<EnabledModelsProviderSwitch"));
 });
 
+test("connected OAuth details keep actions in the header and collapse redundant status space", () => {
+  const oauthDetail = readerSource.slice(
+    readerSource.indexOf("function OAuthDetail"),
+    readerSource.indexOf("// ── API Key detail"),
+  );
+  assert.match(oauthDetail, /gap: provider\.loggedIn && loginState\.phase === "idle" \? 0 : 16/);
+  assert.match(oauthDetail, /<ConfigDetailHeader>[\s\S]*?<ConfigDetailActions>[\s\S]*?handleLogin/);
+  assert.match(oauthDetail, /minHeight: provider\.loggedIn && loginState\.phase === "idle" \? 0 : 48/);
+  assert.ok(oauthDetail.indexOf("<ConfigDetailActions>") < oauthDetail.indexOf("<ProviderUsageSummary"));
+  assert.doesNotMatch(oauthDetail, /Already connected\. You can re-login or disconnect\./);
+  assert.doesNotMatch(oauthDetail, /\{\/\* Actions \*\/\}/);
+});
+
 test("provider-endpoint model import remains an explicit action", () => {
   assert.match(apiKeyDetail, /const refreshManagedModels = useCallback/);
   assert.match(apiKeyDetail, /onImportModels=\{refreshManagedModels\}/);
@@ -36,9 +55,14 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const {
+  copyModelEntry,
+  moveModelEntry,
+  moveProviderEntry,
+  modelDropIndex,
   readApiJson,
   resolveSystemPromptRole,
   renameProviderEntry,
+  sortModelEntries,
   serializeHeaderRows,
   setCompatBool,
   setCompatOverride,
@@ -115,6 +139,12 @@ test("loads combined auth provider lists and falls back for older peers", () => 
   assert.match(source, /if \(hasCombinedApiKeyList\) return;/);
   assert.match(source, /fetch\(apiFor\(remotePeer, "auth\/all-providers"\)\)/);
   assert.match(source, /response\.ok && Array\.isArray\(data\.providers\)/);
+});
+
+test("model routing receives the runtime-discovered model catalog", () => {
+  assert.match(readerSource, /const \[availableModels, setAvailableModels\]/);
+  assert.match(readerSource, /setAvailableModels\(data\.modelList \?\? \[\]\)/);
+  assert.match(readerSource, /<ModelRoutingConfig[\s\S]*availableModels=\{availableModels\}/);
 });
 
 test("custom model config exposes provider-level request headers", () => {
@@ -457,7 +487,19 @@ test("reloads model and auth state when active device changes", () => {
   const configSource = source.slice(source.lastIndexOf("useEffect(() => {", configStart), configEnd);
   assert.ok(configStart >= 0, "model config fetch follows current peer");
   assert.match(configSource, /let cancelled = false/);
-  assert.match(configSource, /\[refreshAuthProviders, remotePeer\]\);/);
+  assert.match(configSource, /\[loadAuthProviders, remotePeer\]\);/);
+  assert.match(configSource, /void loadAuthProviders\(\)/);
+  assert.doesNotMatch(configSource, /refreshEnabledModels\(\)/);
+});
+
+test("defers routing model discovery until the routing tab is visited", () => {
+  const fetchStart = source.indexOf('fetch(apiFor(remotePeer, "models"))');
+  assert.ok(fetchStart >= 0, "routing model discovery request exists");
+  const effectStart = source.lastIndexOf("useEffect(() => {", fetchStart);
+  const effectEnd = source.indexOf("}, [remotePeer, visitedModelTabs]);", fetchStart);
+  const effect = source.slice(effectStart, effectEnd);
+  assert.match(effect, /if \(!visitedModelTabs\.has\("routing"\)\) return;/);
+  assert.match(effect, /setAvailableModels\(\[\]\)/);
 });
 
 test("image providers stay independent while vision candidates follow main-tree fold state", () => {
@@ -481,6 +523,71 @@ test("renaming a provider keeps its place", () => {
   assert.deepEqual(Object.keys(renamed.providers), ["first", "house", "last"]);
   assert.equal(renamed.providers.house, config.providers.stepfun);
   assert.deepEqual(Object.keys(renameProviderEntry(renamed, "house", "stepfun").providers), ["first", "stepfun", "last"]);
+});
+
+test("provider ordering moves entries without changing their identities", () => {
+  const config = {
+    providers: {
+      first: { models: [{ id: "a" }] },
+      second: { models: [{ id: "b" }] },
+      third: { models: [{ id: "c" }] },
+    },
+  };
+  const moved = moveProviderEntry(config, "first", "third", true);
+  assert.deepEqual(moved.order, ["second", "third", "first"]);
+  assert.equal(moved.config.providers.first, config.providers.first);
+  assert.equal(moveProviderEntry(config, "second", "third", false), null);
+});
+
+test("copying a model clones its config and avoids an ID collision in the target provider", () => {
+  const config = {
+    providers: {
+      source: { models: [{ id: "shared", name: "Shared", headers: { "x-test": "1" } }] },
+      target: { models: [{ id: "shared" }] },
+    },
+  };
+  const copied = copyModelEntry(config, "source", 0, "target");
+  assert.equal(copied.targetIndex, 1);
+  assert.equal(copied.config.providers.target.models[1].id, "shared-copy");
+  assert.deepEqual(copied.config.providers.target.models[1].headers, { "x-test": "1" });
+  assert.notEqual(copied.config.providers.target.models[1], config.providers.source.models[0]);
+
+  const sameProvider = copyModelEntry(config, "source", 0, "source");
+  assert.equal(sameProvider.config.providers.source.models.length, 2);
+  assert.equal(sameProvider.config.providers.source.models[1].id, "shared-copy");
+  assert.equal(config.providers.source.models.length, 1);
+});
+
+test("provider rows expose drag ordering and model rows copy within their provider", () => {
+  assert.match(source, /providerDragProps\(pName\)/);
+  assert.match(source, /openModelContextMenu\(pName, i/);
+  const copyStart = source.indexOf("const copyModelToProvider");
+  const copyAction = source.slice(copyStart, source.indexOf("const openModelContextMenu", copyStart));
+  assert.match(copyAction, /copyModelEntry\(config, sourceProviderName, sourceIndex, sourceProviderName\)/);
+  assert.doesNotMatch(copyAction, /currentProviderName/);
+  assert.match(source, /models\.copyModelToProvider/);
+});
+
+test("model ordering moves rows within one provider and keeps the model objects intact", () => {
+  const config = { providers: { fixture: { models: [{ id: "b", name: "Beta" }, { id: "a", name: "Alpha" }, { id: "c", name: "Gamma" }] } } };
+  const moved = moveModelEntry(config, "fixture", 2, 0);
+  assert.deepEqual(moved.order, [2, 0, 1]);
+  assert.deepEqual(moved.config.providers.fixture.models.map((model) => model.id), ["c", "b", "a"]);
+  assert.equal(modelDropIndex(0, 2, true), 2);
+  assert.equal(moveModelEntry(config, "fixture", 1, 1), null);
+});
+
+test("model A-Z sorting uses shown names and preserves stable identity", () => {
+  const config = { providers: { fixture: { models: [{ id: "z", name: "Zulu" }, { id: "a", name: "Alpha" }, { id: "m", name: "" }] } } };
+  const sorted = sortModelEntries(config, "fixture");
+  assert.deepEqual(sorted.config.providers.fixture.models.map((model) => model.id), ["a", "m", "z"]);
+});
+
+test("model settings expose drag, keyboard move and A-Z ordering controls", () => {
+  assert.match(source, /modelDragProps\(pName, i\)/);
+  assert.match(source, /event\.altKey/);
+  assert.match(source, /sortModels\(pName\)/);
+  assert.match(source, /models\.sortByName/);
 });
 
 test("renaming a provider onto another provider's id changes nothing", () => {

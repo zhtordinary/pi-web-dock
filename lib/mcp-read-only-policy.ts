@@ -71,7 +71,7 @@ export function createSubagentMcpPolicyExtension(
   };
 }
 
-export function createReadOnlyMcpPolicyExtension(): InlineExtension {
+export function createReadOnlyMcpPolicyExtension(currentSelection?: () => readonly string[] | undefined): InlineExtension {
   return {
     name: READ_ONLY_MCP_POLICY_EXTENSION_NAME,
     hidden: true,
@@ -81,7 +81,8 @@ export function createReadOnlyMcpPolicyExtension(): InlineExtension {
         const tool = pi.getAllTools().find((candidate) => candidate.name === event.toolName);
         if (!tool || !isMcpTool(tool) || tool.annotations?.readOnlyHint === true) return undefined;
         // Read last: most calls are not MCP calls, and the selection scan walks the session.
-        const selection = readSessionToolSelection(ctx.sessionManager.getEntries() as unknown as SessionEntry[]);
+        const selection = currentSelection ? currentSelection()
+          : readSessionToolSelection(ctx.sessionManager.getEntries() as unknown as SessionEntry[]);
         if (!isReadOnlySelection(selection)) return undefined;
         return { block: true, reason: readOnlyMcpBlockReason(event.toolName) };
       });

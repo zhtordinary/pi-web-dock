@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
-import { resolveMainlineFileContext } from "../lib/file-context.ts";
+import { resolveAgentExecutionContext, resolveMainlineFileContext } from "../lib/file-context.ts";
+import { getFileTabId, openFileTab, replaceFileTab } from "./file-tab-state.ts";
 
 const appPath = process.env.READER_NAVIGATION_SOURCE || new URL("./AppShell.tsx", import.meta.url);
 function parse(name) {
@@ -102,6 +103,8 @@ function harness({ mobile = false, cwd = "/project", embedded = false, parentRea
     localDeviceId: "device-1",
     resourceToolbarOwnedByParent: false,
     closeTalkMap: () => {},
+    clearTalkMapSelection: () => {},
+    cancelWorktreeGraphOpen: () => {},
     applyActivityArchiveView: () => {},
     handleSelectSession: () => {},
     markActivitySessionViewed: () => {},
@@ -311,6 +314,37 @@ function localVector(state, mobile = false) {
   };
 }
 
+
+test("remote Markdown fragment navigation keeps its device context and protects a dirty tab", () => {
+  const h = harness({ cwd: "/local/project" });
+  Object.assign(h.state, {
+    activeCwd: "/local/project",
+    activeTerminalPeerRef: { current: null },
+    activeTerminalCwdRef: { current: null },
+    resolveAgentExecutionContext,
+    getFileTabId,
+    openFileTab,
+    replaceFileTab,
+  });
+  h.state.activePeerIdRef.current = "device-b";
+  const path = "/remote/docs/guide.md";
+  const id = getFileTabId(path, "device-b");
+  const draft = { content: "unsaved", version: "v1" };
+  h.state.fileTabs = [{ id, label: "guide.md", filePath: path, remotePeer: "device-b", cwd: "/remote/project", projectRoot: "/remote/project", dirty: true, viewerRevision: 0, viewerState: { displayMode: "source", wrapLines: true, scrollTop: 0, scrollLeft: 0, editDraft: draft } }];
+  h.state.confirmResult = false;
+  const open = evaluate(declaration("handleOpenFile"), h.scope);
+  const options = { remotePeer: "device-b", cwd: "/remote/project", projectRoot: "/remote/project", sourceSessionId: "remote-session", anchor: "#heading" };
+  open(path, "guide.md", options);
+  assert.equal(h.state.fileTabs[0].viewerState.editDraft, draft);
+  assert.equal(h.state.fileTabs[0].viewerRevision, 0);
+  h.state.confirmResult = true;
+  open(path, "guide.md", options);
+  assert.equal(h.state.fileTabs[0].remotePeer, "device-b");
+  assert.equal(h.state.fileTabs[0].sourceSessionId, "remote-session");
+  assert.equal(h.state.fileTabs[0].anchor, "#heading");
+  assert.equal(h.state.fileTabs[0].viewerState.displayMode, "preview");
+  assert.equal(h.state.fileTabs[0].viewerState.editDraft, undefined);
+});
 
 test("workspace owner rejects stale tab cwd for a new remote peer", () => {
   const h = harness({ cwd: "/local/project" });
@@ -1402,7 +1436,7 @@ function navigationHarness(options = {}) {
   s.window.parent = { postMessage: (message) => s.posted.push(message) };
   s.embeddedIframeRef.current = { contentWindow: { postMessage: (message) => s.posted.push(message) } };
   for (const name of ["selectedSession", "remoteSession", "pendingRestoreMessage", "pendingContextSourceSessionId",
-    "newSessionCwd", "newSessionSubprojectId", "newSessionSubprojectLabel", "sessionKey", "branchTree", "branchActiveLeafId", "systemPrompt",
+    "newSessionCwd", "newSessionWorktreeBinding", "newSessionSubprojectId", "newSessionSubprojectLabel", "sessionKey", "branchTree", "branchActiveLeafId", "systemPrompt",
     "highlightTerm", "initialSessionRestored", "embeddedModalOpen", "embeddedModalKind", "embeddedSlashDetails", "embeddedImagePreview", "embeddedFileViewerOpen"]) {
     s[`set${name[0].toUpperCase()}${name.slice(1)}`] = (value) => { s[name] = typeof value === "function" ? value(s[name]) : value; };
   }
@@ -1410,7 +1444,7 @@ function navigationHarness(options = {}) {
     const node = find(app, (node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
     if (node) s[name] = evaluate(`(() => { ${node.getText(app)}; return ${name}; })()`, h.scope);
   }
-  for (const name of ["invalidateWorkspaceRestore", "clearEmbeddedReaderOwner", "handleSelectSession", "handleNewSession", "handleNewActivitySession", "handleOpenActivitySession", "restoreFromParams", "restoreWithDeviceUrl", "openRemoteSession"]) {
+  for (const name of ["invalidateWorkspaceRestore", "clearEmbeddedReaderOwner", "handleSelectSession", "handleNewSession", "handleNewActivitySession", "selectRemoteActivitySession", "handleOpenActivitySession", "restoreFromParams", "restoreWithDeviceUrl", "openRemoteSession"]) {
     s[name] = evaluate(declaration(name), h.scope);
   }
   return h;

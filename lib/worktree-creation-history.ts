@@ -1,4 +1,4 @@
-import { isAbsolute, normalize } from "node:path";
+import { isAbsolute, normalize, resolve } from "node:path";
 import { normalizeToolCalls } from "./normalize";
 import { shellAssignment, splitShellWords, type ShellWordPart } from "./shell-words";
 import type { SessionEntry, SessionInfo } from "./types";
@@ -12,7 +12,6 @@ export interface WorktreeCreationRecord {
 interface CreationCommand {
   path: string;
   branch?: string;
-  usesVariables: boolean;
 }
 
 // Only recognize individual shell commands; never execute or evaluate history.
@@ -69,14 +68,25 @@ function expandParts(parts: readonly ShellWordPart[], variables: ReadonlyMap<str
   return value;
 }
 
+function resolveCreationPath(rawPath: string, baseDir: string): string | undefined {
+  if (!isAbsolute(baseDir)) return undefined;
+  return normalize(isAbsolute(rawPath) ? rawPath : resolve(baseDir, rawPath));
+}
+
 // shortcut: recognize a limited shell form, extend it only with equally verifiable execution evidence.
-function creationCommand(command: string, worktrees: ReadonlyMap<string, string>, home: string): CreationCommand | undefined {
+function creationCommand(command: string, worktrees: ReadonlyMap<string, string>, home: string, sessionCwd: string): CreationCommand | undefined {
   // Multiple add commands cannot be paired unambiguously with one tool result.
   if ((command.match(/\bworktree\s+add\b/g) ?? []).length !== 1) return undefined;
   const variables = new Map<string, string>([["HOME", home]]);
   for (const fragment of commandFragments(command)) {
     const parsed = splitShellWords(fragment.trim());
-    if (!parsed.ok || parsed.words.length === 0) continue;
+    if (!parsed.ok) {
+      const homeValue = variables.get("HOME");
+      variables.clear();
+      if (homeValue !== undefined) variables.set("HOME", homeValue);
+      continue;
+    }
+    if (parsed.words.length === 0) continue;
     const assignment = parsed.words.length === 1 ? shellAssignment(parsed.words[0]) : undefined;
     if (assignment) {
       const value = expandParts(assignment.value, variables, true);
@@ -89,8 +99,13 @@ function creationCommand(command: string, worktrees: ReadonlyMap<string, string>
     if (first !== "git") continue;
     const words = parsed.words.map((word) => expandParts(word.parts, variables));
     let index = 1;
+    let pathBase = sessionCwd;
     if (words[index] === "-C") {
-      if (words[index + 1] === undefined) continue;
+      const gitDir = words[index + 1];
+      if (gitDir === undefined) continue;
+      const resolvedGitDir = resolveCreationPath(gitDir, sessionCwd);
+      if (!resolvedGitDir) continue;
+      pathBase = resolvedGitDir;
       index += 2;
     }
     if (words[index] !== "worktree" || words[index + 1] !== "add") continue;
@@ -107,14 +122,15 @@ function creationCommand(command: string, worktrees: ReadonlyMap<string, string>
         return undefined;
       }
     }
-    const path = words[index];
-    if (!path || !isAbsolute(path)) return undefined;
-    const registeredPath = worktrees.get(normalize(path));
+    const rawPath = words[index];
+    if (!rawPath) return undefined;
+    const path = resolveCreationPath(rawPath, pathBase);
+    if (!path) return undefined;
+    const registeredPath = worktrees.get(path);
     if (!registeredPath) return undefined;
     return {
       path: registeredPath,
       ...(branch ? { branch } : {}),
-      usesVariables: parsed.words[index].parts.some((part) => part.type === "variable"),
     };
   }
   return undefined;
@@ -129,14 +145,13 @@ function confirmsCreation(output: string, command: CreationCommand): boolean {
   return start >= 0 && head > start
     && (output.match(/Preparing worktree \(/g) ?? []).length === 1
     && !/\bfatal:/i.test(output.slice(start, head))
-    && !/Command exited with code [1-9]/.test(output)
-    && (!command.usesVariables || output.includes(command.path));
+    && !/Command exited with code [1-9]/.test(output);
 }
 
 /** Project evidence from successful bash tool calls, not a current worktree owner. */
 export function findWorktreeCreationRecords(
   entries: readonly SessionEntry[],
-  session: Pick<SessionInfo, "id" | "created">,
+  session: Pick<SessionInfo, "id" | "created" | "cwd">,
   worktreePaths: readonly string[],
   home: string,
 ): WorktreeCreationRecord[] {
@@ -154,7 +169,7 @@ export function findWorktreeCreationRecords(
       if (message.role !== "assistant") continue;
       for (const block of message.content) {
         if (block.type !== "toolCall" || block.toolName !== "bash" || !block.toolCallId || typeof block.input.command !== "string") continue;
-        const command = creationCommand(block.input.command, worktrees, home);
+        const command = creationCommand(block.input.command, worktrees, home, session.cwd);
         if (command) pending.set(block.toolCallId, { ...command, createdAt: entry.timestamp });
       }
     } else if (entry.message.role === "toolResult") {

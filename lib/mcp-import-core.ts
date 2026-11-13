@@ -446,6 +446,7 @@ export interface DraftOAuth {
   clientSecret?: Segment[];
   callbackPort?: number;
   clientName?: Segment[];
+  clientRegistration?: "auto" | "dcr" | "cimd";
   callbackUrl?: Segment[];
   scope?: Segment[];
   authServerMetadataUrl?: Segment[];
@@ -800,11 +801,12 @@ export function finishDraft(draft: ServerDraft): { server: McpImportServer } | {
     const headers: Record<string, string> = {};
     for (const [key, segments] of draft.headers) headers[key] = encoder.encode(["headers", key], segments);
     const oauth: Record<string, unknown> = {};
-    const { clientId, clientSecret, callbackPort, clientName, callbackUrl, scope, authServerMetadataUrl } = draft.oauth;
+    const { clientId, clientSecret, callbackPort, clientName, clientRegistration, callbackUrl, scope, authServerMetadataUrl } = draft.oauth;
     if (clientId) oauth.clientId = encoder.encode(["oauth", "clientId"], clientId);
     if (clientSecret) oauth.clientSecret = encoder.encode(["oauth", "clientSecret"], clientSecret);
     if (callbackPort !== undefined) oauth.callbackPort = callbackPort;
     if (clientName) oauth.clientName = encoder.encode(["oauth", "clientName"], clientName);
+    if (clientRegistration) oauth.clientRegistration = clientRegistration;
     if (callbackUrl) oauth.callbackUrl = encoder.encode(["oauth", "callbackUrl"], callbackUrl);
     if (scope) oauth.scope = encoder.encode(["oauth", "scope"], scope);
     if (authServerMetadataUrl) oauth.authServerMetadataUrl = encoder.encode(["oauth", "authServerMetadataUrl"], authServerMetadataUrl);
@@ -1168,6 +1170,16 @@ function oauthValidationProblem(oauth: unknown): { problem: string; [key: string
   if (oauth.scope !== undefined && typeof oauth.scope !== "string") return { problem: "oauth-scope" };
   if (oauth.clientName !== undefined && (typeof oauth.clientName !== "string" || !oauth.clientName.trim())) {
     return { problem: "oauth-client-name" };
+  }
+  if (oauth.clientRegistration !== undefined && oauth.clientRegistration !== "auto" && oauth.clientRegistration !== "dcr") {
+    if (oauth.clientRegistration !== "cimd") return { problem: "oauth-client-registration", value: String(oauth.clientRegistration) };
+    if (oauth.clientId !== undefined || oauth.clientName !== undefined) return { problem: "oauth-client-registration-client" };
+    if (typeof oauth.callbackUrl === "string") {
+      const callback = parseUrl(oauth.callbackUrl);
+      if (!callback || !["localhost", "127.0.0.1"].includes(callback.hostname) || callback.pathname !== "/callback") {
+        return { problem: "oauth-client-registration-callback" };
+      }
+    }
   }
   if (oauth.authServerMetadataUrl !== undefined && !isMetadataUrl(oauth.authServerMetadataUrl)) {
     return { problem: "auth-server-metadata-url", value: String(oauth.authServerMetadataUrl) };

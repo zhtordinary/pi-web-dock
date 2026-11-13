@@ -35,6 +35,8 @@ export interface SessionCostDetails {
 
 export interface SessionDetailsSnapshot {
   cost?: SessionCostDetails | null;
+  /** Distinguishes a cost still in flight from an unavailable result. */
+  costState?: "loading" | "ready" | "error";
   preview?: SessionHoverPreview | null;
   userQuestions?: string[];
 }
@@ -54,6 +56,8 @@ export interface SessionDetailsRequest {
 type SessionDetailsEntry = {
   snapshot: SessionDetailsSnapshot;
   costPromise?: Promise<SessionCostDetails | null>;
+  cancelCost?: () => void;
+  costConsumers: number;
   previewPromise?: Promise<SessionHoverPreview | null>;
   userQuestionsPromise?: Promise<string[]>;
   previewFetchedAt: number;
@@ -62,12 +66,56 @@ type SessionDetailsEntry = {
 };
 
 const PREVIEW_CACHE_TTL_MS = 15_000;
+const SUMMARY_REQUEST_LIMIT = 4;
 const MAX_ENTRIES = 500;
 const EMPTY_SNAPSHOT: SessionDetailsSnapshot = Object.freeze({});
 const entries = new Map<string, SessionDetailsEntry>();
 
-export function sessionDetailsKey({ sessionId, version = "", peer, modelConfigRevision, costView }: SessionDetailsRequest): string {
-  const parts = [peer ?? "local", sessionId, version];
+type SummaryQueueItem = {
+  run: () => Promise<SessionCostDetails>;
+  resolve: (value: SessionCostDetails | null) => void;
+  reject: (reason: unknown) => void;
+  cancelled: boolean;
+  onCancel: () => void;
+};
+const summaryQueue: SummaryQueueItem[] = [];
+let activeSummaryRequests = 0;
+
+function drainSummaryQueue(): void {
+  while (activeSummaryRequests < SUMMARY_REQUEST_LIMIT && summaryQueue.length > 0) {
+    const item = summaryQueue.shift()!;
+    if (item.cancelled) continue;
+    activeSummaryRequests += 1;
+    void item.run().then(item.resolve, item.reject).finally(() => {
+      activeSummaryRequests -= 1;
+      drainSummaryQueue();
+    });
+  }
+}
+
+function enqueueSummary(run: () => Promise<SessionCostDetails>, onCancel: () => void): { promise: Promise<SessionCostDetails | null>; cancel: () => void } {
+  let item: SummaryQueueItem | null = null;
+  const promise = new Promise<SessionCostDetails | null>((resolve, reject) => {
+    item = { run, resolve, reject, cancelled: false, onCancel };
+    summaryQueue.push(item);
+  });
+  drainSummaryQueue();
+  return {
+    promise,
+    cancel: () => {
+      if (!item || item.cancelled) return;
+      const queued = summaryQueue.indexOf(item);
+      if (queued < 0) return;
+      item.cancelled = true;
+      summaryQueue.splice(queued, 1);
+      item.onCancel();
+      item.resolve(null);
+    },
+  };
+}
+
+export function sessionDetailsKey({ sessionId, version = "", peer, deviceId, modelConfigRevision, costView }: SessionDetailsRequest): string {
+  const parts = [peer ?? deviceId ?? "local", sessionId, version];
   if (modelConfigRevision !== undefined && modelConfigRevision > 0) parts.push(String(modelConfigRevision));
   if (costView === "summary") parts.push("summary");
   return parts.map((value) => encodeURIComponent(value)).join(":");
@@ -81,6 +129,7 @@ function entryForKey(key: string): SessionDetailsEntry {
     snapshot: {},
     previewFetchedAt: 0,
     generation: 0,
+    costConsumers: 0,
     listeners: new Set(),
   };
   entries.set(key, created);
@@ -120,7 +169,10 @@ export function seedSessionDetails(request: SessionDetailsRequest, seed: Session
 }
 
 function costUrl(request: SessionDetailsRequest): string {
-  const query = request.costView === "summary" ? "?view=summary" : "";
+  const params = new URLSearchParams();
+  if (request.costView === "summary") params.set("view", "summary");
+  if (!request.peer && request.deviceId) params.set("deviceId", request.deviceId);
+  const query = params.toString() ? `?${params.toString()}` : "";
   return apiPathForPeer(request.peer, `sessions/${encodeURIComponent(request.sessionId)}/cost${query}`);
 }
 
@@ -374,29 +426,62 @@ function readCostResponse(body: {
 export function ensureSessionCost(request: SessionDetailsRequest): Promise<SessionCostDetails | null> {
   const key = sessionDetailsKey(request);
   const entry = entryForKey(key);
-  if (entry.snapshot.cost !== undefined) return Promise.resolve(entry.snapshot.cost);
+  if (entry.snapshot.cost !== undefined && entry.snapshot.costState !== "error") return Promise.resolve(entry.snapshot.cost);
   if (entry.costPromise) return entry.costPromise;
 
   const generation = entry.generation;
-  const pending = fetch(costUrl(request), { cache: "no-store" })
-    .then(async (response) => {
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return readCostResponse(body);
+  let cancelled = false;
+  const fetchCost = async (): Promise<SessionCostDetails> => {
+    const response = await fetch(costUrl(request), { cache: "no-store" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return readCostResponse(body);
+  };
+  entry.snapshot = { ...entry.snapshot, costState: "loading" };
+  notify(entry);
+  const scheduled = request.costView === "summary"
+    ? enqueueSummary(fetchCost, () => { cancelled = true; })
+    : { promise: fetchCost(), cancel: () => { cancelled = true; } };
+  entry.cancelCost = scheduled.cancel;
+  let failed = false;
+  const pending = scheduled.promise
+    .catch(() => {
+      failed = true;
+      return null;
     })
-    .catch(() => null)
     .then((cost) => {
-      if (entries.get(key) === entry && entry.generation === generation) {
-        entry.snapshot = { ...entry.snapshot, cost };
+      if (!cancelled && entries.get(key) === entry && entry.generation === generation) {
+        entry.snapshot = { ...entry.snapshot, cost, costState: failed ? "error" : "ready" };
         notify(entry);
       }
       return cost;
     })
     .finally(() => {
-      if (entry.costPromise === pending) entry.costPromise = undefined;
+      if (entry.costPromise === pending) {
+        entry.costPromise = undefined;
+        entry.cancelCost = undefined;
+      }
     });
   entry.costPromise = pending;
   return pending;
+}
+
+export function retainSessionCost(request: SessionDetailsRequest): void {
+  const entry = entryForKey(sessionDetailsKey(request));
+  entry.costConsumers += 1;
+}
+
+export function releaseSessionCost(request: SessionDetailsRequest): void {
+  const entry = entries.get(sessionDetailsKey(request));
+  if (!entry) return;
+  entry.costConsumers = Math.max(0, entry.costConsumers - 1);
+  if (entry.costConsumers === 0) entry.cancelCost?.();
+}
+
+/** Cancel a queued summary only when no mounted consumer still needs it. */
+export function cancelSessionCost(request: SessionDetailsRequest): void {
+  const entry = entries.get(sessionDetailsKey(request));
+  if (entry?.costConsumers === 0) entry.cancelCost?.();
 }
 
 export function ensureSessionPreview(request: SessionDetailsRequest): Promise<SessionHoverPreview | null> {
@@ -463,17 +548,28 @@ export function invalidateSessionDetails(request: SessionDetailsRequest): void {
     const key = sessionDetailsKey({ ...request, costView });
     const entry = entries.get(key);
     if (!entry) continue;
+    const consumers = entry.costConsumers;
+    entry.cancelCost?.();
     entry.generation += 1;
     entry.snapshot = {};
     entry.previewFetchedAt = 0;
     entry.costPromise = undefined;
+    entry.cancelCost = undefined;
     entry.previewPromise = undefined;
     entry.userQuestionsPromise = undefined;
-    notify(entry);
+    if (consumers > 0) {
+      void ensureSessionCost({ ...request, costView });
+    } else {
+      notify(entry);
+    }
   }
 }
 
 export function clearSessionDetailsCache(): void {
+  for (const entry of entries.values()) {
+    entry.cancelCost?.();
+    entry.costConsumers = 0;
+  }
   entries.clear();
 }
 

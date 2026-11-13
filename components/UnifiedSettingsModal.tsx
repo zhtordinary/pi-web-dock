@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Sliders, Bot, Sparkles, Plug, Users, MessageSquareQuote, Star, X } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Sliders, Bot, Sparkles, Plug, Users, MessageSquareQuote, Star, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { usePhoneSettingsNavigation } from "@/hooks/usePhoneSettingsNavigation";
 import { notifyEmbeddedModalState } from "@/lib/embedded-modal";
 import { CUSTOM_PROMPTS_CHANGED_EVENT } from "@/lib/custom-prompt-types";
 
-import { ConfigButton } from "./SettingsUi";
+import { ConfigButton, SettingsDetailNavigationContext } from "./SettingsUi";
 import { GeneralConfig } from "./GeneralConfig";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
@@ -46,7 +47,7 @@ export interface UnifiedSettingsModalProps {
   remotePeer?: string;
   quoteSelectionEnabled?: boolean;
   onQuoteSelectionChange?: (enabled: boolean) => void;
-  onOpenFile?: (filePath: string) => void;
+  onOpenFile?: (filePath: string, page?: number, anchor?: string) => void;
   onSessionReloaded?: () => void;
   onUseSkill?: (skillName: string) => void;
   trust?: ProjectTrustStatus | null;
@@ -72,12 +73,15 @@ export function UnifiedSettingsModal({
 }: UnifiedSettingsModalProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const phoneContentRef = useRef<HTMLDivElement>(null);
+  const phoneBackRef = useRef<HTMLButtonElement>(null);
+  const keyboardNavigationRef = useRef(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set([initialTab]));
   const [popupFilePath, setPopupFilePath] = useState<string | null>(null);
 
   // Controllers to track dirty state and perform save / discard on tabs with explicit forms
-  const generalControllerRef = useRef<SettingsPanelController | null>(null);
   const modelsControllerRef = useRef<SettingsPanelController | null>(null);
   const agentsControllerRef = useRef<SettingsPanelController | null>(null);
 
@@ -99,7 +103,6 @@ export function UnifiedSettingsModal({
   }, []);
 
   const getActiveController = useCallback((): SettingsPanelController | null => {
-    if (activeTab === "general") return generalControllerRef.current;
     if (activeTab === "models") return modelsControllerRef.current;
     if (activeTab === "agents") return agentsControllerRef.current;
     return null;
@@ -114,17 +117,62 @@ export function UnifiedSettingsModal({
     onClose();
   }, [getActiveController, onClose]);
 
+  const phone = usePhoneSettingsNavigation(
+    isMobile,
+    initialTab === "general",
+    () => {
+      if (getActiveController()?.isDirty()) {
+        setPendingAction({ type: "close" });
+        return false;
+      }
+      onClose();
+      return true;
+    },
+    () => Boolean(popupFilePath) || Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'))
+      .some((dialog) => dialog !== dialogRef.current && dialog.getClientRects().length > 0),
+  );
+  const detailNavigation = useMemo(() => ({ openDetail: phone.openDetail, closeDetail: phone.closeDetail }), [phone.openDetail, phone.closeDetail]);
+  const previousPhoneView = useRef({ isMobile, level: phone.level });
+
+  useLayoutEffect(() => {
+    const previous = previousPhoneView.current;
+    previousPhoneView.current = { isMobile, level: phone.level };
+    const content = phoneContentRef.current;
+    if (!isMobile || !previous.isMobile || previous.level === phone.level || !content || keyboardNavigationRef.current
+      || typeof content.animate !== "function" || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const depth = { home: 0, section: 1, detail: 2 };
+    const forward = depth[phone.level] > depth[previous.level];
+    const animation = content.animate(forward
+      ? [{ transform: "translateX(100%)" }, { transform: "translateX(0)" }]
+      : [{ transform: "translateX(-30%)", opacity: 0.4 }, { transform: "translateX(0)", opacity: 1 }],
+    { duration: 280, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+    const title = dialogRef.current?.querySelector<HTMLElement>(".settings-phone-title");
+    const titleAnimation = title?.animate?.([{ opacity: 0 }, { opacity: 1 }], { duration: 220 });
+    return () => { animation.cancel(); titleAnimation?.cancel(); };
+  }, [isMobile, phone.level]);
+
+  useEffect(() => {
+    const focused = document.activeElement;
+    if (!isMobile || !(focused instanceof HTMLElement) || !dialogRef.current?.contains(focused) || focused.getClientRects().length > 0) return;
+    if (phone.level === "home") dialogRef.current.querySelector<HTMLButtonElement>(".settings-phone-home-item")?.focus();
+    else phoneBackRef.current?.focus();
+  }, [isMobile, phone.level]);
+
   const requestSwitchTab = useCallback(
     (targetTab: SettingsTab) => {
-      if (targetTab === activeTab) return;
+      if (targetTab === activeTab) {
+        phone.enterSection();
+        return;
+      }
       const controller = getActiveController();
       if (controller?.isDirty()) {
         setPendingAction({ type: "switchTab", target: targetTab });
         return;
       }
       switchTab(targetTab);
+      phone.enterSection();
     },
-    [activeTab, getActiveController, switchTab],
+    [activeTab, getActiveController, phone.enterSection, switchTab],
   );
 
   const handleContinueEditing = useCallback(() => {
@@ -140,8 +188,9 @@ export function UnifiedSettingsModal({
       onClose();
     } else if (action?.type === "switchTab") {
       switchTab(action.target);
+      phone.enterSection();
     }
-  }, [getActiveController, onClose, pendingAction, switchTab]);
+  }, [getActiveController, onClose, pendingAction, phone.enterSection, switchTab]);
 
   const handleSavePending = useCallback(async () => {
     const controller = getActiveController();
@@ -159,6 +208,7 @@ export function UnifiedSettingsModal({
           onClose();
         } else if (action?.type === "switchTab") {
           switchTab(action.target);
+          phone.enterSection();
         }
       } else {
         // Stay on current panel so the error message is visible
@@ -169,7 +219,7 @@ export function UnifiedSettingsModal({
     } finally {
       setActionSaving(false);
     }
-  }, [getActiveController, onClose, pendingAction, switchTab]);
+  }, [getActiveController, onClose, pendingAction, phone.enterSection, switchTab]);
 
   useEffect(() => {
     notifyEmbeddedModalState(true);
@@ -178,7 +228,7 @@ export function UnifiedSettingsModal({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing && e.keyCode !== 229) {
         if (pendingAction) {
           e.preventDefault();
           setPendingAction(null);
@@ -212,11 +262,19 @@ export function UnifiedSettingsModal({
     [t],
   );
 
+  const sectionTitle = tabs.find((tab) => tab.id === activeTab)?.label ?? t("settings.title");
+  const phoneTitle = phone.level === "home" ? t("settings.title") : phone.level === "detail" && phone.title ? phone.title : sectionTitle;
+  const backTitle = phone.level === "detail" ? sectionTitle : t("settings.title");
+
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label={t("settings.title")}
+      data-phone-settings-level={isMobile ? phone.level : undefined}
+      onKeyDownCapture={() => { keyboardNavigationRef.current = true; }}
+      onPointerDownCapture={() => { keyboardNavigationRef.current = false; }}
       style={{
         position: "fixed",
         inset: 0,
@@ -259,6 +317,7 @@ export function UnifiedSettingsModal({
             background: "var(--bg-panel)",
             flexShrink: 0,
             gap: 8,
+            position: "relative",
           }}
         >
           {/* Left: Title + Tabs */}
@@ -273,11 +332,17 @@ export function UnifiedSettingsModal({
               scrollbarWidth: "none",
             }}
           >
-            <span style={{ fontSize: isMobile ? 14 : 15, fontWeight: 700, color: "var(--text)", flexShrink: 0 }}>
-              {t("settings.title")}
+            {isMobile && phone.level !== "home" && (
+              <button ref={phoneBackRef} type="button" className="settings-phone-back" onClick={phone.back} aria-label={`${t("files.back")}: ${backTitle}`}>
+                <ChevronLeft size={19} aria-hidden="true" />
+                <span>{backTitle}</span>
+              </button>
+            )}
+            <span className={isMobile ? "settings-phone-title" : undefined} aria-live={isMobile ? "polite" : undefined} style={{ fontSize: isMobile ? 14 : 15, fontWeight: 700, color: "var(--text)", flexShrink: 0 }}>
+              {isMobile ? phoneTitle : t("settings.title")}
             </span>
 
-            <nav
+            {!isMobile && <nav
               aria-label={t("settings.title")}
               style={{
                 display: "flex",
@@ -310,7 +375,7 @@ export function UnifiedSettingsModal({
                       cursor: "pointer",
                       whiteSpace: "nowrap",
                       flexShrink: 0,
-                      transition: "all 0.12s ease",
+                      transition: "background-color 0.12s ease, color 0.12s ease",
                     }}
                   >
                     <Icon size={isMobile ? 13 : 15} strokeWidth={isCurrent ? 2.2 : 1.8} />
@@ -318,7 +383,7 @@ export function UnifiedSettingsModal({
                   </button>
                 );
               })}
-            </nav>
+            </nav>}
           </div>
 
           {/* Right: Close button */}
@@ -344,7 +409,10 @@ export function UnifiedSettingsModal({
         </div>
 
         {/* Tab Host Panes */}
+        <SettingsDetailNavigationContext.Provider value={detailNavigation}>
         <div
+          ref={phoneContentRef}
+          data-phone-settings-content="true"
           style={{
             flex: 1,
             minHeight: 0,
@@ -354,10 +422,24 @@ export function UnifiedSettingsModal({
             position: "relative",
           }}
         >
+          {isMobile && phone.level === "home" && (
+            <nav className="settings-phone-home" aria-label={t("settings.title")}>
+              {tabs.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <button key={tab.id} type="button" className="settings-phone-home-item" onClick={() => requestSwitchTab(tab.id)}>
+                    <Icon size={19} aria-hidden="true" />
+                    <span>{tab.label}</span>
+                    <ChevronRight size={18} aria-hidden="true" />
+                  </button>
+                );
+              })}
+            </nav>
+          )}
           {visitedTabs.has("general") && (
             <div
               style={{
-                display: activeTab === "general" ? "flex" : "none",
+                display: activeTab === "general" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflowY: "auto",
@@ -368,7 +450,6 @@ export function UnifiedSettingsModal({
                 quoteSelectionEnabled={quoteSelectionEnabled}
                 onQuoteSelectionChange={onQuoteSelectionChange}
                 remotePeer={remotePeer}
-                controllerRef={generalControllerRef}
               />
             </div>
           )}
@@ -376,7 +457,7 @@ export function UnifiedSettingsModal({
           {visitedTabs.has("models") && (
             <div
               style={{
-                display: activeTab === "models" ? "flex" : "none",
+                display: activeTab === "models" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflow: "hidden",
@@ -398,7 +479,7 @@ export function UnifiedSettingsModal({
           {visitedTabs.has("skills") && (
             <div
               style={{
-                display: activeTab === "skills" ? "flex" : "none",
+                display: activeTab === "skills" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflow: "hidden",
@@ -423,7 +504,7 @@ export function UnifiedSettingsModal({
           {visitedTabs.has("plugins") && (
             <div
               style={{
-                display: activeTab === "plugins" ? "flex" : "none",
+                display: activeTab === "plugins" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflow: "hidden",
@@ -446,7 +527,7 @@ export function UnifiedSettingsModal({
           {visitedTabs.has("agents") && (
             <div
               style={{
-                display: activeTab === "agents" ? "flex" : "none",
+                display: activeTab === "agents" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflow: "hidden",
@@ -459,6 +540,7 @@ export function UnifiedSettingsModal({
                 cwd={cwd ?? ""}
                 sessionId={sessionId ?? null}
                 remotePeer={remotePeer}
+                onReloaded={onSessionReloaded}
                 onOpenFile={setPopupFilePath}
                 active={activeTab === "agents"}
                 controllerRef={agentsControllerRef}
@@ -469,7 +551,7 @@ export function UnifiedSettingsModal({
           {visitedTabs.has("prompts") && (
             <div
               style={{
-                display: activeTab === "prompts" ? "flex" : "none",
+                display: activeTab === "prompts" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflow: "hidden",
@@ -488,7 +570,7 @@ export function UnifiedSettingsModal({
           {visitedTabs.has("favorites") && (
             <div
               style={{
-                display: activeTab === "favorites" ? "flex" : "none",
+                display: activeTab === "favorites" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflow: "hidden",
@@ -509,7 +591,7 @@ export function UnifiedSettingsModal({
           {visitedTabs.has("mcp") && (
             <div
               style={{
-                display: activeTab === "mcp" ? "flex" : "none",
+                display: activeTab === "mcp" && (!isMobile || phone.level !== "home") ? "flex" : "none",
                 flex: 1,
                 minHeight: 0,
                 overflow: "hidden",
@@ -528,6 +610,7 @@ export function UnifiedSettingsModal({
             </div>
           )}
         </div>
+        </SettingsDetailNavigationContext.Provider>
       </div>
 
       {/* In-app confirmation dialog on unsaved changes */}
@@ -647,11 +730,11 @@ export function UnifiedSettingsModal({
           filePath={popupFilePath}
           cwd={cwd}
           remotePeer={remotePeer}
-          onOpenInReaderView={() => {
-            const targetPath = popupFilePath;
+          sourceSessionId={sessionId}
+          onOpenInReaderView={(targetPath, page, anchor) => {
             setPopupFilePath(null);
             onClose();
-            _onOpenFile?.(targetPath);
+            _onOpenFile?.(targetPath, page, anchor);
           }}
           onClose={() => {
             setPopupFilePath(null);

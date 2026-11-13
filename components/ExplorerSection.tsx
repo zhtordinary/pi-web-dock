@@ -187,6 +187,7 @@ export function ExplorerSection({
   const [uploadBusy, setUploadBusy] = useState(false);
   const [fileActionMenuOpen, setFileActionMenuOpen] = useState(false);
   const [hiddenActive, setHiddenActive] = useState(true);
+  const [filterSettingsOpen, setFilterSettingsOpen] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRef = useRef<FileExplorerHandle>(null);
@@ -206,11 +207,13 @@ export function ExplorerSection({
     previousCwdRef.current = cwd;
     setExplorerCwd(cwd);
     setHideGitIgnored(false);
+    setFilterSettingsOpen(false);
     setPendingLocatePath(null);
   }, [cwd]);
 
   useEffect(() => {
     setHideGitIgnored(false);
+    setFilterSettingsOpen(false);
   }, [explorerCwd]);
 
   // Files inside the selected workspace use its normal tree root. External
@@ -475,24 +478,18 @@ export function ExplorerSection({
           </div>
         )}
         {showActions && (
-          <button
-            type="button"
-            onClick={() => explorerRef.current?.openFilterSettings()}
+          <ToolbarIconButton
+            onClick={() => explorerRef.current?.toggleFilterSettings()}
             title={t("files.filterSettings")}
-            aria-label={t("files.filterSettings")}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 26, height: 26, padding: 0,
-              background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", borderRadius: 5, flexShrink: 0,
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+            ariaPressed={filterSettingsOpen}
+            color={filterSettingsOpen ? "var(--accent)" : "var(--text-dim)"}
+            background={filterSettingsOpen ? "var(--bg-selected)" : "none"}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="3" />
               <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
             </svg>
-          </button>
+          </ToolbarIconButton>
         )}
         <ToolbarIconButton
           onClick={() => explorerRef.current?.toggleHiddenVisibility()}
@@ -781,6 +778,7 @@ export function ExplorerSection({
               onUploadBusyChange={setUploadBusy}
               changesCollapsed={changesCollapsed}
               onHiddenChange={setHiddenActive}
+              onFilterSettingsOpenChange={setFilterSettingsOpen}
               onFilterChange={handleExplorerFilterChange}
             />
           </div>

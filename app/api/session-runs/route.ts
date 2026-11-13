@@ -68,10 +68,15 @@ const SESSION_METADATA_CACHE_TTL_MS = 15_000;
 
 type SessionEntryWithMetadata = {
   type?: string;
+  customType?: unknown;
+  data?: unknown;
   modelId?: unknown;
+  provider?: unknown;
   timestamp?: unknown;
   message?: {
     role?: unknown;
+    provider?: unknown;
+    model?: unknown;
     stopReason?: unknown;
     content?: unknown;
   };
@@ -97,8 +102,18 @@ async function sessionMetadata(session: SessionInfo): Promise<{ modelName?: stri
     const entries = getSessionEntries(session.path);
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index] as SessionEntryWithMetadata;
+      if (!modelName && entry.type === "message" && entry.message?.role === "assistant") {
+        const provider = typeof entry.message.provider === "string" ? entry.message.provider.trim() : "";
+        const model = typeof entry.message.model === "string" ? entry.message.model.trim() : "";
+        if (model) modelName = provider ? `${provider}/${model}` : model;
+      }
       if (!modelName && entry.type === "model_change" && typeof entry.modelId === "string" && entry.modelId.trim()) {
-        modelName = entry.modelId.trim();
+        const provider = typeof entry.provider === "string" ? entry.provider.trim() : "";
+        modelName = provider ? `${provider}/${entry.modelId.trim()}` : entry.modelId.trim();
+      }
+      if (!modelName && entry.type === "custom" && entry.customType === "pi-web:subagent" && entry.data && typeof entry.data === "object" && !Array.isArray(entry.data)) {
+        const model = (entry.data as { model?: unknown }).model;
+        if (typeof model === "string" && model.trim()) modelName = model.trim();
       }
       if (!lastRecap) lastRecap = readSessionRecap(entry);
       if (entry.type !== "message" || !entry.message) continue;
@@ -145,12 +160,29 @@ function sessionActivity(
   const rpc = getRpcSession(session.id);
   const persistedUnattended = getPersistedUnattendedState(session.id);
   const execution = rpc?.getExecutionState() ?? siblingExecution;
-  const active = runningSessionIds.has(session.id) || subagentActivity?.active === true || execution?.active === true;
+  const persistedSubagentStatus = session.relation?.kind === "subagent" ? session.relation.status : undefined;
+  // A terminal runtime observation is newer evidence than a stale relation status
+  // inferred from a child transcript that may have been interrupted or oversized.
+  const subagentTerminalObserved = subagentActivity?.active !== true && subagentActivity?.terminalState !== undefined;
+  const persistedSubagentActive = !subagentTerminalObserved
+    && (persistedSubagentStatus === "starting" || persistedSubagentStatus === "queued" || persistedSubagentStatus === "running");
+  const subagentTerminalFailure = subagentActivity?.terminalState === "failed"
+    || subagentActivity?.terminalState === "partial"
+    || subagentActivity?.terminalState === "rejected"
+    || persistedSubagentStatus === "failed";
+  const subagentTerminalAbort = subagentActivity?.terminalState === "stopped"
+    || persistedSubagentStatus === "aborted"
+    || persistedSubagentStatus === "interrupted";
+  const subagentJustCompleted = subagentActivity?.terminalState === "completed"
+    && typeof subagentActivity.terminalAt === "number"
+    && nowMs - subagentActivity.terminalAt >= 0
+    && nowMs - subagentActivity.terminalAt <= JUST_COMPLETED_MS;
+  const active = runningSessionIds.has(session.id) || subagentActivity?.active === true || persistedSubagentActive || execution?.active === true;
   // Only pending extension UI requests (ask_user/select/confirm/input/editor)
   // are user-facing waits. A child supervisor request is internal activity.
   const waitingForUser = waitingForUserSessionIds.has(session.id);
   // Current runtime activity must never rewrite a historical run or invent an ID.
-  const liveExecuting = rpc?.isStreaming === true || rpc?.isPromptRunning === true || subagentActivity?.active === true
+  const liveExecuting = rpc?.isStreaming === true || rpc?.isPromptRunning === true || subagentActivity?.active === true || persistedSubagentActive
     || execution?.parentActive === true || Boolean(execution?.backgroundRunIds.length);
   const { runs: sessionRuns, currentActivity } = projectSessionRuns(records, session.id, liveExecuting);
   const latestRun = sessionRuns[0] ?? null;
@@ -173,11 +205,16 @@ function sessionActivity(
   if (waitingForUser) status = "waiting_user";
   else if (retrying) status = "retrying";
   else if (liveExecuting || latestRun?.status === "running") status = "running";
+  // A parent's persisted run is authoritative. Child terminal observations fill
+  // a row with no parent run, but cannot rewrite the parent's own outcome.
   else if (latestRun?.status === "failed") status = "failed";
   else if (latestRun?.status === "aborted") status = "aborted";
   else if (latestRun?.status === "unknown" && metadata.hasErrorTail) status = "failed";
   else if (latestRun?.status === "unknown") status = "unknown";
   else if (Number.isFinite(completedAt) && nowMs - completedAt <= JUST_COMPLETED_MS) status = "just_completed";
+  else if (!latestRun && subagentTerminalFailure) status = "failed";
+  else if (!latestRun && subagentTerminalAbort) status = "aborted";
+  else if (!latestRun && subagentJustCompleted) status = "just_completed";
 
   // SessionInfo.modified is the timestamp of the newest user or assistant message.
   const lastActivityAt = session.modified;

@@ -16,6 +16,8 @@ export async function GET(
   const session = existing?.isAlive() ? existing : null;
   if (session) await assertRpcSessionRuntimeBinding(session);
   const sessionFile = session?.sessionFile || await resolveSessionPathReadOnly(id);
+  const holderValue = new URL(req.url).searchParams.get("holder");
+  const holder = holderValue === "foreground" || holderValue === "background" ? holderValue : null;
   const stream = createAgentEventStream(req, id, Promise.resolve(session), sessionFile || undefined, (publish) => {
     const inspect = () => {
       const live = getRpcSession(id);
@@ -27,7 +29,7 @@ export async function GET(
     });
     inspect();
     return unsubscribe;
-  });
+  }, { holder });
 
   return new Response(stream, {
     headers: {

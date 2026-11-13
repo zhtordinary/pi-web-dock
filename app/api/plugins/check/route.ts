@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { PluginScope } from "@/lib/api-types";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { checkPluginUpdates } from "@/lib/plugin-updates";
 
 export const dynamic = "force-dynamic";
@@ -14,9 +14,8 @@ export async function POST(req: Request) {
     };
     const cwd = typeof body.cwd === "string" ? body.cwd : "";
     if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    if (!isExistingDirectory(cwd)) {
+      return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
     }
 
     const source = typeof body.source === "string" ? body.source : undefined;

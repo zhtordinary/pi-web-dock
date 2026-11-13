@@ -17,13 +17,13 @@ export function buildSubagentPromptPlan(options: {
   const chatOnly = options.tools.length === 0 && !options.loadSkills && !options.loadExtensions;
   const replacePrompt = options.promptMode === "replace";
   const appendSystemPrompt = [options.profileSystemPrompt];
-  if (options.inheritedParentContext && !chatOnly) {
+  if (options.inheritedParentContext && !chatOnly && !replacePrompt) {
     appendSystemPrompt.push(options.inheritedParentContext);
   }
   return {
     chatOnly,
     appendSystemPrompt,
-    delegatedTask: options.inheritedParentContext && chatOnly
+    delegatedTask: options.inheritedParentContext && (chatOnly || replacePrompt)
       ? `${options.task}\n\n${options.inheritedParentContext}`
       : options.task,
     ...(chatOnly || replacePrompt ? { exactSystemPrompt: options.profileSystemPrompt } : {}),

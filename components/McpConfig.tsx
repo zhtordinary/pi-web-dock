@@ -62,6 +62,7 @@ import {
   ConfigStatusDot,
   ConfigSwitch,
   ConfigTrustNotice,
+  useSettingsDetailNavigation,
 } from "./SettingsUi";
 import {
   MCP_CODEMODE_MODE_DESCRIPTION_KEYS,
@@ -304,6 +305,8 @@ function McpConfigForOwner({
   onTrustProject,
   onProjectTrustChanged,
 }: McpConfigProps) {
+  const { t } = useI18n();
+  const navigation = useSettingsDetailNavigation();
   const apiFetch = useMemo(() => mcpFetchForPeer(remotePeer), [remotePeer]);
   const [load, setLoad] = useState<McpConfigLoad>({ state: "loading" });
   const [refreshing, setRefreshing] = useState(false);
@@ -733,6 +736,7 @@ function McpConfigForOwner({
       addFailure={addFailure}
       added={added}
       onAddOpen={() => {
+        navigation?.openDetail(t("mcp.add.action"));
         setAdding(true);
         setAdded(null);
         setActionError(null);
@@ -773,6 +777,13 @@ function McpConfigForOwner({
 export interface McpActionErrorState {
   key: string;
   failure: McpActionFailure;
+}
+
+export function mcpVisibleFocusFallback(preferred: HTMLButtonElement | null): HTMLButtonElement | null {
+  if (!preferred || preferred.getClientRects().length > 0) return preferred;
+  const panel = preferred.closest(".config-panel-root");
+  if (!panel?.getClientRects().length) return preferred;
+  return preferred.closest('[data-phone-settings-level="detail"]')?.querySelector<HTMLButtonElement>(".settings-phone-back") ?? preferred;
 }
 
 /** The panel for a load in any state, without the fetch; exported for tests. */
@@ -885,7 +896,7 @@ export function McpConfigView({
   // overview has loaded.
   const selectedRowRef = useRef<HTMLButtonElement>(null);
   const addActionRef = useRef<HTMLButtonElement>(null);
-  const focusFallback = () => selectedRowRef.current ?? addActionRef.current;
+  const focusFallback = () => mcpVisibleFocusFallback(selectedRowRef.current ?? addActionRef.current);
   const offeredTrustRef = useRef(offersTrust);
   useEffect(() => {
     const offeredTrust = offeredTrustRef.current;
@@ -1203,13 +1214,14 @@ function McpCodemodeRow({
 }) {
   const { t } = useI18n();
   const state = mcpCodemodeRowState(codemode);
+  const navigation = useSettingsDetailNavigation();
   const stateText = t(MCP_CODEMODE_STATE_KEYS[state]);
   return (
     <ConfigSidebarItem
       ref={active ? rowRef : undefined}
       active={active}
       aria-label={t("mcp.codemode.rowLabel", { state: stateText })}
-      onClick={() => onSelect(MCP_CODEMODE_SELECTION)}
+      onClick={() => { onSelect(MCP_CODEMODE_SELECTION); navigation?.openDetail(t("mcp.codemode.title")); }}
     >
       <ConfigStatusDot {...mcpStatusDot(mcpCodemodeTone(state))} />
       <ConfigSidebarText className="is-grow">{t("mcp.codemode.title")}</ConfigSidebarText>
@@ -1234,6 +1246,7 @@ function McpServerGroupList({
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(false);
+  const navigation = useSettingsDetailNavigation();
   const { total } = mcpGroupCounts(group.servers);
   const emptyKey = mcpGroupEmptyKey(group);
   const label = scopeLabel(group.scope, t);
@@ -1265,7 +1278,7 @@ function McpServerGroupList({
             active={selected === key}
             // The dot is aria-hidden, so the state is part of the row's name.
             aria-label={t("mcp.rowLabel", { name, state: t(mcpRowStateLabelKey(state, server.status)) })}
-            onClick={() => onSelect(key)}
+            onClick={() => { onSelect(key); navigation?.openDetail(name); }}
           >
             <ConfigStatusDot {...mcpStatusDot(tone)} />
             <ConfigSidebarText className={`is-grow${tone === "on" ? "" : " is-muted"}`}>{name}</ConfigSidebarText>

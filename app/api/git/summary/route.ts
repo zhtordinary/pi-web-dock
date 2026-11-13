@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createAgentSessionServices, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NextRequest, NextResponse } from "next/server";
 import { extractAssistantText } from "@/lib/question-analysis";
-import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
+import { isWindowsAbsolutePath } from "@/lib/paths";
 import { getGitFileDiff, getGitHistory, getGitStatus } from "@/lib/git-changes";
 import {
   buildGitAiInput,
@@ -19,6 +19,7 @@ import {
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { createReaderAgentSessionServices } from "@/lib/model-runtime";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -106,7 +107,7 @@ async function collectGitReleaseInput(cwd: string): Promise<{ input: string; tru
 async function resolveSummaryModel(cwd: string) {
   const agentDir = getAgentDir();
   const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
-  const services = await createAgentSessionServices({
+  const services = await createReaderAgentSessionServices({
     cwd,
     agentDir,
     ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
@@ -143,10 +144,6 @@ export async function POST(request: NextRequest) {
     }
     if (!mode) return NextResponse.json({ error: "mode must be summary, commit-message, or release-notes" }, { status: 400 });
 
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
     let stat: fs.Stats;
     try {
       stat = fs.statSync(cwd);

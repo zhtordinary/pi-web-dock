@@ -17,11 +17,11 @@ const { ProcessDetailsGroup } = await jiti.import("./ProcessDetailsGroup.tsx");
 test("keeps the persisted tail time during pre-snapshot waits and gives live output the timestamp", () => {
   assert.match(
     source,
-    /if \(showTimestamp && streamState\.isStreaming && hasStreamingContent && streamState\.streamingMessage\)/,
+    /if \(showTimestamp && isStreaming && hasStreamingContent\)/,
   );
   assert.match(
     source,
-    /const streamingMessage = streamState\.streamingMessage as AssistantMessage[\s\S]*<MessageView message=\{searchableMessage\} isStreaming showTimestamp=\{true\}/,
+    /const split = splitFinalAssistantBlocks\(message\)[\s\S]*<MessageView[\s\S]*isStreaming[\s\S]*showTimestamp=\{true\}/,
   );
 });
 
@@ -77,7 +77,7 @@ test("agent-only sessions anchor their leading control card so the result remain
 test("uses ephemeral partial results while preserving the final transcript result", () => {
   assert.match(source, /const map = new Map<string, ToolResultMessage>\(activeToolResults\);[\s\S]*?for \(const msg of messages\)[\s\S]*?map\.set/);
   assert.match(source, /\[activeToolResults, messages\]/);
-  assert.match(source, /<MessageView message=\{searchableMessage\}[^>]*toolResults=\{toolResultsMap\}/);
+  assert.match(source, /<MessageView[\s\S]*message=\{searchableMessage\}[\s\S]*toolResults=\{toolResults\}/);
 });
 
 test("splits interleaved process messages around a session-control card", () => {

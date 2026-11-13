@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [appShell, chatInput, chatWindow, modelsConfig, imageGenConfig, skillsConfig, pluginsConfig, agentSession] = await Promise.all([
+const [appShell, chatInput, chatWindow, modelsConfig, imageGenConfig, skillsConfig, pluginsConfig, agentSession, hiddenModelProviders] = await Promise.all([
   readFile(new URL("./AppShell.tsx", import.meta.url), "utf8"),
   readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8"),
   readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8"),
@@ -11,15 +11,17 @@ const [appShell, chatInput, chatWindow, modelsConfig, imageGenConfig, skillsConf
   readFile(new URL("./SkillsConfig.tsx", import.meta.url), "utf8"),
   readFile(new URL("./PluginsConfig.tsx", import.meta.url), "utf8"),
   readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8"),
+  readFile(new URL("../hooks/useHiddenModelProviders.ts", import.meta.url), "utf8"),
 ]);
 
 test("all four scope/Monitor paths share provider visibility and remote resource state", () => {
   // Provider visibility is browser UI state, not models.json scope. The
   // aggregate shell must seed and continuously broadcast it to cross-origin
   // session-only and full-device iframes; iframe composers must consume it.
-  assert.match(chatInput, /COLLAPSED_PROVIDERS_SYNC_EVENT/);
-  assert.match(chatInput, /window\.parent\.postMessage\(\{ type: COLLAPSED_PROVIDERS_REQUEST_EVENT \}/);
-  assert.match(chatInput, /data\?\.type !== COLLAPSED_PROVIDERS_SYNC_EVENT/);
+  assert.match(chatInput, /useHiddenModelProviders/);
+  assert.match(hiddenModelProviders, /COLLAPSED_PROVIDERS_SYNC_EVENT/);
+  assert.match(hiddenModelProviders, /window\.parent\.postMessage\(\{ type: COLLAPSED_PROVIDERS_REQUEST_EVENT \}/);
+  assert.match(hiddenModelProviders, /data\?\.type !== COLLAPSED_PROVIDERS_SYNC_EVENT/);
   assert.match(appShell, /contentWindow\?\.postMessage\(\s*\{ type: COLLAPSED_PROVIDERS_SYNC_EVENT, providers,/);
   assert.match(appShell, /window\.addEventListener\(COLLAPSED_PROVIDERS_CHANGED_EVENT/);
 
@@ -64,6 +66,6 @@ test("remote ChatWindow preserves peer routing for historical and streaming mark
   );
   assert.match(
     chatWindow,
-    /<MessageView message=\{searchableMessage\}[\s\S]{0,360}remotePeer=\{remotePeer\}/,
+    /<StreamingReply[\s\S]{0,600}remotePeer=\{remotePeer\}/,
   );
 });

@@ -77,6 +77,20 @@ test("a bulk disable stays available while other providers keep models on", () =
   assert.equal(enabledModelsBulkActions(scoped, models).canDisable, true);
 });
 
+test("an unrestricted scope can narrow with a bulk disable", () => {
+  const models = [entry("sonnet", true), entry("opus", true)];
+  const unrestricted = view(models, { allEnabled: true, patterns: null, enabledTotal: 3 });
+  const actions = enabledModelsBulkActions(unrestricted, models);
+  assert.equal(actions.canDisable, true);
+  assert.equal(actions.canEnable, false);
+});
+
+test("an unrestricted scope with one model still protects the last model", () => {
+  const models = [entry("sonnet", true)];
+  const unrestricted = view(models, { allEnabled: true, patterns: null, enabledTotal: 1 });
+  assert.equal(enabledModelsBulkActions(unrestricted, models).canDisable, false);
+});
+
 test("read-only project scope disables both bulk actions", () => {
   const models = [entry("sonnet", true), entry("opus", false)];
   const readOnly = view(models, { scope: "project", editable: false, enabledTotal: 4 });
@@ -120,14 +134,20 @@ test("known refusals are shown as localized text, not raw server strings", () =>
   assert.match(source, /"last-model": "models\.enabledLastModel"/);
   assert.match(source, /"project-scope": "models\.enabledProjectScope"/);
   assert.match(source, /"unverified-models": "models\.enabledStaleHint"/);
+  assert.match(source, /"unrestricted-scope": "models\.enabledUnrestrictedScope"/);
   assert.match(source, /"unsafe-scope": "models\.enabledUnsafeScope"/);
   assert.match(source, /"revision-conflict": "models\.enabledRevisionConflict"/);
   assert.match(source, /role="alert" className="enabled-models-error"/);
   assert.match(source, /failure\.messageKey \? t\(failure\.messageKey\) : failure\.message/);
 });
 
-test("switches are locked while the scope is not editable", () => {
-  assert.match(source, /disabled=\{busy \|\| !view\?\.editable \|\| lastOne\}/);
+test("switches are locked while the scope is not editable or unsafe", () => {
+  assert.match(source, /disabled=\{busy \|\| !view\?\.editable \|\| \(view\.allEnabled && view\.patterns !== null\) \|\| lastOne\}/);
+});
+
+test("unrestricted scope does not render an informational banner", () => {
+  assert.doesNotMatch(source, /showUnrestrictedScopeNote|unrestrictedScopeNoteId/);
+  assert.doesNotMatch(source, /当前未设置 enabledModels/);
 });
 
 test("a custom provider is switched from its header, by one switch and no prose", () => {
@@ -147,8 +167,10 @@ test("why a switch cannot move is visible text it points at, never only its tool
     /<\/ConfigDetailHeader>\s*\n\s*<EnabledModelsProviderSwitchNote providerId=\{name\} controller=\{enabledModels\} id=\{switchNoteId\} \/>/,
   );
   // A built-in provider's rows and Disable all point at the section's notes.
+  assert.doesNotMatch(source, /showUnrestrictedScopeNote|unrestrictedScopeNoteId/);
   assert.match(source, /\{showLastModelNote && <div id=\{lastModelNoteId\} className="enabled-models-note">\{t\("models\.enabledLastModel"\)\}<\/div>\}/);
-  assert.match(source, /describedBy=\{!editable \? scopeNoteId : lastOne \? lastModelNoteId : undefined\}/);
+  assert.match(source, /disabled=\{busy \|\| !view\?\.editable \|\| \(view\.allEnabled && view\.patterns !== null\) \|\| lastOne\}/);
+  assert.doesNotMatch(source, /view\.patterns === null\n\s*\? unrestrictedScopeNoteId/);
   // No reason lives in a label or a title any more.
   assert.doesNotMatch(source, /title=\{[^}]*enabledLastModel/);
   assert.doesNotMatch(source, /label=\{[^}]*(enabledLastModel|enabledCustomEmpty|FAILURE_KEYS)/);
@@ -173,6 +195,12 @@ test("the provider switch is on only while every model of the provider is", () =
 });
 
 test("the provider switch is locked when it would empty the scope or the file is read-only", () => {
+  const unrestricted = view([entry("sonnet", true), entry("opus", true)], { allEnabled: true, patterns: null, enabledTotal: 2 });
+  assert.deepEqual(
+    enabledModelsProviderToggle(unrestricted, { ...unrestricted.providers[0], kind: "custom" }),
+    { checked: true, blocked: true, reason: "unrestricted-scope" },
+  );
+
   const lockedOn = view([entry("sonnet", true), entry("opus", true)], { enabledTotal: 2 });
   assert.deepEqual(
     enabledModelsProviderToggle(lockedOn, { ...lockedOn.providers[0], kind: "custom" }),

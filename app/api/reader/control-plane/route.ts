@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createControlPlane, ControlPlaneError, readControlPlaneJson } from "@/lib/reader-control-plane";
 import { inspectSettings, mutateSettings, validateSettingsChange } from "@/lib/reader-control-plane-settings";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { localDeviceIdentity, readActivityConfig } from "@/lib/activity-peers";
 import { LIVE_EVENT_BOOT_ID } from "@/lib/live-agent-events";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
@@ -12,7 +12,7 @@ const control = createControlPlane({
   deviceId: () => localDeviceIdentity(readActivityConfig(), new Date().toISOString()).id,
   bootId: () => LIVE_EVENT_BOOT_ID,
   globalCwd: getAgentDir,
-  authorizeCwd: async (cwd) => isExistingFilePathAllowed(cwd, await getAllowedFileRoots()),
+  authorizeCwd: async (cwd) => isExistingDirectory(cwd),
   inspectSettings, mutateSettings, validateSettingsChange,
 });
 let activeRequests = 0;

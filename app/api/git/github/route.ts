@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
-import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
+import { isWindowsAbsolutePath } from "@/lib/paths";
 import { getGitHead, getGitRemoteUrls, getGitStatus } from "@/lib/git-changes";
 import {
   createGitHubPullRequest,
@@ -45,10 +45,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "cwd must be an absolute path" }, { status: 400 });
     }
 
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
     let stat: fs.Stats;
     try {
       stat = fs.statSync(cwd);
@@ -132,10 +128,6 @@ export async function POST(request: NextRequest) {
       return invalidWriteResponse("Pull request body is too long", "body_invalid", 400);
     }
 
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
     let stat: fs.Stats;
     try {
       stat = fs.statSync(cwd);

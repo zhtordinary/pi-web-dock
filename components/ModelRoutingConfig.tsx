@@ -14,6 +14,8 @@ import type { SessionActivityResponse } from "@/lib/session-activity-types";
 import type { SettingsPanelController } from "./UnifiedSettingsModal";
 import { ReaderFloatingSelect } from "./ReaderFloatingSelect";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
+import { useHiddenModelProviders } from "@/hooks/useHiddenModelProviders";
+import { filterHiddenProviderNames } from "@/lib/model-visibility-preference";
 
 function apiFor(peer: string | undefined, path: string): string {
   if (!peer) return `/api/${path}`;
@@ -24,9 +26,35 @@ function apiFor(peer: string | undefined, path: string): string {
 export interface ModelRoutingConfigProps {
   remotePeer?: string;
   providers: Record<string, { models?: Array<{ id: string; name?: string }> | string[] }>;
+  availableModels?: Array<{ id: string; provider: string }>;
   onClose: () => void;
   onSaved?: () => void;
   controllerRef?: React.MutableRefObject<SettingsPanelController | null>;
+}
+
+export function getRoutingProviderNames(
+  providers: ModelRoutingConfigProps["providers"],
+  availableModels: readonly { id: string; provider: string }[] = [],
+): string[] {
+  const names = new Set(Object.keys(providers ?? {}));
+  for (const model of availableModels) {
+    if (model.provider) names.add(model.provider);
+  }
+  return [...names];
+}
+
+export function getRoutingModelIds(
+  providerName: string,
+  provider: ModelRoutingConfigProps["providers"][string] | undefined,
+  availableModels: readonly { id: string; provider: string }[] = [],
+): string[] {
+  const configuredModels = Array.isArray(provider?.models)
+    ? provider.models.map((model) => (typeof model === "string" ? model : model.id))
+    : [];
+  const discoveredModels = availableModels
+    .filter((model) => model.provider === providerName)
+    .map((model) => model.id);
+  return [...new Set([...configuredModels, ...discoveredModels])];
 }
 
 const THINKING_LEVEL_OPTIONS: Array<{ value: string; labelKey: string }> = [
@@ -73,11 +101,13 @@ export function reorderModelRoutes(
 export function ModelRoutingConfig({
   remotePeer,
   providers,
+  availableModels,
   onClose,
   onSaved,
   controllerRef,
 }: ModelRoutingConfigProps) {
   const { t } = useI18n();
+  const hiddenModelProviders = useHiddenModelProviders();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedOk, setSavedOk] = useState(false);
@@ -213,15 +243,18 @@ export function ModelRoutingConfig({
     [refreshNonIdleCount, t],
   );
 
-  const providerNames = useMemo(() => Object.keys(providers ?? {}), [providers]);
+  const providerNames = useMemo(
+    () => getRoutingProviderNames(providers ?? {}, availableModels ?? []),
+    [availableModels, providers],
+  );
+  const selectableProviderNames = useMemo(
+    () => filterHiddenProviderNames(providerNames, hiddenModelProviders),
+    [hiddenModelProviders, providerNames],
+  );
 
   const getModelsForProvider = useCallback(
-    (providerName: string): string[] => {
-      const p = providers?.[providerName];
-      if (!p?.models || !Array.isArray(p.models)) return [];
-      return p.models.map((m) => (typeof m === "string" ? m : m.id));
-    },
-    [providers],
+    (providerName: string): string[] => getRoutingModelIds(providerName, providers?.[providerName], availableModels ?? []),
+    [availableModels, providers],
   );
 
   useEffect(() => {
@@ -261,7 +294,7 @@ export function ModelRoutingConfig({
   }, [remotePeer]);
 
   const handleAddRoute = useCallback(() => {
-    const firstProv = providerNames[0] || "";
+    const firstProv = selectableProviderNames[0] || "";
     const models = getModelsForProvider(firstProv);
     const firstModel = models[0] || "";
     const newRoute: ModelRouteItem = {
@@ -272,7 +305,7 @@ export function ModelRoutingConfig({
       maxAttempts: DEFAULT_ROUTE_MAX_ATTEMPTS,
     };
     setRoutes((prev) => [...prev, newRoute]);
-  }, [getModelsForProvider, providerNames]);
+  }, [getModelsForProvider, selectableProviderNames]);
 
   const handleUpdateRoute = useCallback(
     (index: number, patch: Partial<ModelRouteItem>) => {
@@ -525,6 +558,13 @@ export function ModelRoutingConfig({
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
             {routes.map((route, index) => {
               const currentModels = getModelsForProvider(route.provider);
+              const routeProviderNames = filterHiddenProviderNames(providerNames, hiddenModelProviders, route.provider);
+              const routeProviderOptions = [
+                ...routeProviderNames.map((provider) => ({ value: provider, label: provider })),
+                ...(route.provider && !routeProviderNames.includes(route.provider)
+                  ? [{ value: route.provider, label: route.provider }]
+                  : []),
+              ];
               return (
                 <div
                   key={route.id || index}
@@ -576,8 +616,8 @@ export function ModelRoutingConfig({
                           fontWeight: 700,
                           padding: "2px 7px",
                           borderRadius: 4,
-                          background: index === 0 ? "var(--accent)" : "var(--border)",
-                          color: index === 0 ? "#fff" : "var(--text-muted)",
+                          background: "var(--border)",
+                          color: "var(--text-muted)",
                         }}
                       >
                         {t("modelRouting.routeIndex", { index: index + 1 })}
@@ -646,14 +686,9 @@ export function ModelRoutingConfig({
                         value={route.provider}
                         onChange={(val) => handleUpdateRoute(index, { provider: val })}
                         options={
-                          providerNames.length === 0
+                          routeProviderOptions.length === 0
                             ? [{ value: "", label: t("modelRouting.noProvider") }]
-                            : [
-                                ...providerNames.map((p) => ({ value: p, label: p })),
-                                ...(route.provider && !providerNames.includes(route.provider)
-                                  ? [{ value: route.provider, label: route.provider }]
-                                  : []),
-                              ]
+                            : routeProviderOptions
                         }
                         ariaLabel={t("modelRouting.provider") || "Provider"}
                         placement="below"

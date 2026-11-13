@@ -4,6 +4,7 @@
 const { chmodSync, statSync } = require("node:fs");
 const { dirname, join } = require("node:path");
 const { patchPiFileTools } = require("./patch-pi-volume-access.cjs");
+const { patchPiCodexCacheRoute } = require("./patch-pi-codex-cache-route.cjs");
 
 if (process.platform === "darwin") {
   const root = dirname(require.resolve("node-pty/package.json"));
@@ -15,3 +16,4 @@ if (process.platform === "darwin") {
 }
 
 patchPiFileTools();
+patchPiCodexCacheRoute();

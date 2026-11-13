@@ -22,8 +22,6 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
 });
 const { GET } = await jiti.import("./route.ts");
-const { allowFileRoot } = await jiti.import("../../../lib/allowed-roots.ts");
-allowFileRoot(root);
 
 function write(filePath, content = "") {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -145,12 +143,24 @@ test("the non-Git walk hides generated candidates without hiding ordinary projec
   assert.deepEqual((await hiddenSearch.json()).matches, []);
 });
 
-test("file-index reports invalid, denied, missing and non-directory cwd explicitly", async () => {
+test("file-index reports invalid, missing and non-directory cwd explicitly", async () => {
   const file = path.join(root, "plain-file.txt");
   write(file, "file");
 
   assert.equal((await request("relative/path")).status, 400);
-  assert.equal((await request(path.join(root, "..", "outside"))).status, 403);
+  assert.equal((await request(`${root}/../outside`)).status, 400);
   assert.equal((await request(path.join(root, "missing"))).status, 404);
   assert.equal((await request(file)).status, 400);
+});
+
+test("limits broad non-Git walks and yields while indexing", async () => {
+  const broad = path.join(root, "broad");
+  fs.mkdirSync(broad);
+  for (let index = 0; index < 2050; index++) fs.mkdirSync(path.join(broad, `folder-${index}`));
+  let yielded = false;
+  setTimeout(() => { yielded = true; }, 0);
+  const response = await request(broad);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).truncated, true);
+  assert.equal(yielded, true);
 });

@@ -10,6 +10,8 @@ import { ReaderFloatingSelect } from "./ReaderFloatingSelect";
 import { ConfigButton, ConfigDetailStack, ConfigDetailTitle, ConfigNotice } from "./SettingsUi";
 import { readApiJson } from "./models-config-helpers";
 import type { SettingsPanelController } from "./UnifiedSettingsModal";
+import { useHiddenModelProviders } from "@/hooks/useHiddenModelProviders";
+import { filterHiddenProviderNames } from "@/lib/model-visibility-preference";
 
 interface AvailableModel extends CompactionModelSelection {
   name: string;
@@ -23,16 +25,20 @@ const MIXED = "__mixed__";
 const UNRESOLVED = "__unresolved__";
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 function apiFor(peer: string | undefined, name: string) {
-  return peer ? `/api/remote/${name}?peer=${encodeURIComponent(peer)}` : `/api/${name}`;
+  if (!peer) return `/api/${name}`;
+  const [route, query] = name.split("?", 2);
+  return `/api/remote/${route}?${query ? `${query}&` : ""}peer=${encodeURIComponent(peer)}`;
 }
 
-export function PluginModelConfig({ remotePeer, onClose, controllerRef }: {
+export function PluginModelConfig({ cwd, remotePeer, onClose, controllerRef }: {
+  cwd?: string;
   remotePeer?: string;
   onClose: () => void;
   controllerRef?: React.MutableRefObject<SettingsPanelController | null>;
 }) {
   const { t } = useI18n();
   const mobile = useIsMobile();
+  const hiddenModelProviders = useHiddenModelProviders();
   const [rows, setRows] = useState<Rows>({ compaction: null, compactionThinking: null, plugins: [] });
   const [models, setModels] = useState<AvailableModel[]>([]);
   const [pluginErrors, setPluginErrors] = useState<PluginError[]>([]);
@@ -53,7 +59,7 @@ export function PluginModelConfig({ remotePeer, onClose, controllerRef }: {
     setRows({ compaction: null, compactionThinking: null, plugins: [] }); setModels([]); setPluginErrors([]);
     void (async () => {
       try {
-        const response = await fetch(apiFor(remotePeer, "compaction-model"), { signal: scope.signal, cache: "no-store" });
+        const response = await fetch(apiFor(remotePeer, `compaction-model${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`), { signal: scope.signal, cache: "no-store" });
         const data = await readApiJson<{ model?: unknown; thinkingLevel?: unknown; models?: AvailableModel[]; error?: string }>(response);
         if (!response.ok || data.error || !("model" in data) || !Array.isArray(data.models)) throw new Error(data.error ?? `HTTP ${response.status}`);
         const initial: Rows = { compaction: parseCompactionModel(data.model), compactionThinking: parseCompactionThinking(data.thinkingLevel), plugins: [] };
@@ -74,7 +80,7 @@ export function PluginModelConfig({ remotePeer, onClose, controllerRef }: {
       } finally { if (!scope.signal.aborted) setLoading(false); }
     })();
     return () => scope.abort();
-  }, [remotePeer, revision]);
+  }, [cwd, remotePeer, revision]);
 
   const isDirty = useCallback(() => {
     const saved = snapshot.current;
@@ -97,7 +103,7 @@ export function PluginModelConfig({ remotePeer, onClose, controllerRef }: {
       if (!same(rows.compaction, saved.compaction) || rows.compactionThinking !== saved.compactionThinking) {
         const response = await fetch(apiFor(remotePeer, "compaction-model"), { method: "PUT",
           headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: rows.compaction, thinkingLevel: rows.compactionThinking,
-            expected: { model: before.compaction, thinkingLevel: before.compactionThinking } }), signal: scope.signal });
+            expected: { model: before.compaction, thinkingLevel: before.compactionThinking }, ...(cwd ? { cwd } : {}) }), signal: scope.signal });
         const data = await readApiJson<{ model?: unknown; thinkingLevel?: unknown; error?: string }>(response);
         if (!response.ok || data.error || !("model" in data) || !("thinkingLevel" in data)) throw new Error(data.error ?? `HTTP ${response.status}`);
         saved = { ...saved, compaction: parseCompactionModel(data.model), compactionThinking: parseCompactionThinking(data.thinkingLevel) };
@@ -123,7 +129,7 @@ export function PluginModelConfig({ remotePeer, onClose, controllerRef }: {
       if (!scope.signal.aborted) setError(`${t("pluginModels.saveFailed")}: ${cause instanceof Error ? cause.message : String(cause)}`);
       return false;
     } finally { if (!scope.signal.aborted) setSaving(false); }
-  }, [loading, saving, rows, remotePeer, t]);
+  }, [cwd, loading, saving, rows, remotePeer, t]);
 
   useEffect(() => {
     if (!controllerRef) return;
@@ -145,6 +151,7 @@ export function PluginModelConfig({ remotePeer, onClose, controllerRef }: {
     const selected = model && model !== "mixed" ? model : null;
     const providers = [...new Set(models.map((item) => item.provider))].sort();
     if (selected?.provider && !providers.includes(selected.provider)) providers.push(selected.provider);
+    const visibleProviders = filterHiddenProviderNames(providers, hiddenModelProviders, selected?.provider);
     const choices = models.filter((item) => item.provider === selected?.provider);
     const current = choices.find((item) => item.modelId === selected?.modelId);
     const unavailable = !!selected && !current;
@@ -175,7 +182,7 @@ export function PluginModelConfig({ remotePeer, onClose, controllerRef }: {
             ...(model === "mixed" ? [{ value: MIXED, label: t("pluginModels.mixed"), disabled: true }] : []),
             ...(selected && !selected.provider ? [{ value: UNRESOLVED, label: t("pluginModels.unknownProvider"), disabled: true }] : []),
             { value: "", label: t("compactionModel.follow") },
-            ...providers.map((provider) => ({ value: provider, label: provider })),
+            ...visibleProviders.map((provider) => ({ value: provider, label: provider })),
           ]}
           onChange={(provider) => changeModel(provider ? { provider, modelId: models.find((item) => item.provider === provider)?.modelId ?? "" } : null)} />
         <ReaderFloatingSelect appearance="field" ariaLabel={`${label} ${t("modelRouting.model")}`} containerStyle={{ minWidth: 0, width: "100%" }}

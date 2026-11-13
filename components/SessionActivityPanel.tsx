@@ -16,7 +16,7 @@ import { openReaderEventSource } from "@/lib/reader-events-client";
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { clampFloatingMenuPosition } from "@/lib/floating-menu-position";
-import { Archive, Check, Copy, Eye, EyeOff, FileInput, FolderGit2, FolderPlus, GitFork, Map as MapIcon, MessageSquare, MessageSquarePlus, MonitorOff, Pencil, Star, Trash2, X } from "lucide-react";
+import { Archive, Check, Copy, Eye, EyeOff, FileInput, FileText, FolderGit2, FolderPlus, GitFork, Map as MapIcon, MessageSquare, MessageSquarePlus, MonitorOff, Pencil, Star, Trash2, X } from "lucide-react";
 import { assertSessionMutationOk } from "@/lib/session-mutation";
 import { copyText } from "@/lib/clipboard";
 import { apiPathForPeer } from "@/lib/file-api";
@@ -52,6 +52,8 @@ import { applySessionActivityEvent, applySessionActivityPeerState, isTerminalSes
 import { ACTIVITY_TIME_RANGE_VALUES, isWithinActivityTimeRange, sessionActivityDisplayTime, type ActivityTimeRange as TimeRangeValue } from "@/lib/session-activity-filters";
 import { isSubagentCompletionConfirmed } from "@/lib/session-activity-status";
 import { lineageParentId } from "@/lib/session-lineage";
+import { sessionDisplayTitle, sessionModelLabel, sessionModelValue } from "@/lib/session-display";
+import { useSubagentVisibility, setSubagentVisibility } from "@/hooks/useSubagentVisibility";
 
 const STATE_KEY = "pi-session-activity-panel";
 export const ACTIVITY_DEVICE_SLOT_WIDTH = 168;
@@ -459,6 +461,30 @@ interface ActivitySessionNode {
 
 const knownSessionParents = new Map<string, string>();
 
+type SubagentVisibilitySession = Pick<SessionActivityItem["session"], "id" | "relation">;
+
+function isVisibleSubagentSession(session: SubagentVisibilitySession, visibleParentIds: ReadonlySet<string>, keepSessionId?: string): boolean {
+  return session.id === keepSessionId
+    || session.relation?.kind !== "subagent"
+    || visibleParentIds.has(session.relation.parentSessionId);
+}
+
+function filterVisibleSubagentItems(items: readonly SessionActivityItem[], visibleParentIds: ReadonlySet<string>, keepSessionId?: string): SessionActivityItem[] {
+  return items.filter((item) => isVisibleSubagentSession(item.session, visibleParentIds, keepSessionId));
+}
+
+function hasSubagentChildren(items: readonly SessionActivityItem[], item: SessionActivityItem): boolean {
+  return items.some((candidate) => candidate.device.id === item.device.id
+    && candidate.session.relation?.kind === "subagent"
+    && candidate.session.relation.parentSessionId === item.session.id);
+}
+
+function hasSubagentChild(items: readonly SessionActivityItem[], parentId: string, deviceId?: string): boolean {
+  return items.some((candidate) => (!deviceId || candidate.device.id === deviceId)
+    && candidate.session.relation?.kind === "subagent"
+    && candidate.session.relation.parentSessionId === parentId);
+}
+
 function registerSessionLineage(sessions: readonly SessionActivityItem[]): void {
   for (const item of sessions) {
     const parentId = lineageParentId(item.session);
@@ -525,32 +551,50 @@ function buildSessionLineageTree(items: SessionActivityItem[], sort: SortValue):
 }
 
 /**
- * Recursive session-lineage renderer. Child rows nest in an indented, left-bordered
- * container below their source row; orphan roots render flat at depth 0.
+ * Recursive session-lineage renderer. Child rows use one quiet vertical guide,
+ * while indentation and the row chevron carry the hierarchy without branch arms.
  */
-function SessionLineageBranchList({ nodes, renderRow }: {
+function SessionLineageBranchList({
+  nodes,
+  renderRow,
+  variant = "panel",
+  collapsedBranchKeys,
+}: {
   nodes: ActivitySessionNode[];
-  renderRow: (node: ActivitySessionNode, depth: number) => React.ReactNode;
+  renderRow: (node: ActivitySessionNode, depth: number, isLast: boolean, hasChildren: boolean) => React.ReactNode;
+  variant?: "panel" | "sidebar";
+  collapsedBranchKeys?: Set<string>;
 }) {
+  const isSidebar = variant === "sidebar";
+  const indentLeft = isSidebar ? 14 : 22;
+  const paddingLeft = isSidebar ? 9 : 12;
+  const guideBorder = "1px solid color-mix(in srgb, var(--text-dim) 28%, transparent)";
+
   const renderLevel = (levelNodes: ActivitySessionNode[], depth: number): React.ReactNode => (
     <>
-      {levelNodes.map((node) => (
-        <Fragment key={itemKey(node.item)}>
-          {renderRow(node, depth)}
-          {node.children.length > 0 && (
-            <div style={{ marginLeft: 14, paddingLeft: 10, borderLeft: "1px solid var(--border)" }}>
-              {renderLevel(node.children, depth + 1)}
-            </div>
-          )}
-        </Fragment>
-      ))}
+      {levelNodes.map((node, index) => {
+        const isLast = index === levelNodes.length - 1;
+        const hasChildren = node.children.length > 0;
+        const key = itemKey(node.item);
+        const isBranchCollapsed = Boolean(collapsedBranchKeys?.has(key));
+        return (
+          <Fragment key={key}>
+            {renderRow(node, depth, isLast, hasChildren)}
+            {hasChildren && !isBranchCollapsed && (
+              <div style={{ position: "relative", marginLeft: indentLeft, paddingLeft, borderLeft: guideBorder }}>
+                {renderLevel(node.children, depth + 1)}
+              </div>
+            )}
+          </Fragment>
+        );
+      })}
     </>
   );
   return <>{renderLevel(nodes, 0)}</>;
 }
 
 function sessionTitle(item: SessionActivityItem): string {
-  return item.session.name?.trim() || item.session.firstMessage?.trim().split("\n")[0]?.slice(0, 100) || item.session.id;
+  return sessionDisplayTitle(item.session);
 }
 
 function deviceLabel(name: string): string {
@@ -616,7 +660,7 @@ function useLazySessionCost(
 ) {
   const rowRef = useRef<HTMLDivElement>(null);
   const [nearViewport, setNearViewport] = useState(false);
-  const { cost } = useSessionDetails({
+  const { cost, costState } = useSessionDetails({
     sessionId,
     version,
     peer,
@@ -648,6 +692,7 @@ function useLazySessionCost(
   const presentation = sessionCostPresentation(cost?.totalCost, cost?.extensionCosts);
   return {
     cost: cost?.amount ?? null,
+    costState,
     costStatus: presentation.onlySuggesterPending && cost?.status === "partial" ? "calculated" : cost?.status ?? null,
     recapCost: cost?.recapCost?.amount ?? null,
     cacheHitRate: mainUsage
@@ -1934,7 +1979,7 @@ function useSessionActivityData({
     return () => window.clearInterval(id);
   }, [refresh]);
 
-  // 即时事件通道（/api/activity/relay SSE）：本机 + peer 的 run/session 事件
+  // 即时事件通道（/api/activity/events SSE）：本机 + peer 的 run/session 事件
   // 事件到达先更新内存状态并触发声音；快照只做后台校准。peer 连接状态变化
   // 也先原地更新 online/offline，再定向刷新。SSE 重连和 15s 快照覆盖进程重启、
   // 新建空会话和事件缓冲丢失。
@@ -2556,6 +2601,7 @@ export function SessionActivityPanel({
   statusSoundOwner = "chat",
 }: Props) {
   const { t } = useI18n();
+  const visibleSubagentParentIds = useSubagentVisibility();
   const activityScope = resolveActivityScope(requestedActivityScope, { hiddenView, favoriteView, toDiscussView, toReviseView, completedView });
   const [state, setState] = useState<SessionActivityPanelState>(readState);
   const [projectDeleteConfirmKey, setProjectDeleteConfirmKey] = useState<string | null>(null);
@@ -2723,7 +2769,7 @@ export function SessionActivityPanel({
     state,
     viewedAtBySession,
     searchMatchFilter,
-  );
+  ).filter((hit) => isVisibleSubagentSession(hit, visibleSubagentParentIds, focusSessionId ?? undefined));
 
   if (activity.data?.sessions) registerSessionLineage(activity.data.sessions);
 
@@ -2784,12 +2830,23 @@ export function SessionActivityPanel({
   }, [locateKey, state.collapsedGroups, activity.data]);
 
 
+  const [collapsedBranchKeys, setCollapsedBranchKeys] = useState<Set<string>>(() => new Set());
+  const toggleBranch = useCallback((key: string) => {
+    setCollapsedBranchKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   const timeLabel = state.sort === "asked" || state.sort === "status" ? t("sessionActivity.sortAsked") : t("sessionActivity.sortRecent");
-  const renderPanelSessionRow = (node: ActivitySessionNode) => {
+  const renderPanelSessionRow = (node: ActivitySessionNode, depth = 0, isLast = false, hasChildren = false) => {
     const item = node.item;
     const key = itemKey(item);
     const expanded = state.expanded.includes(key);
-    return <SessionActivityRow key={key} item={item} highlighted={item.session.id === highlightedSessionId} forked={Boolean(item.session.parentSessionId)} contextInjected={Boolean(item.session.contextSourceSessionId)} expanded={expanded} contextLabel={rowContextLabel(item, state.group, activityScope, state.device === "all")} t={t} formatTime={activity.formatTime} formatDuration={activity.formatDuration} statusLabel={activity.statusLabel} timeValue={itemTime(item, state.sort)} timeLabel={timeLabel} onToggle={() => toggleExpanded(key)} onOpen={() => activity.openActivitySession(item)} onOpenTalkMapForSession={onOpenTalkMapForSession} onInjectContext={onInjectContext} onCopySessionInfo={onCopySessionInfo} canMutate={item.device.id === localDeviceId} onRemoteMutate={onRemoteMutate} onChanged={() => void activity.refresh(item.device.id, true)} onSessionDeleted={onSessionDeleted} recapPeer={item.device.id === localDeviceId ? undefined : item.device.id} costRootRef={scrollRef} onRemoved={(sessionId) => activity.markSessionRemoved(sessionId)} onRestoreRemoved={(sessionId) => activity.unmarkSessionRemoved(sessionId)} onHide={activityScope !== "hidden" ? () => void activity.setHidden("session", item.session.id, true, item.device.id) : undefined} onUnhide={activityScope === "hidden" ? () => void activity.setHidden("session", item.session.id, false, item.device.id) : undefined} onFavorite={() => activity.setFavorite(item.session.id, true, item.device.id)} onUnfavorite={() => activity.setFavorite(item.session.id, false, item.device.id)} onSetCategory={(sessionId, category, deviceId) => activity.setCategory(sessionId, category, deviceId)} subprojects={activity.subprojects} onMoveToSubproject={activity.moveSessionToSubproject} />;
+    const isBranchCollapsed = collapsedBranchKeys.has(key);
+    return <SessionActivityRow key={key} item={item} highlighted={item.session.id === highlightedSessionId} forked={Boolean(item.session.parentSessionId)} contextInjected={Boolean(item.session.contextSourceSessionId)} expanded={expanded} contextLabel={rowContextLabel(item, state.group, activityScope, state.device === "all")} t={t} formatTime={activity.formatTime} formatDuration={activity.formatDuration} statusLabel={activity.statusLabel} timeValue={itemTime(item, state.sort)} timeLabel={timeLabel} onToggle={() => toggleExpanded(key)} depth={depth} hasChildren={hasChildren} branchCollapsed={isBranchCollapsed} onToggleBranch={hasChildren ? () => toggleBranch(key) : undefined} onOpen={() => activity.openActivitySession(item)} onOpenTalkMapForSession={onOpenTalkMapForSession} onInjectContext={onInjectContext} onCopySessionInfo={onCopySessionInfo} canMutate={item.device.id === localDeviceId} onRemoteMutate={onRemoteMutate} onChanged={() => void activity.refresh(item.device.id, true)} onSessionDeleted={onSessionDeleted} recapPeer={item.device.id === localDeviceId ? undefined : item.device.id} costRootRef={scrollRef} onRemoved={(sessionId) => activity.markSessionRemoved(sessionId)} onRestoreRemoved={(sessionId) => activity.unmarkSessionRemoved(sessionId)} onHide={activityScope !== "hidden" ? () => void activity.setHidden("session", item.session.id, true, item.device.id) : undefined} onUnhide={activityScope === "hidden" ? () => void activity.setHidden("session", item.session.id, false, item.device.id) : undefined} onFavorite={() => activity.setFavorite(item.session.id, true, item.device.id)} onUnfavorite={() => activity.setFavorite(item.session.id, false, item.device.id)} onSetCategory={(sessionId, category, deviceId) => activity.setCategory(sessionId, category, deviceId)} subprojects={activity.subprojects} onMoveToSubproject={activity.moveSessionToSubproject} hasSubagents={hasSubagentChildren(activity.data?.sessions ?? [], item)} subagentsVisible={visibleSubagentParentIds.has(item.session.id)} onToggleSubagents={() => setSubagentVisibility(item.session.id, !visibleSubagentParentIds.has(item.session.id))} />;
   };
 
   return (
@@ -2973,6 +3030,7 @@ export function SessionActivityPanel({
               key={`${hit.device?.id ?? "local"}:${hit.id}`}
               hit={hit}
               activityItems={activity.data?.sessions}
+              visibleSubagentParentIds={visibleSubagentParentIds}
               viewedAtBySession={viewedAtBySession}
               sort={state.sort}
               selected={hit.id === focusSessionId}
@@ -3005,9 +3063,10 @@ export function SessionActivityPanel({
           </div>
         )}
         {searchQuery.trim().length === 0 && activity.groups.map(([groupKey, items, emptyProject]) => {
-          const groupKeys = new Set(items.map(itemKey));
+          const visibleItems = filterVisibleSubagentItems(items, visibleSubagentParentIds, focusSessionId ?? undefined);
+          const groupKeys = new Set(visibleItems.map(itemKey));
           const groupCollapsed = state.group !== "none" && state.collapsedGroups.includes(groupKey);
-          const groupExpanded = items.length > 0 && items.every((item) => state.expanded.includes(itemKey(item)));
+          const groupExpanded = visibleItems.length > 0 && visibleItems.every((item) => state.expanded.includes(itemKey(item)));
           const sessionProject = items[0] ? projectInfoFromSession(items[0]) : null;
           const groupProject = (state.group === "project" || state.group === "worktree") ? emptyProject ?? sessionProject : null;
           const groupName = groupProject?.label ?? deviceLabel(items[0]?.device.name ?? "-");
@@ -3032,8 +3091,8 @@ export function SessionActivityPanel({
               : [],
           );
           const visibleGroupSubprojects = groupSubprojects.filter((subproject) => !subproject.hidden && !autoHiddenGroupSubprojectIds.has(subproject.id));
-          const visibleGroupItems = filterSubprojectItems(items, hiddenSubprojectIdsFor(groupSubprojects, autoHiddenGroupSubprojectIds));
-          const hasProjectSessions = Boolean(groupProject?.hasSessions || items.length > 0);
+          const visibleGroupItems = filterSubprojectItems(visibleItems, hiddenSubprojectIdsFor(groupSubprojects, autoHiddenGroupSubprojectIds));
+          const hasProjectSessions = Boolean(groupProject?.hasSessions || visibleItems.length > 0);
           const canDeleteProject = Boolean((state.group === "project" || state.group === "worktree") && !hasProjectSessions && groupProject?.saved && groupDeviceId);
           return (
             <section key={groupKey || "all"}>
@@ -3042,7 +3101,7 @@ export function SessionActivityPanel({
                   path={groupPath}
                   deviceId={groupDeviceId}
                   canDelete={state.group === "project" && canDeleteProject}
-                  hasSessions={groupProject?.hasSessions ?? items.length > 0}
+                  hasSessions={groupProject?.hasSessions ?? visibleItems.length > 0}
                   hasSubprojects={state.group === "project" && groupSubprojects.length > 0}
                   autoHideEmptySubprojects={Boolean(groupSubprojectSort?.autoHideEmptySubprojects)}
                   onRequestDelete={() => {
@@ -3111,7 +3170,7 @@ export function SessionActivityPanel({
                           <ActivityNewSessionButton cwd={groupPath ?? null} device={groupDeviceInfo} localDeviceId={localDeviceId} onNewSession={onNewSession} t={t} />
                         </div>
                       )}
-                      {items.length > 0 && (
+                      {visibleItems.length > 0 && (
                         <button className="activity-project-action" type="button" onClick={() => updateState({ expanded: groupExpanded ? state.expanded.filter((key) => !groupKeys.has(key)) : [...new Set([...state.expanded, ...groupKeys])], ...(groupExpanded ? {} : { collapsedGroups: state.collapsedGroups.filter((key) => key !== groupKey) }) })} title={groupExpanded ? t("sessionActivity.collapseAll") : t("sessionActivity.expandAll")} aria-label={groupExpanded ? t("sessionActivity.collapseAll") : t("sessionActivity.expandAll")}>
                           <span style={{ fontSize: 0 }}>{groupExpanded ? t("sessionActivity.collapseAll") : t("sessionActivity.expandAll")}</span>
                           <Icon name="chevron" size={13} />
@@ -3160,7 +3219,7 @@ export function SessionActivityPanel({
                 </div>
               )}
               {(!groupCollapsed || state.group === "none") && (() => {
-                  if (state.group === "worktree") return <WorktreeSessionBuckets onNewSession={onNewSession ? (cwd, deviceId) => onNewSession(cwd, deviceId ? activity.devices.find((d) => d.id === deviceId) : groupDeviceInfo) : undefined} focusSessionId={focusSessionId ?? undefined} focusSessionKey={focusSessionKey ?? undefined} items={visibleGroupItems} inventoryProjectKey={groupProject?.projectKey} inventoryProjectRoot={groupPath} inventoryDeviceId={groupDeviceId} inventoryUrl={groupPath ? (groupDeviceId && groupDeviceId !== localDeviceId ? `/api/remote/worktrees?peer=${encodeURIComponent(groupDeviceId)}&cwd=${encodeURIComponent(groupPath)}` : `/api/worktrees?cwd=${encodeURIComponent(groupPath)}`) : undefined} sessionOf={item => item.session} deviceOf={item => item.device.id} mainLabel={t("sessionActivity.worktreeMain")} worktreeLabel={t("sessionActivity.worktreeLinked")} renderItems={rows => <SessionLineageBranchList nodes={buildSessionLineageTree(rows, state.sort)} renderRow={renderPanelSessionRow} />} />;
+                  if (state.group === "worktree") return <WorktreeSessionBuckets onNewSession={onNewSession ? (cwd, deviceId) => onNewSession(cwd, deviceId ? activity.devices.find((d) => d.id === deviceId) : groupDeviceInfo) : undefined} focusSessionId={focusSessionId ?? undefined} focusSessionKey={focusSessionKey ?? undefined} items={visibleGroupItems} inventoryProjectKey={groupProject?.projectKey} inventoryProjectRoot={groupPath} inventoryDeviceId={groupDeviceId} inventoryUrl={groupPath ? (groupDeviceId && groupDeviceId !== localDeviceId ? `/api/remote/worktrees?peer=${encodeURIComponent(groupDeviceId)}&cwd=${encodeURIComponent(groupPath)}` : `/api/worktrees?cwd=${encodeURIComponent(groupPath)}`) : undefined} sessionOf={item => item.session} deviceOf={item => item.device.id} mainLabel={t("sessionActivity.worktreeMain")} worktreeLabel={t("sessionActivity.worktreeLinked")} renderItems={rows => <SessionLineageBranchList variant="panel" collapsedBranchKeys={collapsedBranchKeys} nodes={buildSessionLineageTree(rows, state.sort)} renderRow={renderPanelSessionRow} />} />;
                   const definitions = state.group === "project" && groupProject
                     ? groupSubprojects
                     : [];
@@ -3181,8 +3240,10 @@ export function SessionActivityPanel({
                        onSortSubprojects={(order) => activity.mutateSubprojects(groupDeviceId!, "PUT", { projectKey: groupProject!.projectKey, mode: "custom", order }).then((result) => result.ok)}
                       onToggleSubprojectVisibility={(subproject) => toggleSubprojectVisibility(groupDeviceId!, subproject)}
                       mutateSubprojects={activity.mutateSubprojects}
+                      variant="panel"
+                      collapsedBranchKeys={collapsedBranchKeys}
                     />
-                    : <SessionLineageBranchList nodes={buildSessionLineageTree(items, state.sort)} renderRow={renderPanelSessionRow} />;
+                    : <SessionLineageBranchList variant="panel" collapsedBranchKeys={collapsedBranchKeys} nodes={buildSessionLineageTree(visibleItems, state.sort)} renderRow={renderPanelSessionRow} />;
               })()}
             </section>
           );
@@ -3192,7 +3253,7 @@ export function SessionActivityPanel({
   );
 }
 
-function SubprojectBucketList({ items, definitions, projectKey, deviceId, projectCwd, newSessionDevice, localDeviceId, onNewSession, unclassifiedLabel, renderRow, sortSetting, sessionSort, onSortSubprojects, onToggleSubprojectVisibility, mutateSubprojects }: {
+function SubprojectBucketList({ items, definitions, projectKey, deviceId, projectCwd, newSessionDevice, localDeviceId, onNewSession, unclassifiedLabel, renderRow, sortSetting, sessionSort, onSortSubprojects, onToggleSubprojectVisibility, mutateSubprojects, variant = "panel", collapsedBranchKeys }: {
   items: SessionActivityItem[];
   definitions: NonNullable<SessionActivityResponse["subprojects"]>;
   projectKey: string;
@@ -3202,12 +3263,14 @@ function SubprojectBucketList({ items, definitions, projectKey, deviceId, projec
   localDeviceId?: string;
   onNewSession?: (cwd: string, device?: SessionActivityDevice, subprojectId?: string, subprojectLabel?: string) => void;
   unclassifiedLabel: string;
-  renderRow: (node: ActivitySessionNode, depth: number) => React.ReactNode;
+  renderRow: (node: ActivitySessionNode, depth: number, isLast: boolean, hasChildren: boolean) => React.ReactNode;
   sortSetting?: SubprojectSortSetting;
   sessionSort: SortValue;
   onSortSubprojects?: (order: string[]) => Promise<boolean>;
   onToggleSubprojectVisibility?: (subproject: SubprojectDefinition) => Promise<boolean>;
   mutateSubprojects: SubprojectMutationFn;
+  variant?: "panel" | "sidebar";
+  collapsedBranchKeys?: Set<string>;
 }) {
   const { t } = useI18n();
   const [collapsedKeys, setCollapsedKeys] = useState<string[]>([]);
@@ -3420,7 +3483,7 @@ function SubprojectBucketList({ items, definitions, projectKey, deviceId, projec
         {!collapsed && deleteError && confirmDelete && <div role="alert" style={{ padding: "2px 14px 4px 28px", color: "#dc2626", fontSize: 10 }}>{deleteError}</div>}
         {!collapsed && visibilityError && <div role="alert" style={{ padding: "2px 14px 4px 14px", color: "#dc2626", fontSize: 10 }}>{visibilityError}</div>}
         {!collapsed && reorderError && <div role="alert" style={{ padding: "2px 14px 4px 14px", color: "#dc2626", fontSize: 10 }}>{reorderError}</div>}
-        {!collapsed && <SessionLineageBranchList nodes={buildSessionLineageTree(bucket.items, sessionSort)} renderRow={renderRow} />}
+        {!collapsed && <SessionLineageBranchList variant={variant} collapsedBranchKeys={collapsedBranchKeys} nodes={buildSessionLineageTree(bucket.items, sessionSort)} renderRow={renderRow} />}
       </section>
     );
   })}</>;
@@ -3814,6 +3877,13 @@ function SessionActivityRow({
   onSetCategory,
   subprojects = [],
   onMoveToSubproject,
+  hasSubagents = false,
+  subagentsVisible = false,
+  onToggleSubagents,
+  depth = 0,
+  hasChildren = false,
+  branchCollapsed = false,
+  onToggleBranch,
 }: {
   item: SessionActivityItem;
   expanded: boolean;
@@ -3823,6 +3893,13 @@ function SessionActivityRow({
   forked?: boolean;
   /** True when this session received context from another session. */
   contextInjected?: boolean;
+  hasSubagents?: boolean;
+  subagentsVisible?: boolean;
+  onToggleSubagents?: () => void;
+  depth?: number;
+  hasChildren?: boolean;
+  branchCollapsed?: boolean;
+  onToggleBranch?: () => void;
   t: (key: string, params?: Record<string, string | number>) => string;
   formatTime: (value: string) => string;
   formatDuration: (run: SessionRunRecord | null) => string | null;
@@ -3857,13 +3934,13 @@ function SessionActivityRow({
   const latest = item.latestRun;
   const subagentCompleted = hasCompletedSubagent(item);
   const durationText = formatDuration(latest);
-  const { cost, costStatus, cacheHitRate, missingPriceModels, pendingUsageCount, recordedOnly, costRef } = useLazySessionCost(item.session.id, item.session.modified, recapPeer, costRootRef);
+  const { cost, costState, costStatus, cacheHitRate, missingPriceModels, pendingUsageCount, recordedOnly, costRef } = useLazySessionCost(item.session.id, item.session.modified, recapPeer, costRootRef);
   const costValue = typeof cost === "number" ? cost : 0;
   const partialCost = costStatus === "partial";
   const formattedCost = partialCost
     ? `≥$${(Math.floor(costValue * 100) / 100).toFixed(2)}`
     : typeof cost === "number" && (costValue > 0 || recordedOnly) ? `$${costValue.toFixed(2)}` : null;
-  const costText = formattedCost;
+  const costText = costState === "loading" ? "…" : costState === "error" ? "?" : formattedCost;
   const unpricedText = missingPriceModels.length > 0 && !partialCost ? t("sessionActivity.unpriced") : null;
   const unpricedTitle = missingPriceModels.length > 0
     ? partialCost ? missingPriceModels.join(", ") : `${t("session.unpricedModels")}: ${missingPriceModels.join(", ")}`
@@ -3881,6 +3958,10 @@ function SessionActivityRow({
   const [name, setName] = useState("");
   const [editing, setEditing] = useState(false);
   const title = sessionTitle(item);
+  const modelValue = item.session.relation?.kind === "subagent" ? sessionModelValue(item.session, item.modelName) : undefined;
+  const modelLabel = item.session.relation?.kind === "subagent"
+    ? sessionModelLabel(modelValue) ?? t("sidebar.subagentModelPending")
+    : undefined;
   const pointerDrag = useSessionSubprojectPointerDrag({
     projectKey: item.projectKey,
     deviceId: item.device.id,
@@ -3891,9 +3972,11 @@ function SessionActivityRow({
   const canRemote = !canMutate && item.device.online !== false && Boolean(onRemoteMutate);
   const canMutateAny = canMutate || canRemote;
   const mutateTitle = canMutate ? null : canRemote ? t("sessionActivity.remoteActionViaDevice") : t("sessionActivity.remoteActionUnavailable");
+  const lifecycleManagedByParent = item.session.relation?.kind === "subagent";
+  const lifecycleTitle = lifecycleManagedByParent ? t("sessionActivity.subagentLifecycleRequiresParent") : undefined;
 
   const archive = async () => {
-    if (!canMutateAny || busy) return;
+    if (!canMutateAny || busy || lifecycleManagedByParent) return;
     setArchiveError(null);
     setBusy(true);
     try {
@@ -3918,7 +4001,7 @@ function SessionActivityRow({
   };
 
   const remove = async () => {
-    if (!canMutateAny || busy) return;
+    if (!canMutateAny || busy || lifecycleManagedByParent) return;
     setConfirmDelete(false);
     setBusy(true);
     onRemoved?.(item.session.id);
@@ -3941,7 +4024,7 @@ function SessionActivityRow({
   };
 
   const requestDelete = () => {
-    if (!canMutateAny || busy) return;
+    if (!canMutateAny || busy || lifecycleManagedByParent) return;
     setConfirmDelete(true);
   };
 
@@ -3995,27 +4078,63 @@ function SessionActivityRow({
       }}
     >
           <div className="activity-session-row-header" style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px 9px" }}>
-            <div className="activity-session-leading" style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
-              <button className="activity-session-toggle" type="button" onClick={(event) => { event.stopPropagation(); onToggle(); }} title={expanded ? t("sessionActivity.collapse") : t("sessionActivity.expand")} aria-label={expanded ? t("sessionActivity.collapse") : t("sessionActivity.expand")} aria-expanded={expanded} style={{ ...iconButtonStyle, width: 20, height: 20, color: "var(--text-dim)", transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.12s" }}><Icon name="chevron" size={13} /></button>
+            <div className="activity-session-leading" style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0, minWidth: depth > 0 && !hasChildren ? 0 : 20 }}>
+              {hasChildren ? (
+                <button
+                  className="activity-session-toggle"
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (onToggleBranch) onToggleBranch();
+                    else onToggle();
+                  }}
+                  title={branchCollapsed ? t("sessionActivity.expandBranch") : t("sessionActivity.collapseBranch")}
+                  aria-label={branchCollapsed ? t("sessionActivity.expandBranch") : t("sessionActivity.collapseBranch")}
+                  aria-expanded={!branchCollapsed}
+                  style={{ ...iconButtonStyle, width: 20, height: 20, color: "var(--text-dim)", transform: branchCollapsed ? "none" : "rotate(90deg)", transition: "transform 0.12s" }}
+                >
+                  <Icon name="chevron" size={13} />
+                </button>
+              ) : depth === 0 ? (
+                <button
+                  className="activity-session-toggle"
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggle();
+                  }}
+                  title={expanded ? t("sessionActivity.collapse") : t("sessionActivity.expand")}
+                  aria-label={expanded ? t("sessionActivity.collapse") : t("sessionActivity.expand")}
+                  aria-expanded={expanded}
+                  style={{ ...iconButtonStyle, width: 20, height: 20, color: "var(--text-dim)", transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.12s" }}
+                >
+                  <Icon name="chevron" size={13} />
+                </button>
+              ) : null}
             </div>
             <button data-session-open="true" type="button" onClick={(event) => { event.stopPropagation(); setArchiveError(null); onOpen(); }} style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 2, flex: 1, minWidth: 0, textAlign: "left", padding: 0, border: 0, background: "none", color: "inherit", cursor: "pointer" }}>
               <div className="activity-session-title-row" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, width: "100%", minHeight: 25 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 7, flex: 1, minWidth: 0, overflow: "hidden" }}>
-                  {contextInjected && (
+                  {item.session.relation?.kind === "subagent" ? (
+                    <span title={t("sidebar.subagent")} style={{ display: "inline-flex", flexShrink: 0 }}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sidebar.subagent")} style={{ opacity: 0.85 }}>
+                        <rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
+                      </svg>
+                    </span>
+                  ) : forked ? (
+                    <span title={t("sessionActivity.forkedSession")} style={{ display: "inline-flex", flexShrink: 0 }}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.forkedSession")} style={{ opacity: 0.85 }}>
+                        <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" />
+                      </svg>
+                    </span>
+                  ) : contextInjected ? (
                     <span title={t("sessionActivity.contextInjectedSession")} style={{ display: "inline-flex", flexShrink: 0 }}>
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.contextInjectedSession")} style={{ opacity: 0.85 }}>
                         <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
                         <path d="M14 11a5 5 0 0 0-7.07 0l-3 3A5 5 0 0 0 9 21l1.71-1.71" />
                       </svg>
                     </span>
-                  )}
-                  {forked && (
-                    <span title={t("sessionActivity.forkedSession")} style={{ display: "inline-flex", flexShrink: 0 }}>
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.forkedSession")} style={{ opacity: 0.85 }}>
-                        <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" />
-                      </svg>
-                    </span>
-                  )}
+                  ) : null}
                   <span style={{ width: 7, height: 7, borderRadius: "50%", background: statusColor(item.status), flexShrink: 0 }} />
                   {editing ? (
                     <input autoFocus value={name} onChange={(event) => setName(event.target.value)} onBlur={() => void commitRename()} onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") setEditing(false); }} style={sidebarRenameInputStyle} />
@@ -4050,7 +4169,7 @@ function SessionActivityRow({
                 {subagentCompleted && <><MetaSeparator /><span title={t("sessionActivity.subagentCompletedHint")} style={{ color: "#2563eb", flexShrink: 0 }}>{t("sessionActivity.subagentCompleted")}</span></>}
                 <span className="activity-session-meta-extra" style={{ display: "inline-flex", alignItems: "center", flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {contextLabel && <><MetaSeparator /><span>{contextLabel}</span></>}
-                  {item.modelName && <><MetaSeparator /><span>{item.modelName}</span></>}
+                  {modelLabel && <><MetaSeparator /><span title={modelValue ?? modelLabel} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{modelLabel}</span></>}
                   {costText && <><MetaSeparator /><span title={[recordedOnly ? t("session.costPartialHint") : "", partialCost ? unpricedTitle : ""].filter(Boolean).join(" · ") || undefined} style={{ color: sessionCostColor(costValue) }}>{costText}</span></>}
                   {unpricedText && <><MetaSeparator /><span title={unpricedTitle} style={{ color: "#d97706", fontWeight: 600 }}>{unpricedText}</span></>}
                   {pendingUsageText && <><MetaSeparator /><span title={pendingUsageText} style={{ color: "#d97706", fontWeight: 600 }}>{pendingUsageText}</span></>}
@@ -4064,13 +4183,20 @@ function SessionActivityRow({
               <SessionDeleteActions onConfirm={() => void remove()} onCancel={() => setConfirmDelete(false)} disabled={busy} t={t} />
             ) : actionsVisible && (
               <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                <ActivityActionButton
+                  title={expanded ? t("sessionActivity.collapse") : (recapDisplay.body ? t("sessionActivity.recap") : t("sessionActivity.expand"))}
+                  disabled={busy}
+                  onClick={onToggle}
+                >
+                  <FileText size={12} strokeWidth={2} />
+                </ActivityActionButton>
                 <ActivityActionButton title={mutateTitle ?? t("sessionActivity.rename")} disabled={!canMutateAny || busy} onClick={() => { setName(item.session.name ?? ""); setEditing(true); }}>
                   <Pencil size={12} strokeWidth={2} />
                 </ActivityActionButton>
-                <ActivityActionButton title={archiveError ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))} disabled={!canMutateAny || busy} onClick={() => void archive()}>
+                <ActivityActionButton title={archiveError ?? lifecycleTitle ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))} disabled={!canMutateAny || busy || lifecycleManagedByParent} onClick={() => void archive()}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" /></svg>
                 </ActivityActionButton>
-                <ActivityActionButton title={mutateTitle ?? t("sessionActivity.delete")} disabled={!canMutateAny || busy} onClick={requestDelete} danger>
+                <ActivityActionButton title={lifecycleTitle ?? mutateTitle ?? t("sessionActivity.delete")} disabled={!canMutateAny || busy || lifecycleManagedByParent} onClick={requestDelete} danger>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1 1h4a1 1 0 0 1 1 1v2" /></svg>
                 </ActivityActionButton>
               </div>
@@ -4086,6 +4212,9 @@ function SessionActivityRow({
               onClose={() => setContextMenuPoint(null)}
               subprojects={subprojects}
               onMoveToSubproject={onMoveToSubproject}
+              hasSubagents={hasSubagents}
+              subagentsVisible={subagentsVisible}
+              onToggleSubagents={onToggleSubagents}
               onFavorite={onFavorite}
               onUnfavorite={onUnfavorite}
               onSetCategory={onSetCategory}
@@ -4093,11 +4222,11 @@ function SessionActivityRow({
               onUnhide={onUnhide}
               onRename={() => { setName(item.session.name ?? ""); setEditing(true); }}
               onArchive={() => void archive()}
-              archiveDisabled={!canMutateAny || busy}
-              archiveTitle={archiveError ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))}
+              archiveDisabled={!canMutateAny || busy || lifecycleManagedByParent}
+              archiveTitle={archiveError ?? lifecycleTitle ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))}
               onDelete={requestDelete}
-              deleteDisabled={!canMutateAny || busy}
-              deleteTitle={mutateTitle ?? t("sessionActivity.delete")}
+              deleteDisabled={!canMutateAny || busy || lifecycleManagedByParent}
+              deleteTitle={lifecycleTitle ?? mutateTitle ?? t("sessionActivity.delete")}
               t={t}
             />
           )}
@@ -4433,6 +4562,7 @@ interface SessionActivitySidebarProps {
 
 export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, highlightedSessionId, leadingControl, onOpenSession, onActivityDeviceFilterChange, onProjectCwdChange, onProjectRemoved, onNewSession, onOpenWorktreeGraph, onSessionDeleted, onRemoteMutate, soundAlerts = true, statusSoundOwner = "chat", onDeviceChange, activityScope: requestedActivityScope = "all", showDeviceSelector = true, refreshKey, viewedAtBySession, onViewedAtChange, headerOnly = false, deviceSwitchOnly = false, deviceSwitchValue, remotePeer, hiddenView = false, favoriteView = false, toDiscussView = false, toReviseView = false, completedView = false, onOpenHidden, onOpenFavorites, onOpenToDiscuss, onOpenToRevise, onOpenCompleted, onOpenTalkMapForSession, onInjectContext, onCopySessionInfo }: SessionActivitySidebarProps) {
   const { t } = useI18n();
+  const visibleSubagentParentIds = useSubagentVisibility();
   const activityScope = resolveActivityScope(requestedActivityScope, { hiddenView, favoriteView, toDiscussView, toReviseView, completedView });
   const isMobile = useIsMobile();
   const [projectDeleteConfirmKey, setProjectDeleteConfirmKey] = useState<string | null>(null);
@@ -4543,7 +4673,7 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
     filters,
     viewedAtBySession,
     searchMatchFilter,
-  );
+  ).filter((hit) => isVisibleSubagentSession(hit, visibleSubagentParentIds, selectedSessionId ?? undefined));
 
   if (activity.data?.sessions) registerSessionLineage(activity.data.sessions);
 
@@ -4582,9 +4712,21 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
     </div>
   );
 
-  const renderSidebarSessionRow = (node: ActivitySessionNode) => {
+  const [collapsedSidebarBranchKeys, setCollapsedSidebarBranchKeys] = useState<Set<string>>(() => new Set());
+  const toggleSidebarBranch = useCallback((key: string) => {
+    setCollapsedSidebarBranchKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const renderSidebarSessionRow = (node: ActivitySessionNode, depth = 0, isLast = false, hasChildren = false) => {
     const item = node.item;
-    return <SessionActivitySidebarRow key={itemKey(item)} item={item} sort={filters.sort} forked={Boolean(item.session.parentSessionId)} contextInjected={Boolean(item.session.contextSourceSessionId)} selected={selectedSessionKey ? itemKey(item) === selectedSessionKey : item.session.id === selectedSessionId} highlighted={item.session.id === highlightedSessionId} statusLabel={activity.statusLabel} formatTime={activity.formatTime} canMutate={item.device.id === localDeviceId} onRemoteMutate={onRemoteMutate} onOpen={() => activity.openActivitySession(item)} onOpenTalkMapForSession={onOpenTalkMapForSession} onInjectContext={onInjectContext} onCopySessionInfo={onCopySessionInfo} contextLabel={rowContextLabel(item, filters.group, activityScope, filters.device === "all")} costPeer={item.device.id === localDeviceId ? undefined : item.device.id} costRootRef={scrollRef} onChanged={() => void activity.refresh(item.device.id, true)} onSessionDeleted={onSessionDeleted} onRemoved={(sessionId) => activity.markSessionRemoved(sessionId)} onRestoreRemoved={(sessionId) => activity.unmarkSessionRemoved(sessionId)} onHide={!hidden ? () => void activity.setHidden("session", item.session.id, true, item.device.id) : undefined} onUnhide={hidden ? () => void activity.setHidden("session", item.session.id, false, item.device.id) : undefined} onFavorite={() => activity.setFavorite(item.session.id, true, item.device.id)} onUnfavorite={() => activity.setFavorite(item.session.id, false, item.device.id)} onSetCategory={(sessionId, category, deviceId) => activity.setCategory(sessionId, category, deviceId)} subprojects={activity.subprojects} onMoveToSubproject={activity.moveSessionToSubproject} t={t} />;
+    const key = itemKey(item);
+    const isBranchCollapsed = collapsedSidebarBranchKeys.has(key);
+    return <SessionActivitySidebarRow key={key} item={item} sort={filters.sort} forked={Boolean(item.session.parentSessionId)} contextInjected={Boolean(item.session.contextSourceSessionId)} selected={selectedSessionKey ? key === selectedSessionKey : item.session.id === selectedSessionId} highlighted={item.session.id === highlightedSessionId} statusLabel={activity.statusLabel} formatTime={activity.formatTime} canMutate={item.device.id === localDeviceId} onRemoteMutate={onRemoteMutate} onOpen={() => activity.openActivitySession(item)} onOpenTalkMapForSession={onOpenTalkMapForSession} onInjectContext={onInjectContext} onCopySessionInfo={onCopySessionInfo} contextLabel={rowContextLabel(item, filters.group, activityScope, filters.device === "all")} costPeer={item.device.id === localDeviceId ? undefined : item.device.id} costRootRef={scrollRef} onChanged={() => void activity.refresh(item.device.id, true)} onSessionDeleted={onSessionDeleted} onRemoved={(sessionId) => activity.markSessionRemoved(sessionId)} onRestoreRemoved={(sessionId) => activity.unmarkSessionRemoved(sessionId)} onHide={!hidden ? () => void activity.setHidden("session", item.session.id, true, item.device.id) : undefined} onUnhide={hidden ? () => void activity.setHidden("session", item.session.id, false, item.device.id) : undefined} onFavorite={() => activity.setFavorite(item.session.id, true, item.device.id)} onUnfavorite={() => activity.setFavorite(item.session.id, false, item.device.id)} onSetCategory={(sessionId, category, deviceId) => activity.setCategory(sessionId, category, deviceId)} subprojects={activity.subprojects} onMoveToSubproject={activity.moveSessionToSubproject} hasSubagents={hasSubagentChildren(activity.data?.sessions ?? [], item)} subagentsVisible={visibleSubagentParentIds.has(item.session.id)} onToggleSubagents={() => setSubagentVisibility(item.session.id, !visibleSubagentParentIds.has(item.session.id))} t={t} depth={depth} hasChildren={hasChildren} branchCollapsed={isBranchCollapsed} onToggleBranch={hasChildren ? () => toggleSidebarBranch(key) : undefined} />;
   };
 
   return (
@@ -4780,6 +4922,7 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
               key={`${hit.device?.id ?? "local"}:${hit.id}`}
               hit={hit}
               activityItems={activity.data?.sessions}
+              visibleSubagentParentIds={visibleSubagentParentIds}
               viewedAtBySession={viewedAtBySession}
               sort={filters.sort}
               selected={selectedSessionKey ? itemKey(searchHitToItem(hit, activity.data?.device, activity.data?.sessions, viewedAtBySession)) === selectedSessionKey : hit.id === selectedSessionId}
@@ -4818,6 +4961,7 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
           </div>
         )}
         {searchQuery.trim().length === 0 && activity.groups.map(([groupKey, items, emptyProject]) => {
+          const visibleItems = filterVisibleSubagentItems(items, visibleSubagentParentIds, selectedSessionId ?? undefined);
           const collapsed = filters.group !== "none" && collapsedGroups.includes(groupKey);
           const sessionProject = items[0] ? projectInfoFromSession(items[0]) : null;
           const groupProject = (filters.group === "project" || filters.group === "worktree") ? emptyProject ?? sessionProject : null;
@@ -4843,8 +4987,8 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
               : [],
           );
           const visibleGroupSubprojects = groupSubprojects.filter((subproject) => !subproject.hidden && !autoHiddenGroupSubprojectIds.has(subproject.id));
-          const visibleGroupItems = filterSubprojectItems(items, hiddenSubprojectIdsFor(groupSubprojects, autoHiddenGroupSubprojectIds));
-          const hasProjectSessions = Boolean(groupProject?.hasSessions || items.length > 0);
+          const visibleGroupItems = filterSubprojectItems(visibleItems, hiddenSubprojectIdsFor(groupSubprojects, autoHiddenGroupSubprojectIds));
+          const hasProjectSessions = Boolean(groupProject?.hasSessions || visibleItems.length > 0);
           const canDeleteProject = Boolean((filters.group === "project" || filters.group === "worktree") && !hasProjectSessions && groupProject?.saved && groupDeviceId);
           return (
             <section key={groupKey || "all"}>
@@ -4853,7 +4997,7 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
                   path={groupPath}
                   deviceId={groupDeviceId}
                   canDelete={filters.group === "project" && canDeleteProject}
-                  hasSessions={groupProject?.hasSessions ?? items.length > 0}
+                  hasSessions={groupProject?.hasSessions ?? visibleItems.length > 0}
                   hasSubprojects={filters.group === "project" && groupSubprojects.length > 0}
                   autoHideEmptySubprojects={Boolean(groupSubprojectSort?.autoHideEmptySubprojects)}
                   onRequestDelete={() => {
@@ -4961,7 +5105,7 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
                 </div>
               )}
               {!collapsed && (() => {
-                  if (filters.group === "worktree") return <WorktreeSessionBuckets onNewSession={onNewSession ? (cwd, deviceId) => onNewSession(cwd, deviceId ? activity.devices.find((d) => d.id === deviceId) : groupDeviceInfo) : undefined} focusSessionKey={selectedSessionKey ?? undefined} items={visibleGroupItems} inventoryProjectKey={groupProject?.projectKey} inventoryProjectRoot={groupPath} inventoryDeviceId={groupDeviceId} inventoryUrl={groupPath ? (groupDeviceId && groupDeviceId !== localDeviceId ? `/api/remote/worktrees?peer=${encodeURIComponent(groupDeviceId)}&cwd=${encodeURIComponent(groupPath)}` : `/api/worktrees?cwd=${encodeURIComponent(groupPath)}`) : undefined} sessionOf={item => item.session} deviceOf={item => item.device.id} mainLabel={t("sessionActivity.worktreeMain")} worktreeLabel={t("sessionActivity.worktreeLinked")} renderItems={rows => <SessionLineageBranchList nodes={buildSessionLineageTree(rows, filters.sort)} renderRow={renderSidebarSessionRow} />} />;
+                  if (filters.group === "worktree") return <WorktreeSessionBuckets onNewSession={onNewSession ? (cwd, deviceId) => onNewSession(cwd, deviceId ? activity.devices.find((d) => d.id === deviceId) : groupDeviceInfo) : undefined} focusSessionKey={selectedSessionKey ?? undefined} items={visibleGroupItems} inventoryProjectKey={groupProject?.projectKey} inventoryProjectRoot={groupPath} inventoryDeviceId={groupDeviceId} inventoryUrl={groupPath ? (groupDeviceId && groupDeviceId !== localDeviceId ? `/api/remote/worktrees?peer=${encodeURIComponent(groupDeviceId)}&cwd=${encodeURIComponent(groupPath)}` : `/api/worktrees?cwd=${encodeURIComponent(groupPath)}`) : undefined} sessionOf={item => item.session} deviceOf={item => item.device.id} mainLabel={t("sessionActivity.worktreeMain")} worktreeLabel={t("sessionActivity.worktreeLinked")} renderItems={rows => <SessionLineageBranchList variant="sidebar" collapsedBranchKeys={collapsedSidebarBranchKeys} nodes={buildSessionLineageTree(rows, filters.sort)} renderRow={renderSidebarSessionRow} />} />;
                   const definitions = filters.group === "project" && groupProject
                     ? groupSubprojects
                     : [];
@@ -4982,8 +5126,10 @@ export function SessionActivitySidebar({ selectedSessionId, selectedSessionKey, 
                        onSortSubprojects={(order) => activity.mutateSubprojects(groupDeviceId!, "PUT", { projectKey: groupProject!.projectKey, mode: "custom", order }).then((result) => result.ok)}
                       onToggleSubprojectVisibility={(subproject) => toggleSubprojectVisibility(groupDeviceId!, subproject)}
                       mutateSubprojects={activity.mutateSubprojects}
+                      variant="sidebar"
+                      collapsedBranchKeys={collapsedSidebarBranchKeys}
                     />
-                    : <SessionLineageBranchList nodes={buildSessionLineageTree(items, filters.sort)} renderRow={renderSidebarSessionRow} />;
+                    : <SessionLineageBranchList variant="sidebar" collapsedBranchKeys={collapsedSidebarBranchKeys} nodes={buildSessionLineageTree(visibleItems, filters.sort)} renderRow={renderSidebarSessionRow} />;
               })()}
             </section>
           );
@@ -5069,7 +5215,7 @@ function ActivityNewSessionButton({ cwd, device, localDeviceId, onNewSession, su
   );
 }
 
-function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, searchLabels, forked = false, contextInjected = false, sort, statusLabel, formatTime, costPeer, costRootRef, canMutate, onRemoteMutate, onOpen, onOpenTalkMapForSession, onInjectContext, onCopySessionInfo, onChanged, onSessionDeleted, onHide, onUnhide, onRemoved, onRestoreRemoved, onFavorite, onUnfavorite, onSetCategory, subprojects = [], onMoveToSubproject, t }: {
+function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, searchLabels, forked = false, contextInjected = false, sort, statusLabel, formatTime, costPeer, costRootRef, canMutate, onRemoteMutate, onOpen, onOpenTalkMapForSession, onInjectContext, onCopySessionInfo, onChanged, onSessionDeleted, onHide, onUnhide, onRemoved, onRestoreRemoved, onFavorite, onUnfavorite, onSetCategory, subprojects = [], onMoveToSubproject, hasSubagents = false, subagentsVisible = false, onToggleSubagents, t, depth = 0, hasChildren = false, branchCollapsed = false, onToggleBranch }: {
   sort: SortValue;
   item: SessionActivityItem;
   selected: boolean;
@@ -5080,6 +5226,13 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
   forked?: boolean;
   /** True when this session received context from another session. */
   contextInjected?: boolean;
+  hasSubagents?: boolean;
+  subagentsVisible?: boolean;
+  onToggleSubagents?: () => void;
+  depth?: number;
+  hasChildren?: boolean;
+  branchCollapsed?: boolean;
+  onToggleBranch?: () => void;
   statusLabel: (status: SessionActivityStatus) => string;
   formatTime: (value: string) => string;
   costPeer?: string;
@@ -5117,6 +5270,10 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const title = sessionTitle(item);
+  const modelValue = item.session.relation?.kind === "subagent" ? sessionModelValue(item.session, item.modelName) : undefined;
+  const modelLabel = item.session.relation?.kind === "subagent"
+    ? sessionModelLabel(modelValue) ?? t("sidebar.subagentModelPending")
+    : undefined;
   const pointerDrag = useSessionSubprojectPointerDrag({
     projectKey: item.projectKey,
     deviceId: item.device.id,
@@ -5125,13 +5282,13 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
   });
   const status = item.status;
   const subagentCompleted = hasCompletedSubagent(item);
-  const { cost, costStatus, cacheHitRate, missingPriceModels, pendingUsageCount, recordedOnly, costRef } = useLazySessionCost(item.session.id, item.session.modified, costPeer, costRootRef);
+  const { cost, costState, costStatus, cacheHitRate, missingPriceModels, pendingUsageCount, recordedOnly, costRef } = useLazySessionCost(item.session.id, item.session.modified, costPeer, costRootRef);
   const costValue = typeof cost === "number" ? cost : 0;
   const partialCost = costStatus === "partial";
   const formattedCost = partialCost
     ? `≥$${(Math.floor(costValue * 100) / 100).toFixed(2)}`
     : typeof cost === "number" && (costValue > 0 || recordedOnly) ? `$${costValue.toFixed(2)}` : null;
-  const costText = formattedCost;
+  const costText = costState === "loading" ? "…" : costState === "error" ? "?" : formattedCost;
   const unpricedText = missingPriceModels.length > 0 && !partialCost ? t("sessionActivity.unpriced") : null;
   const unpricedTitle = missingPriceModels.length > 0
     ? partialCost ? missingPriceModels.join(", ") : `${t("session.unpricedModels")}: ${missingPriceModels.join(", ")}`
@@ -5142,6 +5299,8 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
   const canRemote = !canMutate && item.device.online !== false && Boolean(onRemoteMutate);
   const canMutateAny = canMutate || canRemote;
   const mutateTitle = canMutate ? null : canRemote ? t("sessionActivity.remoteActionViaDevice") : t("sessionActivity.remoteActionUnavailable");
+  const lifecycleManagedByParent = item.session.relation?.kind === "subagent";
+  const lifecycleTitle = lifecycleManagedByParent ? t("sessionActivity.subagentLifecycleRequiresParent") : undefined;
   const cardActionProjectRoot = item.session.projectRoot?.trim() || item.session.cwd?.trim() || "";
   const hasFooterActions = Boolean(
     (onOpenTalkMapForSession && cardActionProjectRoot)
@@ -5165,7 +5324,7 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
   };
 
   const archive = async () => {
-    if (!canMutateAny || busy) return;
+    if (!canMutateAny || busy || lifecycleManagedByParent) return;
     setArchiveError(null);
     setBusy(true);
     try {
@@ -5190,7 +5349,7 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
   };
 
   const remove = async () => {
-    if (!canMutateAny || busy) return;
+    if (!canMutateAny || busy || lifecycleManagedByParent) return;
     setConfirmDelete(false);
     setBusy(true);
     onRemoved?.(item.session.id);
@@ -5213,7 +5372,7 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
   };
 
   const requestDelete = () => {
-    if (!canMutateAny || busy) return;
+    if (!canMutateAny || busy || lifecycleManagedByParent) return;
     setConfirmDelete(true);
   };
 
@@ -5259,21 +5418,49 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
           ) : (
             <>
               <button data-session-open="true" type="button" onClick={() => { setArchiveError(null); onOpen(); }} style={sidebarRowButtonStyle}>
-              {contextInjected && (
+              {hasChildren && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleBranch?.();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.stopPropagation();
+                      event.preventDefault();
+                      onToggleBranch?.();
+                    }
+                  }}
+                  title={branchCollapsed ? t("sessionActivity.expandBranch") : t("sessionActivity.collapseBranch")}
+                  aria-label={branchCollapsed ? t("sessionActivity.expandBranch") : t("sessionActivity.collapseBranch")}
+                  aria-expanded={!branchCollapsed}
+                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 14, height: 14, padding: 0, color: "var(--text-dim)", cursor: "pointer", flexShrink: 0, transform: branchCollapsed ? "none" : "rotate(90deg)", transition: "transform 0.12s" }}
+                >
+                  <Icon name="chevron" size={11} />
+                </span>
+              )}
+              {item.session.relation?.kind === "subagent" ? (
+                <span title={t("sidebar.subagent")} style={{ display: "inline-flex", flexShrink: 0 }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sidebar.subagent")} style={{ opacity: 0.85 }}>
+                    <rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
+                  </svg>
+                </span>
+              ) : forked ? (
+                <span title={t("sessionActivity.forkedSession")} style={{ display: "inline-flex", flexShrink: 0 }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.forkedSession")} style={{ opacity: 0.85 }}>
+                    <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" />
+                  </svg>
+                </span>
+              ) : contextInjected ? (
                 <span title={t("sessionActivity.contextInjectedSession")} style={{ display: "inline-flex", flexShrink: 0 }}>
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.contextInjectedSession")} style={{ opacity: 0.85 }}>
                     <path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
                     <path d="M14 11a5 5 0 0 0-7.07 0l-3 3A5 5 0 0 0 9 21l1.71-1.71" />
                   </svg>
                 </span>
-              )}
-              {forked && (
-                <span title={t("sessionActivity.forkedSession")} style={{ display: "inline-flex", flexShrink: 0 }}>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.forkedSession")} style={{ opacity: 0.85 }}>
-                    <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" />
-                  </svg>
-                </span>
-              )}
+              ) : null}
               <span style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: statusColor(status) }} />
               <span style={{ display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
                 <span className="activity-session-title" title={title} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12, fontWeight: highlighted || selected ? 500 : 400, lineHeight: 1.35 }}>{title}</span>
@@ -5302,6 +5489,7 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
                   {subagentCompleted && <><span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span><span title={t("sessionActivity.subagentCompletedHint")} style={{ color: "#2563eb" }}>{t("sessionActivity.subagentCompleted")}</span></>}
                   <span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span>
                   <span style={{ color: "var(--text-dim)" }}>{formatTime(itemTime(item, sort))}</span>
+                  {modelLabel && <><span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span><span title={modelValue ?? modelLabel} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{modelLabel}</span></>}
                   {costText && <><span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span><span title={[recordedOnly ? t("session.costPartialHint") : "", partialCost ? unpricedTitle : ""].filter(Boolean).join(" · ") || undefined} style={{ color: sessionCostColor(costValue) }}>{costText}</span></>}
                   {unpricedText && <><span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span><span title={unpricedTitle} style={{ color: "#d97706", fontWeight: 600 }}>{unpricedText}</span></>}
                   {pendingUsageText && <><span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span><span title={pendingUsageText} style={{ color: "#d97706", fontWeight: 600 }}>{pendingUsageText}</span></>}
@@ -5324,15 +5512,15 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
                 <Pencil size={12} strokeWidth={2} />
               </ActivityActionButton>
               <ActivityActionButton
-                title={archiveError ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))}
-                disabled={!canMutateAny || busy}
+                title={archiveError ?? lifecycleTitle ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))}
+                disabled={!canMutateAny || busy || lifecycleManagedByParent}
                 onClick={() => void archive()}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" /></svg>
               </ActivityActionButton>
                 <ActivityActionButton
-                  title={mutateTitle ?? t("sessionActivity.delete")}
-                  disabled={!canMutateAny || busy}
+                  title={lifecycleTitle ?? mutateTitle ?? t("sessionActivity.delete")}
+                  disabled={!canMutateAny || busy || lifecycleManagedByParent}
                   onClick={requestDelete}
                   danger
                 >
@@ -5350,6 +5538,9 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
               onClose={() => setContextMenuPoint(null)}
               subprojects={subprojects}
               onMoveToSubproject={onMoveToSubproject}
+              hasSubagents={hasSubagents}
+              subagentsVisible={subagentsVisible}
+              onToggleSubagents={onToggleSubagents}
               onFavorite={onFavorite}
               onUnfavorite={onUnfavorite}
               onSetCategory={onSetCategory}
@@ -5357,11 +5548,11 @@ function SessionActivitySidebarRow({ item, selected, highlighted, contextLabel, 
               onUnhide={onUnhide}
               onRename={() => { setName(item.session.name ?? ""); setEditing(true); }}
               onArchive={() => void archive()}
-              archiveDisabled={!canMutateAny || busy}
-              archiveTitle={archiveError ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))}
+              archiveDisabled={!canMutateAny || busy || lifecycleManagedByParent}
+              archiveTitle={archiveError ?? lifecycleTitle ?? (mutateTitle ?? (item.session.archived ? t("sessionActivity.restore") : t("sessionActivity.archive")))}
               onDelete={requestDelete}
-              deleteDisabled={!canMutateAny || busy}
-              deleteTitle={mutateTitle ?? t("sessionActivity.delete")}
+              deleteDisabled={!canMutateAny || busy || lifecycleManagedByParent}
+              deleteTitle={lifecycleTitle ?? mutateTitle ?? t("sessionActivity.delete")}
               t={t}
             />
           )}
@@ -5604,6 +5795,7 @@ function ActivitySearchHitRow({
   highlighted,
   localDevice,
   activityItems,
+  visibleSubagentParentIds,
   viewedAtBySession,
   sort,
   statusLabel,
@@ -5625,6 +5817,7 @@ function ActivitySearchHitRow({
   onMoveToSubproject,
 }: {
   activityItems?: readonly SessionActivityItem[];
+  visibleSubagentParentIds: ReadonlySet<string>;
   viewedAtBySession?: Record<string, number>;
   sort: SortValue;
   hit: SessionSearchResult;
@@ -5686,6 +5879,9 @@ function ActivitySearchHitRow({
         onSetCategory={onSetCategory}
         subprojects={subprojects}
         onMoveToSubproject={onMoveToSubproject}
+        hasSubagents={hasSubagentChild(activityItems ?? [], hit.id, hit.device?.id)}
+        subagentsVisible={visibleSubagentParentIds.has(hit.id)}
+        onToggleSubagents={() => setSubagentVisibility(hit.id, !visibleSubagentParentIds.has(hit.id))}
         t={t}
       />
     </div>

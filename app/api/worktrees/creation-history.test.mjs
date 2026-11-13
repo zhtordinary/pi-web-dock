@@ -35,31 +35,30 @@ test("creation history reads visible project sessions without executing or expos
   const sessionsDir = path.join(agent, "sessions", "project");
   await mkdir(sessionsDir, { recursive: true });
   const marker = path.join(root, "must-not-run");
-  async function writeSession(id) {
+  async function writeSession(id, structuredBinding = false) {
     const entries = [
       { type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: repo },
       { type: "message", id: "user", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "Fixture" }] } },
       { type: "message", id: "assistant", parentId: "user", timestamp: "2026-01-02T00:00:00.000Z", message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: `git worktree add -b feat/task '${linked}' main; touch '${marker}'` } }] } },
       { type: "message", id: "result", parentId: "assistant", timestamp: "2026-01-02T00:00:01.000Z", message: { role: "toolResult", toolName: "bash", toolCallId: "call-1", isError: false, content: [{ type: "text", text: "Preparing worktree (new branch 'feat/task')\nHEAD is now at abc1234 initial\n" }] } },
-      { type: "session_info", id: "name", parentId: "result", timestamp: "2026-01-02T00:00:02.000Z", name: `Session ${id}` },
+      ...(structuredBinding ? [{ type: "custom", id: "binding", parentId: "result", timestamp: "2026-01-02T00:00:02.000Z", customType: "pi-web:worktree-binding", data: { version: 1, action: "bind", relation: "task-root", projectRoot: repo, worktreePath: linked } }] : []),
+      { type: "session_info", id: "name", parentId: "result", timestamp: "2026-01-02T00:00:03.000Z", name: `Session ${id}` },
     ];
     await writeFile(path.join(sessionsDir, `${id}.jsonl`), entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   }
-  await writeSession("visible-session");
+  await writeSession("visible-session", true);
   await writeSession("hidden-session");
   await writeFile(process.env.PI_WEB_HIDDEN_FILE, JSON.stringify({ sessions: ["hidden-session"], projects: [], devices: [], visibleSessions: [] }));
   const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
   const { GET } = await jiti.import("./route.ts");
-  const { allowFileRoot } = await jiti.import("@/lib/file-access");
-  allowFileRoot(repo);
-  allowFileRoot(linked);
   const response = await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&creationHistory=1`));
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.partial, false);
   assert.deepEqual(body.records.map((record) => [record.worktreePath, record.sessionId]), [[linked, "visible-session"]]);
+  assert.deepEqual(body.bindings.map((record) => [record.worktreePath, record.sessionId, record.relation]), [[linked, "visible-session", "task-root"]]);
   assert.equal(JSON.stringify(body).includes("must-not-run"), false);
   await assert.rejects(stat(marker), { code: "ENOENT" });
-  const denied = await GET(new Request("http://localhost/api/worktrees?cwd=%2Fnot-allowed&creationHistory=1"));
-  assert.equal(denied.status, 403);
+  const missing = await GET(new Request("http://localhost/api/worktrees?cwd=%2Fnot-allowed&creationHistory=1"));
+  assert.equal(missing.status, 400);
 });

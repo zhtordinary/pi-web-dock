@@ -174,11 +174,12 @@ test("file explorer opens Reader while session file links keep modal behavior", 
   const sidebarEnd = source.indexOf("/>", sidebarStart);
   assert.ok(sidebarStart >= 0 && sidebarEnd > sidebarStart);
   assert.match(source.slice(sidebarStart, sidebarEnd), /onOpenFile=\{handleOpenFileFromExplorer\}/);
-  const popupStart = source.indexOf("onOpenInReaderView={() => {");
+  const popupStart = source.indexOf("onOpenInReaderView={(filePath, page, anchor) => {");
   const popupEnd = source.indexOf("onClose={() => setSessionPopupFile(null)}", popupStart);
   assert.ok(popupStart >= 0 && popupEnd > popupStart);
   const popupHandler = source.slice(popupStart, popupEnd);
   assert.ok(popupHandler.indexOf("handleOpenFile(") < popupHandler.indexOf("activateReaderMode(target.cwd, target.remotePeer)"), "open tab before entering Reader");
+  assert.match(popupHandler, /handleOpenFile\(filePath, getFileName\(filePath\), \{[\s\S]*?remotePeer: target\.remotePeer,[\s\S]*?sourceSessionId: target\.sourceSessionId,[\s\S]*?cwd: target\.cwd,[\s\S]*?page,[\s\S]*?anchor,/);
   assert.match(popupHandler, /activateReaderMode\(target\.cwd, target\.remotePeer\);/);
 });
 

@@ -10,9 +10,11 @@ import {
   type Model as PiModel,
   type ModelsSimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type SessionEntry as PiSessionEntry, type SessionMessageEntry as NativeSessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type AgentSession, type ExtensionAPI, type InlineExtension, type SessionEntry as PiSessionEntry, type SessionMessageEntry as NativeSessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { createInitialSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { QuickAskRuntime } from "./quick-ask-runtime";
+import { QuickAskRuntime, type QuickAskAgentInput, type QuickAskAgentSession } from "./quick-ask-runtime";
+import { quickAskCachedMcpSummaries } from "./quick-ask-session";
+import { createReaderAgentSessionServices, invalidateModelRuntimeWithExtensions } from "./model-runtime";
 import { QuickAskError } from "./quick-ask-context";
 import { projectSessionQuickAsks as projectSessionQuickAsksForFork } from "./quick-ask-storage";
 import { createQuickAskBranch, findQuickAskBranch, materializeQuickAskBranch, materializeQuickAskTransfer, quickAskItems, quickAskTransferState,
@@ -22,7 +24,7 @@ import { createHash, randomUUID } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import { historyEntryOrderKey, historyClientMessageIds, CLIENT_MESSAGE_CUSTOM_TYPE } from "./transcript-order";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { resolve, relative, isAbsolute } from "path";
+import { resolve, relative, isAbsolute, sep } from "path";
 import lockfile from "proper-lockfile";
 import { acquireSessionRuntimeOwnership, type SessionRuntimeOwnership } from "./session-runtime-ownership";
 import { recordSessionMessageOutcome } from "./session-messages";
@@ -89,11 +91,18 @@ import {
   createProjectCommandBashOperations,
   preferUserBashExtension,
 } from "./project-command-env";
-import { resolveShellTools } from "./powershell-settings";
-import { createSessionControlExtension } from "./session-control";
+import {
+  readSessionThinkingLevel,
+  resolveActiveToolNames,
+  SESSION_TOOL_NAMES,
+  THINKING_LEVEL_NAMES,
+} from "./rpc-session-tool-policy";
+export { readSessionThinkingLevel, resolveActiveToolNames } from "./rpc-session-tool-policy";
+import { createSessionControlExtension, isProtectedSideAskControl } from "./session-control";
+import { SIDE_ASK_CHILD, SIDE_ASK_NATIVE_CHILD, SIDE_ASK_PEER_OWNERSHIP, preferSideAskSessionControl, readSideAskPeerOwnership, type SideAskPeerOwnership } from "./side-ask-ownership";
 import { drainLocalOwnerOutboxes, persistSessionWaitEvent, persistSessionUiRequestEvent, invalidateSessionUiRequestWaits } from "./session-waits";
 import { drainPendingSessionWakes } from "./session-control-wake-queue";
-import { createSubagentExtension, preferPiWebSubagentExtension } from "./subagent-extension";
+import { createSubagentExtension, preferPiWebSubagentExtension, type SubagentExecution, type SubagentExtensionRuntime } from "./subagent-extension";
 import { createSubagentSkillsBinding } from "./subagent-skills";
 import {
   hasSubagentResourceSnapshot,
@@ -101,13 +110,13 @@ import {
   readSubagentSessionResources,
   subagentExtensionLoaderOptions,
   subagentToolOptions,
-  SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import {
   createSubagentController,
   activeSubagentIdsForParent,
   createSubagentSkillRuntimeContext,
   permittedSubagentSkillNames,
+  type HostSession,
 } from "./subagent-runtime";
 import {
   createRemoteClaudeHostGuardExtension,
@@ -119,7 +128,7 @@ import {
   revokeRemoteClaudeHost,
   type RemoteClaudeHostBinding,
 } from "./remote-claude-host";
-import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import { getSubagentSettingsPath, isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { getSessionBackgroundRunIds } from "./subagent-activity";
 import { assertSessionFileExecutable } from "./session-archive";
 import { createSubagentStopBridge } from "./subagent-stop-bridge";
@@ -161,7 +170,7 @@ import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { createPiWebBuiltinExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
 import { mcpPromptPreparation, type McpCommandCandidate } from "./mcp-command";
-import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
+import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension, isMcpTool, isReadOnlySelection, readOnlyMcpBlockReason } from "./mcp-read-only-policy";
 import { getModelThinkingDefaults, readModelsConfig } from "./models-config-store";
 import {
   agentEndErrorMessage,
@@ -392,7 +401,10 @@ type ActiveCustomUi = {
   width: number;
   resolve: (value: unknown) => void;
   settled: boolean;
+  sideAskRunId?: string;
+  sideAskLabel?: string;
 };
+type SideAskUiOwner = { signal: AbortSignal; runId: string; label: string };
 
 type ExtensionUiRequestBody = Record<string, unknown> & {
   method: ExtensionUiRequest["method"];
@@ -411,6 +423,7 @@ type ExtensionCommandContextActionsLike = {
 
 type ExtensionBindingOptions = {
   forceEmptySystemPrompt?: boolean;
+  uiContext?: ExtensionUiContextLike;
 };
 
 // Pi 0.84 exposes Agent.continue() but AgentSession does not yet expose a
@@ -496,6 +509,8 @@ export function resolveSessionIdleTimeoutMs(
 const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
 
 export interface RpcSessionStartOptions {
+  /** Optional isolated Pi agent directory used by controlled fixtures and hosts. */
+  agentDir?: string;
   /** Optional isolated native session directory used by controlled fixtures and hosts. */
   sessionDir?: string;
   toolNames?: string[];
@@ -510,9 +525,6 @@ export interface RpcSessionStartOptions {
   parentRemoteHost?: RemoteClaudeHostBinding;
 }
 
-const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
-const THINKING_LEVEL_NAMES = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const SESSION_TOOL_NAMES = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 // ponytail: bounded fallback; a stuck tool cannot be awaited indefinitely.
 const ABORT_TIMEOUT_MS = 2_000;
 export const MCP_WAIT_STOPPED_MESSAGE = "Stopped while MCP servers were connecting; the message was not sent.";
@@ -544,43 +556,6 @@ class PlainTextTheme extends Theme {
 
 const PLAIN_TEXT_THEME = new PlainTextTheme();
 const CUSTOM_UI_KEYBINDINGS = new TuiKeybindingsManager(TUI_KEYBINDINGS);
-
-/**
- * Resolve a Reader coding selection against the SDK's real active tool set.
- * The SDK decides which registered tools are active; Reader only replaces its
- * coding selection and carries currently active, visible non-coding tools.
- */
-export function resolveActiveToolNames(
-  session: AgentSessionLike,
-  requested: readonly string[],
-  carry: readonly string[],
-): string[] {
-  if (requested.length === 0) return [];
-
-  const codingToolNames = new Set(CODING_TOOL_NAMES);
-  const registered = new Map(session.getAllTools().map((tool) => [tool.name, tool]));
-  const selectedToolNames = resolveShellTools(
-    requested.filter((name) => codingToolNames.has(name)),
-    session.settingsManager.getDefaultTools(),
-  );
-  const carriedToolNames = carry.filter((name) => {
-    const tool = registered.get(name);
-    const exposure = (tool as (ToolInfo & { exposure?: unknown }) | undefined)?.exposure;
-    return tool !== undefined && !codingToolNames.has(name) && exposure !== "hidden";
-  });
-
-  return [...new Set([...selectedToolNames, ...carriedToolNames])];
-}
-
-function readSessionThinkingLevel(sessionManager: SessionManager): ThinkingLevel | undefined {
-  let level: ThinkingLevel | undefined;
-  for (const entry of sessionManager.getBranch()) {
-    if (entry.type === "thinking_level_change") {
-      level = entry.thinkingLevel as unknown as ThinkingLevel;
-    }
-  }
-  return level;
-}
 
 export interface SessionForkResult {
   cancelled: boolean;
@@ -886,6 +861,8 @@ export class AgentSessionWrapper {
   private schedulerTimer: ReturnType<typeof setTimeout> | null = null;
   private promptRunning = false;
   private treeNavigationPending = false;
+  /** Holds the branch cursor and prompt admission as one history-edit boundary. */
+  private historyEditPending = false;
   private activeExtensionWidgets = new Map<string, ActiveExtensionWidget>();
   private extensionWidgetGenerations = new Map<string, number>();
   private extensionWidgetsResetting = false;
@@ -918,6 +895,7 @@ export class AgentSessionWrapper {
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private sideAskRuntime: QuickAskRuntime | undefined;
+  private sideAskTailOpen = false;
   private sideAskWriteFailed = false;
   private disposed = false;
   private destroyCallbackInvoked = false;
@@ -976,6 +954,11 @@ export class AgentSessionWrapper {
   private managedSettingPending = false;
   private readonly liveEventRecords: LiveAgentEventRecord[] = [];
   private readonly strictToolAllowlist: boolean;
+  readonly agentDir?: string;
+  readonly protectedSessionId?: string;
+  readonly sideAskGuard?: InlineExtension;
+  readonly sideAskControl?: InlineExtension;
+  readonly sideAskPeerOwnership?: SideAskPeerOwnership;
   private preserveUnattendedStateOnShutdown = false;
   private readonly runtimeOwnership?: SessionRuntimeOwnership;
   private bashExecution?: Promise<unknown>;
@@ -983,6 +966,9 @@ export class AgentSessionWrapper {
   private stopAllPromise: ReturnType<typeof stopSessionExecution> | null = null;
   private stopAllRequested = false;
   private readonly stopBackgroundRun?: (runId: string) => Promise<void>;
+  private readonly createQuickAskAgent: (input: QuickAskAgentInput) => Promise<QuickAskAgentSession>;
+  private sideAskUiGeneration = 0;
+  private projectTrusted?: boolean;
   private restoreStoppedCustomMessageAdmission: (() => void) | null = null;
 
   constructor(public readonly inner: AgentSessionLike, projectSkillRuntime?: ProjectSkillRuntime, fastModeState: { mode: FastModeSelection } = { mode: "default" }, mcpOptions: {
@@ -992,8 +978,22 @@ export class AgentSessionWrapper {
     skillRuntimeContext?: RuntimeSkillPolicyContext;
     stopBackgroundRun?: (runId: string) => Promise<void>;
     runtimeOwnership?: SessionRuntimeOwnership;
+    agentDir?: string;
+    createQuickAskAgent?: (input: QuickAskAgentInput) => Promise<QuickAskAgentSession>;
+    projectTrusted?: boolean;
+    protectedSessionId?: string;
+    sideAskGuard?: InlineExtension;
+    sideAskControl?: InlineExtension;
+    sideAskPeerOwnership?: SideAskPeerOwnership;
   } = {}) {
+    this.agentDir = mcpOptions.agentDir;
+    this.sideAskPeerOwnership = mcpOptions.sideAskPeerOwnership;
+    this.protectedSessionId = mcpOptions.protectedSessionId;
+    this.sideAskGuard = mcpOptions.sideAskGuard;
+    this.sideAskControl = mcpOptions.sideAskControl;
     this.runtimeOwnership = mcpOptions.runtimeOwnership;
+    this.projectTrusted = mcpOptions.projectTrusted;
+    this.createQuickAskAgent = mcpOptions.createQuickAskAgent ?? ((input) => this.createIsolatedQuickAskAgent(input));
     const persistedCompaction = readSessionAutoCompaction(inner.sessionManager?.getEntries?.() ?? []);
     if (persistedCompaction !== undefined) this.setAutoCompactionEnabledRuntimeOnly(persistedCompaction);
     this.projectSkillRuntime = projectSkillRuntime;
@@ -1062,6 +1062,260 @@ export class AgentSessionWrapper {
     return this.sideAskRuntime?.hasActiveRun() === true;
   }
 
+  private async createIsolatedQuickAskAgent(input: QuickAskAgentInput): Promise<QuickAskAgentSession> {
+    const cwd = this.cwd;
+    const agentDir = this.agentDir ?? getAgentDir();
+    const trust = getProjectTrustStatus(cwd, agentDir);
+    if (this.projectTrusted !== undefined && trust.trusted !== this.projectTrusted) {
+      throw new QuickAskError("Project trust changed; reload the source session before starting a Side Ask", 409);
+    }
+    const parent = this.inner as unknown as Pick<AgentSession, "getCallableToolNames" | "getAllTools">;
+    if (typeof parent.getCallableToolNames !== "function") throw new QuickAskError("Side Ask tool scope is unavailable", 503);
+    const activeTools = [...this.inner.getActiveToolNames()];
+    const allowedTools = new Set([...activeTools, ...parent.getCallableToolNames()]);
+    const peerOwnership: SideAskPeerOwnership = { version: 1, sourceSessionId: this.sessionId,
+      activeTools, callableTools: [...allowedTools] };
+    const sideAskControl = createSessionControlExtension({ protectedSessionId: this.sessionId,
+      createSession: (request) => createDurableRpcSession(request, { agentDir, sideAskPeerOwnership: peerOwnership }) });
+    const sourcePaths = new Set(this.inner.resourceLoader.getExtensions().extensions.map((extension) => extension.path));
+    const resources = readValidSubagentResources(this.inner.sessionManager.getEntries() as unknown as SessionEntry[]);
+    const needsBuiltins = [...sourcePaths].some((path) => path.startsWith("builtin:") || path === "<inline:pi-web-mcp-host>");
+    const builtinResources = needsBuiltins ? await createPiWebBuiltinExtensions({ agentDir }) : undefined;
+    const sideStopBridge = createSubagentStopBridge();
+    let services: Awaited<ReturnType<typeof createReaderAgentSessionServices>> | undefined;
+    let child: AgentSession | undefined;
+    let remote: RemoteClaudeHostBinding | undefined;
+    let host: HostSession | undefined;
+    let disposed = false;
+    const work = new Set<Promise<unknown>>();
+    const backgroundIds = new Set<string>();
+    const track = (promise: Promise<unknown>) => {
+      work.add(promise);
+      void promise.then(() => work.delete(promise), () => work.delete(promise));
+    };
+    const trackExecution = (execution: SubagentExecution) => {
+      if (execution.run.runInBackground) {
+        backgroundIds.add(execution.run.sessionId);
+        track(execution.completion);
+        void execution.completion.then(() => backgroundIds.delete(execution.run.sessionId), () => backgroundIds.delete(execution.run.sessionId));
+        if (input.signal.aborted) abortBackground();
+      }
+      return execution;
+    };
+    const abortBackground = () => {
+      for (const id of backgroundIds) void SUBAGENT_CONTROLLER.abort(id, child as never).catch(() => undefined);
+    };
+    const waitForOwnedWork = async () => {
+      while (work.size) {
+        await Promise.allSettled([...work]);
+        await Promise.resolve();
+      }
+    };
+    const recordSideAskChild = (sessionId: string, sessionPath: string) => {
+      if (!child) throw new Error("Side Ask child owner is unavailable");
+      const reference = sideAskChildReference(sessionId, sessionPath, this.sessionFile);
+      this.appendSideAskRecord(SIDE_ASK_CHILD, reference, true);
+      child.sessionManager.appendCustomEntry(SIDE_ASK_NATIVE_CHILD, reference);
+    };
+    const sideSubagents: SubagentExtensionRuntime = { ...SUBAGENT_CONTROLLER.extensionRuntime,
+      start: async (request) => {
+        const execution = await SUBAGENT_CONTROLLER.extensionRuntime.start(request);
+        try {
+          const wrapper = getRpcSession(execution.run.sessionId);
+          if (!wrapper) throw new Error("Side Ask child runtime is unavailable");
+          await wrapper.waitUntilReady();
+          const releaseUi = wrapper.bindSideAskUiContext(this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }));
+          void execution.completion.then(releaseUi, releaseUi);
+        } catch (error) {
+          await SUBAGENT_CONTROLLER.abort(execution.run.sessionId, child as never).catch(() => undefined);
+          await execution.completion;
+          throw error;
+        }
+        return trackExecution(execution);
+      },
+      resume: async (request) => {
+        const existing = getRpcSession(request.sessionId);
+        if (!existing?.isAlive() || !existing.inner.resourceLoader.getExtensions().extensions.some((extension) => extension.path === "<inline:pi-web-side-ask-control-guard>")) {
+          throw new Error("Side Ask can resume only a live child with its isolated permission guard");
+        }
+        const previous = await SUBAGENT_CONTROLLER.get(request.sessionId, request.parentContext);
+        if (!previous || previous.parentSessionId !== request.parentContext.sessionManager.getSessionId() || existing.isRunning()) {
+          throw new Error("Side Ask child is not idle or belongs to another topic");
+        }
+        await existing.waitUntilReady();
+        const releaseUi = existing.bindSideAskUiContext(this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }));
+        try {
+          const execution = await SUBAGENT_CONTROLLER.extensionRuntime.resume(request);
+          void execution.completion.then(releaseUi, releaseUi);
+          return trackExecution(execution);
+        } catch (error) { releaseUi(); throw error; }
+      },
+      notifyParent: (run) => {
+        const pending = SUBAGENT_CONTROLLER.extensionRuntime.notifyParent(run);
+        track(pending);
+        return pending;
+      },
+    };
+    input.signal.addEventListener("abort", abortBackground);
+    const dispose = async () => {
+      if (disposed) return;
+      disposed = true;
+      abortBackground();
+      await waitForOwnedWork();
+      input.signal.removeEventListener("abort", abortBackground);
+      if (child && host && SIDE_ASK_SUBAGENT_HOSTS.get(child.sessionId) === host) SIDE_ASK_SUBAGENT_HOSTS.delete(child.sessionId);
+      revokeRemoteClaudeHost(remote);
+      try { builtinResources?.mcpHost?.dispose(); }
+      finally {
+        if (child) {
+          try { await child.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+          finally { child.dispose(); }
+        } else services?.resourceLoader.getExtensions().runtime.invalidate();
+      }
+    };
+    try {
+      if (input.signal.aborted) throw new QuickAskError("Side Ask was stopped", 499);
+      const baseSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: trust.trusted });
+      const pluginSettings = createProjectPluginSettingsManager(baseSettings, { cwd, agentDir });
+      const resolvedEntries = await resolveGlobalSkillStateEntries(cwd, agentDir, baseSettings, pluginSettings);
+      const entries = structuredClone((this.skillRuntimeContext?.entries ?? resolvedEntries) as typeof resolvedEntries);
+      const projectRuntime = this.projectSkillRuntime
+        ? { entries, states: { ...this.projectSkillRuntime.states } } satisfies ProjectSkillRuntime : undefined;
+      const skillContext: RuntimeSkillPolicyContext = { ...this.skillRuntimeContext, entries,
+        ...(this.skillRuntimeContext?.states ? { states: { ...this.skillRuntimeContext.states } } : {}),
+        ...(this.skillRuntimeContext?.catalogSkills ? { catalogSkills: [...this.skillRuntimeContext.catalogSkills] } : {}) };
+      const settings = projectRuntime
+        ? createProjectSkillSettingsManager(pluginSettings, projectRuntime, { cwd, agentDir }) : pluginSettings;
+      // Side Ask keeps the source session's normal compaction and retry policy.
+      const skillBinding = resources ? createSubagentSkillsBinding({ loadSkills: resources.loadSkills,
+        skills: permittedSubagentSkillNames(resources.skills, skillContext), exactSystemPrompt: resources.exactSystemPrompt }) : undefined;
+      const originalSkills = skillBinding?.loaderOptions.skillsOverride;
+      const childSkills = resources?.loadSkills && skillBinding
+        ? ((base: Parameters<NonNullable<typeof originalSkills>>[0]) => {
+            const projected = originalSkills ? originalSkills(base) : base;
+            return { ...projected, skills: filterRuntimeSkills(projected.skills as RuntimeSkillLike[], skillContext) as typeof projected.skills };
+          }) : undefined;
+      const childRef: { current?: AgentSessionLike } = {};
+      const builtinNames = new Set<string>([...(resources?.codemode ? ["codemode"] : []),
+        ...(resources?.mcp ? ["tool-search", "mcp", "pi-web-mcp-host"] : [])]);
+      const policy = { name: "pi-web-side-ask-policy", hidden: true, factory: (pi: ExtensionAPI) => {
+        pi.on("tool_call", (event, ctx) => {
+          if (event.toolName === "session_control" && isProtectedSideAskControl(event.input, ctx.sessionManager.getSessionId(), this.sessionId)) {
+            return { block: true, reason: "Cannot control the source session or approve its Side Ask requests" };
+          }
+          const current = new Set([...this.inner.getActiveToolNames(), ...parent.getCallableToolNames()]);
+          if (input.signal.aborted || !allowedTools.has(event.toolName) || !current.has(event.toolName)) {
+            return { block: true, reason: "Tool is outside the source session's current Side Ask scope" };
+          }
+          const parentTool = parent.getAllTools().find((tool) => tool.name === event.toolName);
+          const childTool = pi.getAllTools().find((tool) => tool.name === event.toolName);
+          if ((parentTool && isMcpTool(parentTool)) || (childTool && isMcpTool(childTool))) {
+            const selection = readSessionToolSelection(this.inner.sessionManager.getEntries() as unknown as SessionEntry[]);
+            if (isReadOnlySelection(selection)
+              && (parentTool?.annotations?.readOnlyHint !== true || childTool?.annotations?.readOnlyHint !== true)) {
+              return { block: true, reason: readOnlyMcpBlockReason(event.toolName) };
+            }
+          }
+        });
+      } };
+      const sideResourceOptions = resources ? subagentExtensionLoaderOptions(resources) : undefined;
+      services = await createReaderAgentSessionServices({ cwd, agentDir, settingsManager: settings, modelRuntimeSignal: input.signal,
+        resourceLoaderOptions: resources ? {
+          ...sideResourceOptions, ...(skillBinding?.loaderOptions ?? {}),
+          ...(resources.loadExtensions && allowedTools.has("session_control") ? { extensionsOverride: (base) =>
+            preferSideAskSessionControl(sideResourceOptions?.extensionsOverride?.(base) ?? base) } : {}),
+          ...(childSkills ? { skillsOverride: childSkills } : {}), noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          appendSystemPrompt: resources.appendSystemPrompt,
+          extensionFactories: [createCompactionModelExtension(settings),
+            ...(resources.loadExtensions && allowedTools.has("session_control") ? [sideAskControl] : []),
+            ...(sourcePaths.has("<inline:pi-web-image-generation-output>") ? [createImageGenerationOutputExtension()] : []),
+            ...(builtinResources?.extensions.filter((extension) => builtinNames.has(extension.name)) ?? []),
+            ...(skillBinding?.loaderOptions.extensionFactories ?? []), createRemoteClaudeHostGuardExtension(),
+            ...(resources.mcp ? [createSubagentMcpPolicyExtension(() => ({
+              tools: childRef.current?.getActiveToolNames() ?? resources.tools,
+              ...(resources.allExtensionTools ? { allExtensionTools: true } : {}),
+            }))] : []), policy],
+        } : this.strictToolAllowlist ? {
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+          extensionFactories: [createCompactionModelExtension(settings), policy],
+        } : {
+          skillsOverride: (base) => {
+            const applied = applySkillInvocationOverrides(base.skills, entries, projectRuntime?.states ?? {},
+              projectRuntime ? "project" : "global", new Map(base.skills.map((skill) => [resolve(skill.filePath), true])));
+            return { ...base, skills: filterRuntimeSkills(applied as RuntimeSkillLike[], skillContext) as typeof base.skills };
+          },
+          extensionFactories: [createCompactionModelExtension(settings), createImageGenerationOutputExtension(),
+            ...(builtinResources?.extensions.filter((extension) => sourcePaths.has(`builtin:${extension.name}`)
+              || sourcePaths.has(`<inline:${extension.name}>`)) ?? []), createReadOnlyMcpPolicyExtension(() =>
+              readSessionToolSelection(this.inner.sessionManager.getEntries() as unknown as SessionEntry[])), createFastModeExtension({ mode: this.fastModeState.mode }),
+            createProjectCommandBashExtension({ cwd, settings }), sideAskControl, sideStopBridge.extension,
+            createSubagentExtension(sideSubagents, () => listSubagentProfiles(cwd, agentDir),
+              () => isBuiltInSubagentsEnabled(getSubagentSettingsPath(agentDir))),
+            createRemoteClaudeHostGuardExtension(), policy],
+          extensionsOverride: (base) => preferSideAskSessionControl(preferUserBashExtension(preferPiWebSubagentExtension(base))),
+        }, ...(projectTrustReloadOptions(cwd, agentDir) ? { resourceLoaderReloadOptions: projectTrustReloadOptions(cwd, agentDir) } : {}) });
+      const loaded = services.resourceLoader.getExtensions();
+      const paths = new Set(loaded.extensions.map((extension) => extension.path));
+      const mismatch = [...sourcePaths].filter((path) => !paths.has(path));
+      const unexpected = [...paths].filter((path) => !sourcePaths.has(path)
+        && path !== "<inline:pi-web-side-ask-policy>" && path !== "<inline:pi-web-remote-claude-host-guard>"
+        && !(resources?.loadExtensions && allowedTools.has("session_control") && path === "<inline:pi-web-session-control>"));
+      if (loaded.errors.length || services.diagnostics.some((diagnostic) => diagnostic.type === "error") || mismatch.length || unexpected.length) {
+        const details = { missing: mismatch, unexpected, failed: loaded.errors.map((error) => error.path),
+          providerErrors: services.diagnostics.filter((diagnostic) => diagnostic.type === "error").length };
+        throw new QuickAskError(`Side Ask extensions differ from the source session; reload the source session: ${JSON.stringify(details)}`, 503);
+      }
+      const model = services.modelRuntime.getModel(input.model.provider, input.model.id);
+      if (!model) throw new QuickAskError("Model not found for this Side Ask", 404);
+      const created = await createAgentSessionFromServices({ services, sessionManager: input.memory, model,
+        ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
+        ...(resources ? subagentToolOptions(resources) : this.strictToolAllowlist || activeTools.length === 0 ? { tools: activeTools } : {}) });
+      child = created.session;
+      childRef.current = child;
+      skillBinding?.setActiveToolsGetter(() => child?.getActiveToolNames() ?? []);
+      const session = child;
+      if (getRpcSession(session.sessionId) || SIDE_ASK_SUBAGENT_HOSTS.has(session.sessionId)) {
+        throw new QuickAskError("Side Ask execution identity is already in use", 409);
+      }
+      host = { protectedSessionId: this.sessionId, sideAskUiContext: this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }),
+        sideAskGuard: policy, sideAskPeerOwnership: peerOwnership,
+        ...(allowedTools.has("session_control") ? { sideAskControl } : {}), recordSideAskChild,
+        inner: session as unknown as AgentSessionLike, sessionFile: this.sessionFile, cwd,
+        isAlive: () => !disposed && !input.signal.aborted && this.isAlive(),
+        isRunning: () => session.isStreaming, waitUntilReady: async () => undefined,
+        agentDir };
+      SIDE_ASK_SUBAGENT_HOSTS.set(session.sessionId, host);
+      return { session, waitForOwnedWork,
+        prepare: async () => {
+          const summaryNamespaces = model.provider === "openai-codex" && model.api === "openai-codex-responses"
+            ? quickAskCachedMcpSummaries(input.memory.buildSessionContext().messages) : undefined;
+          await builtinResources?.mcpHost?.prepareForPrompt(input.signal, { summaryNamespaces });
+          if (input.signal.aborted) throw new QuickAskError("Side Ask was stopped", 499);
+          session.setActiveToolsByName(activeTools);
+          const actual = new Set(session.getActiveToolNames());
+          if (activeTools.some((name) => !actual.has(name))) throw new QuickAskError("Side Ask tools differ from the source session", 503);
+          if (model.provider === REMOTE_CLAUDE_PROVIDER_ID) {
+            if (!this.remoteClaudeHost || resolveRemoteClaudeHost(session.sessionId)) {
+              throw new QuickAskError("Remote Claude Side Ask parent scope is unavailable", 503);
+            }
+            remote = (await installRemoteClaudeHost({ hostIdentity: session, sessionManager: session.sessionManager,
+              sessionId: session.sessionId, cwd, agentDir, activeTools, modelRuntime: services!.modelRuntime,
+              builtInEnabled: isBuiltInSubagentsEnabled(), parent: this.remoteClaudeHost, allowWorktree: true,
+              allowInheritedContext: true, allowCancellation: true, readOnlyRoots: [await readerRuntimeProjectRoot(cwd)] })) ?? undefined;
+            if (!remote) throw new QuickAskError("Remote Claude Side Ask host scope is unavailable", 503);
+          }
+        },
+        associateProvider: (providerSessionId, selectedModel) => remote
+          ? associateRemoteClaudeProviderHostSession({ providerSessionId, hostIdentity: session,
+              sessionManager: session.sessionManager, model: selectedModel }) : undefined,
+        dispose,
+      };
+    } catch (error) {
+      await dispose();
+      throw error;
+    }
+  }
+
   getQuickAskRuntime(): QuickAskRuntime {
     this.assertSessionWriteAllowed();
     if (!this.sideAskRuntime) {
@@ -1069,6 +1323,7 @@ export class AgentSessionWrapper {
       this.sideAskRuntime = new QuickAskRuntime({
         sessionId: this.sessionId, sessionFile: this.sessionFile, manager: this.inner.sessionManager,
         assertWritable: () => this.assertSessionWriteAllowed(),
+        assertTailWritable: () => this.assertSideAskTailWritable(),
         isMainRunning: () => this.isRunning(),
         currentModel: () => this.inner.model,
         sourceSystem: () => {
@@ -1086,7 +1341,28 @@ export class AgentSessionWrapper {
           if (!runner?.emitContext) throw new QuickAskError("Live Pi context extension runner is unavailable");
           return runner.emitContext(messages);
         },
-        append: (customType, data) => this.appendSideAskRecord(customType, data),
+        createAgentSession: async (input: QuickAskAgentInput) => {
+          const owned = await this.createQuickAskAgent(input);
+          try {
+            let bindError: string | undefined;
+            await owned.session.bindExtensions({
+              uiContext: this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }) as unknown as Parameters<typeof owned.session.bindExtensions>[0]["uiContext"],
+              mode: "rpc",
+              shutdownHandler: () => this.emit({ type: "extension_ui_request", id: randomUUID(), method: "notify",
+                notifyType: "warning", message: "Side Ask extension requested shutdown.", sideAskRunId: input.runId } as AgentEvent),
+              onError: (error) => {
+                bindError ??= `${error.extensionPath}: ${error.error}`;
+                this.emit({ type: "extension_error", ...error, sideAskRunId: input.runId } as AgentEvent);
+              },
+            });
+            if (bindError) throw new QuickAskError(`Side Ask extension startup failed: ${bindError}`, 503);
+            return owned;
+          } catch (error) {
+            await owned.dispose();
+            throw error;
+          }
+        },
+        append: (customType, data) => this.appendSideAskRecord(customType, data, true),
         associateProvider: (providerSessionId, model) => {
           if (model.provider !== REMOTE_CLAUDE_PROVIDER_ID) return undefined;
           const liveModel = this.inner.model;
@@ -1107,8 +1383,9 @@ export class AgentSessionWrapper {
     return this.sideAskRuntime;
   }
 
-  private appendSideAskRecord(customType: string, data: unknown): PiSessionEntry {
-    this.assertSessionWriteAllowed();
+  private appendSideAskRecord(customType: string, data: unknown, allowTail = false): PiSessionEntry {
+    if (allowTail) this.assertSideAskTailWritable();
+    else this.assertSessionWriteAllowed();
     // Serialization and cache failures are not evidence of an uncertain SDK append.
     JSON.stringify(data);
     let id: string;
@@ -1355,7 +1632,10 @@ export class AgentSessionWrapper {
     if (readValidSubagentResources(this.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
       fail("subagent_settings_fixed", "Managed settings cannot override a subagent's profile-owned resources");
     }
-    if (this.managedSettingPending || this.treeNavigationPending || this.isRunning() || this.getQueueIdentity().counts.total > 0) {
+    // Pi applies a model change before the next request in an active run. Tool
+    // mutations still wait for an idle runtime so their registration cannot
+    // race an in-flight turn.
+    if (this.managedSettingPending || this.treeNavigationPending || (this.isRunning() && command.type !== "set_model") || this.getQueueIdentity().counts.total > 0) {
       fail("runtime_busy", "Wait for the live runtime and its queue to become idle before changing settings");
     }
     if (command.type === "set_model") {
@@ -2165,6 +2445,18 @@ export class AgentSessionWrapper {
     if (this.sideAskWriteFailed) throw new Error("Session persistence failed; reopen the session before writing again");
     if (!this._alive) throw new Error("Session is no longer available");
     if (this.shuttingDown) throw new Error("Session is shutting down");
+  }
+
+  private assertSideAskTailWritable(): void {
+    if (this._alive && !this.shuttingDown) return this.assertSessionWriteAllowed();
+    assertSessionFileExecutable(this.sessionFile);
+    if (this.sideAskWriteFailed || !this.sideAskTailOpen) throw new Error("Side Ask tail persistence is closed");
+  }
+
+  private closeSideAskRuntime(): void {
+    if (!this.sideAskRuntime) return;
+    if (this.sideAskRuntime.hasActiveRun()) this.sideAskTailOpen = true;
+    this.sideAskRuntime.close();
   }
 
   private assertWriteOpen(): void {
@@ -3077,6 +3369,21 @@ export class AgentSessionWrapper {
     return this.suppressCompletionNotifications;
   }
 
+  recordSideAskChild(sessionId: string, sessionPath: string): void {
+    if (!this.sideAskPeerOwnership) return;
+    this.appendSideAskRecord(SIDE_ASK_CHILD, sideAskChildReference(sessionId, sessionPath, this.sessionFile));
+  }
+
+  bindSideAskUiContext(context: ExtensionUiContextLike): () => void {
+    const setUi = this.inner.extensionRunner.setUIContext?.bind(this.inner.extensionRunner);
+    if (!setUi || !this.isAlive()) throw new Error("Side Ask child UI is unavailable");
+    const generation = ++this.sideAskUiGeneration;
+    setUi(context, "rpc");
+    return () => {
+      if (this.sideAskUiGeneration === generation && this.isAlive()) setUi(this.createExtensionUiContext(), "rpc");
+    };
+  }
+
   beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
     void this.ensureExtensionsBound(options).catch((err) => {
       console.error("[pi-web] failed to dispatch session_start to extensions:", err instanceof Error ? err.message : err);
@@ -3124,7 +3431,7 @@ export class AgentSessionWrapper {
     this.extensionBindingError = null;
     this.extensionBindingPromise = (async () => {
       if (!this._alive) return;
-      const uiContext = this.createExtensionUiContext();
+      const uiContext = options.uiContext ?? this.createExtensionUiContext();
       if (typeof this.inner.bindExtensions === "function") {
         const bindExtensions = this.inner.bindExtensions as (bindings: {
           uiContext?: ExtensionUiContextLike;
@@ -4453,6 +4760,20 @@ export class AgentSessionWrapper {
       }
       return this.controlReceiptAdmissionStorage.run(receiptId, () => this.send(command));
     }
+    if (this.historyEditPending && command.type !== "edit_history"
+      && !String(command.type).startsWith("get_")
+      && !["abort", "stop_all"].includes(String(command.type))) {
+      throw new Error(BRANCH_NAVIGATION_PENDING);
+    }
+    if (command.type === "edit_history") {
+      if (this.historyEditPending) throw new Error(BRANCH_NAVIGATION_PENDING);
+      this.historyEditPending = true;
+      try {
+        return await this.sendCommand(command);
+      } finally {
+        this.historyEditPending = false;
+      }
+    }
     if (command.type === "navigate_tree") {
       if (this.treeNavigationPending || this.isRunning()) throw new Error("Wait for the current operation before navigating");
       this.treeNavigationPending = true;
@@ -4480,8 +4801,10 @@ export class AgentSessionWrapper {
     const type = command.type as string;
     // Capture before extension binding or admission can yield. A later input
     // may reset the UI signal, but cannot revive work submitted before Stop.
-    const inputGeneration = this.inputStopGeneration ?? 0;
-    const isInput = ["prompt", "steer", "follow_up", "peer_message"].includes(type);
+    const inputGeneration = typeof command.inputGeneration === "number"
+      ? command.inputGeneration
+      : (this.inputStopGeneration ?? 0);
+    const isInput = ["prompt", "steer", "follow_up", "peer_message", "edit_history"].includes(type);
     if (this.stopAllPromise && !type.startsWith("get_") && !["abort", "abort_bash", "abort_compaction", "stop_all"].includes(type)) {
       throw new Error("Session execution is stopping");
     }
@@ -4496,6 +4819,10 @@ export class AgentSessionWrapper {
     if (isInput && type !== "peer_message") this.stopAllRequested = false;
     if (type === "peer_message" && this.stopAllRequested) throw new Error("Session execution was stopped; a new user input is required");
     if (!["get_state", "abort", "abort_bash", "abort_compaction", "stop_all"].includes(type)) this.assertWriteOpen();
+    if (this.historyEditPending && type !== "edit_history" && command.historyEditAdmission !== true
+      && !type.startsWith("get_") && !["abort", "stop_all"].includes(type)) {
+      throw new Error(BRANCH_NAVIGATION_PENDING);
+    }
     if (this.treeNavigationPending && type !== "navigate_tree" && !type.startsWith("get_") && type !== "abort") {
       throw new Error(BRANCH_NAVIGATION_PENDING);
     }
@@ -4504,7 +4831,7 @@ export class AgentSessionWrapper {
     }
     if (command.readerControlReceiptId) this.assertManagedControlIdentity({ bootId: command.readerControlExpectedBootId, revision: command.readerControlExpectedRevision });
 
-    if (type === "prompt" || type === "steer" || type === "follow_up") {
+    if (type === "prompt" || type === "steer" || type === "follow_up" || type === "edit_history") {
       const imageError = validateAgentImages(command.images);
       if (imageError) throw new Error(imageError);
     }
@@ -4554,6 +4881,91 @@ export class AgentSessionWrapper {
         );
       }
 
+      case "edit_history": {
+        const manager = this.inner.sessionManager;
+        const targetEntryId = typeof command.targetEntryId === "string" ? command.targetEntryId : "";
+        const target = targetEntryId && typeof manager.getEntry === "function" ? manager.getEntry(targetEntryId) : undefined;
+        if (!target || target.type !== "message" || target.message.role !== "user") {
+          throw Object.assign(new Error("Historical edit target must be a user message"), { code: "history_edit_target_invalid" });
+        }
+        const expectedLeafId = command.expectedLeafId;
+        if (expectedLeafId !== null && typeof expectedLeafId !== "string") {
+          throw Object.assign(new Error("Historical edit branch position is invalid"), { code: "history_edit_position_invalid" });
+        }
+        if (typeof command.message !== "string" || (!command.message.trim() && !(Array.isArray(command.images) && command.images.length > 0))) {
+          throw Object.assign(new Error("Historical edit prompt is empty"), { code: "history_edit_prompt_empty" });
+        }
+        const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : "";
+        if (!clientMessageId) throw Object.assign(new Error("Historical edit requires a client message identity"), { code: "history_edit_identity_missing" });
+        const parentId = target.parentId;
+        const entries = this.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+        const identities = historyClientMessageIds(entries);
+        const existingEntryId = [...identities.entries()].find(([, id]) => id === clientMessageId)?.[0];
+        if (existingEntryId) {
+          const existing = typeof manager.getEntry === "function" ? manager.getEntry(existingEntryId) : undefined;
+          if (existing?.type === "message" && existing.message.role === "user" && existing.parentId === parentId) {
+            return { accepted: true, duplicate: true, clientMessageId, entryId: existingEntryId, parentId, leafId: manager.getLeafId() };
+          }
+          throw Object.assign(new Error("clientMessageId was already submitted for a different historical edit"), { code: "history_edit_duplicate_identity" });
+        }
+        if (!matchesExpectedLeaf(manager, expectedLeafId)) throw new Error(BRANCH_POSITION_CHANGED);
+        if (this.isRunning()) throw Object.assign(new Error("Cannot edit while the session is running"), { code: "runtime_busy" });
+        const oldLeafId = manager.getLeafId();
+        const releaseAdmission = await this.acquirePromptAdmission();
+        let accepted = false;
+        let moved = false;
+        try {
+          this.assertInputGeneration(inputGeneration);
+          const navigation = await this.sendCommand({
+            type: "navigate_tree",
+            targetId: parentId,
+            historyEditAdmission: true,
+            inputGeneration,
+          }) as { cancelled?: boolean; leafId?: string | null };
+          if (!navigation || navigation.cancelled || manager.getLeafId() !== parentId) {
+            throw Object.assign(new Error("Historical edit branch navigation was cancelled"), { code: "history_edit_navigation_cancelled" });
+          }
+          moved = manager.getLeafId() !== oldLeafId;
+          this.assertInputGeneration(inputGeneration);
+          await this.sendCommand({
+            type: "prompt",
+            message: command.message,
+            ...(Array.isArray(command.images) && command.images.length ? { images: command.images } : {}),
+            clientMessageId,
+            historyEditAdmission: true,
+            inputGeneration,
+          });
+          accepted = true;
+          return { accepted: true, clientMessageId, parentId, leafId: manager.getLeafId() };
+        } catch (error) {
+          moved = moved || manager.getLeafId() !== oldLeafId;
+          if (!accepted && ![...historyClientMessageIds(this.inner.sessionManager.getEntries() as unknown as SessionEntry[]).values()].includes(clientMessageId)) {
+            this.submittedClientMessageIds.delete(clientMessageId);
+          }
+          if (!accepted && moved) {
+            try {
+              const rollback = await this.sendCommand({
+                type: "navigate_tree",
+                targetId: oldLeafId,
+                historyEditAdmission: true,
+                inputGeneration: this.inputStopGeneration,
+              }) as { cancelled?: boolean; leafId?: string | null };
+              if (rollback?.cancelled === true || !matchesExpectedLeaf(manager, oldLeafId)) {
+                throw new Error("Historical edit branch rollback was not acknowledged");
+              }
+            } catch (rollbackError) {
+              throw Object.assign(new Error("Historical edit outcome is unknown; branch restoration failed"), {
+                code: "history_edit_unknown",
+                cause: rollbackError,
+              });
+            }
+          }
+          throw error;
+        } finally {
+          releaseAdmission();
+        }
+      }
+
       case "prompt": {
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
@@ -4581,7 +4993,9 @@ export class AgentSessionWrapper {
         // Serialize only admission. Once the preceding prompt has either
         // passed or failed preflight, the SDK can atomically decide whether
         // this submission starts a run or joins its streaming queue.
-        const releaseAdmission = await this.acquirePromptAdmission();
+        const releaseAdmission = command.historyEditAdmission === true
+          ? () => {}
+          : await this.acquirePromptAdmission();
         // Recall may remove this item while admission is waiting; do not prepare it.
         const deferredToken = command.deferredQueueToken as { stillQueued?: () => boolean; beginSubmit?: () => boolean } | undefined;
         if (typeof deferredToken?.stillQueued === "function" && !deferredToken.stillQueued()) {
@@ -4841,7 +5255,7 @@ export class AgentSessionWrapper {
             leafId: typeof this.inner.sessionManager.getLeafId === "function"
               ? this.inner.sessionManager.getLeafId()
               : null,
-            pending: this.treeNavigationPending,
+            pending: this.treeNavigationPending || this.historyEditPending,
           },
           execution: this.getExecutionState(),
           isStreaming: this.inner.isStreaming,
@@ -5415,7 +5829,7 @@ export class AgentSessionWrapper {
   private disposeNow(): void {
     if (this.disposed) return;
     for (const controller of this.questionTaskControllers) controller.abort();
-    this.sideAskRuntime?.close();
+    this.closeSideAskRuntime();
     this.disposed = true;
     this.shuttingDown = true;
     this._alive = false;
@@ -5495,6 +5909,7 @@ export class AgentSessionWrapper {
       await this.inner.extensionRunner?.emit?.({ type: "session_shutdown", reason: "quit" });
     })();
     const subagentExecution = this.subagentExecution;
+    const sideAskSettlement = this.sideAskRuntime?.whenIdle();
     const cancelReaderWrites = Promise.resolve().then(() => {
       subagentExecution?.cancel();
       if (this.inner.isBashRunning) this.inner.abortBash();
@@ -5503,9 +5918,10 @@ export class AgentSessionWrapper {
     let writersSettled = false;
     const writerShutdown = Promise.allSettled([extensionShutdown,
       Promise.resolve().then(() => this.runtimeOwnership ? this.inner.abort?.() : undefined),
-      cancelReaderWrites, this.bashExecution, subagentExecution?.completion,
+      cancelReaderWrites, this.bashExecution, subagentExecution?.completion, sideAskSettlement,
     ]).then((results) => {
-      writersSettled = results[1].status === "fulfilled" && results[2].status === "fulfilled";
+      writersSettled = results[1].status === "fulfilled" && results[2].status === "fulfilled" && results[5].status === "fulfilled";
+      if (writersSettled) this.sideAskTailOpen = false;
       if (!writersSettled) console.error("[pi-web] SDK abort or Reader cancellation failed; retaining runtime ownership until process exit");
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -5543,7 +5959,7 @@ export class AgentSessionWrapper {
 
   destroy(): void {
     if (this.disposed || this.shutdownPromise) return;
-    this.sideAskRuntime?.close();
+    this.closeSideAskRuntime();
     // Direct destruction is used by process/route cleanup. It still closes the
     // event stream and gives extensions their shutdown hook, but never lets a
     // rejected hook escape into a synchronous caller.
@@ -5561,7 +5977,7 @@ export class AgentSessionWrapper {
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     if (this.disposed) return;
-    this.sideAskRuntime?.close();
+    this.closeSideAskRuntime();
 
     // Close the write admission gate before awaiting extension shutdown. This
     // prevents a simultaneous recap/prompt/config write from landing after
@@ -5837,6 +6253,7 @@ export class AgentSessionWrapper {
       id,
       method: "custom",
       lines,
+      ...(custom.sideAskRunId ? { sideAskRunId: custom.sideAskRunId, sideAskLabel: custom.sideAskLabel } : {}),
     } as AgentEvent;
     this.pendingUiRequests.set(id, event);
     this.notifyUiRequests();
@@ -5887,10 +6304,11 @@ export class AgentSessionWrapper {
   private requestExtensionCustomUi<T>(
     factory: unknown,
     options?: unknown,
+    owner?: SideAskUiOwner,
   ): Promise<T> {
     if (typeof factory !== "function") return Promise.resolve(undefined as T);
 
-    const stopSignal = this.extensionUiAbortController.signal;
+    const stopSignal = owner?.signal ?? this.extensionUiAbortController.signal;
     if (stopSignal.aborted) return Promise.reject(stopSignal.reason);
 
     const id = randomUUID();
@@ -5942,6 +6360,7 @@ export class AgentSessionWrapper {
             width,
             resolve: (value) => finish(value as T),
             settled: false,
+            ...(owner ? { sideAskRunId: owner.runId, sideAskLabel: owner.label } : {}),
           };
           this.activeCustomUis.set(id, custom);
           this.emitCustomUiRender(id, custom);
@@ -5965,9 +6384,10 @@ export class AgentSessionWrapper {
     parseResponse: (response: ExtensionUiResponse) => T,
     timeout?: number,
     signal?: AbortSignal,
+    owner?: SideAskUiOwner,
   ): Promise<T> {
     if (signal?.aborted) return Promise.resolve(defaultValue);
-    const stopSignal = this.extensionUiAbortController.signal;
+    const stopSignal = owner?.signal ?? this.extensionUiAbortController.signal;
     if (stopSignal.aborted) return Promise.reject(stopSignal.reason);
     const abortSignal = signal ? AbortSignal.any([signal, stopSignal]) : stopSignal;
 
@@ -5978,6 +6398,7 @@ export class AgentSessionWrapper {
       ...request,
       runtimeGeneration: this.liveEventBootId,
       responseSchema: uiResponseSchema(request),
+      ...(owner ? { sideAskRunId: owner.runId, sideAskLabel: owner.label } : {}),
       createdAt: Date.now(),
       ...(timeout ? { timeout, expiresAt: Date.now() + timeout } : {}),
     };
@@ -6027,7 +6448,7 @@ export class AgentSessionWrapper {
     });
   }
 
-  private createExtensionUiContext(): ExtensionUiContextLike {
+  private createExtensionUiContext(owner?: SideAskUiOwner): ExtensionUiContextLike {
     return {
       select: (title, options, opts) => this.requestExtensionUi(
         { method: "select", title, options, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6035,6 +6456,7 @@ export class AgentSessionWrapper {
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
+        owner,
       ),
       confirm: (title, message, opts) => this.requestExtensionUi(
         { method: "confirm", title, message, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6042,6 +6464,7 @@ export class AgentSessionWrapper {
         (response) => "confirmed" in response ? response.confirmed : false,
         opts?.timeout,
         opts?.signal,
+        owner,
       ),
       input: (title, placeholder, opts) => this.requestExtensionUi(
         { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6049,6 +6472,7 @@ export class AgentSessionWrapper {
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
+        owner,
       ),
       editor: (title, prefill, opts) => this.requestExtensionUi(
         { method: "editor", title, ...(prefill !== undefined ? { prefill } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6056,6 +6480,7 @@ export class AgentSessionWrapper {
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
+        owner,
       ),
       notify: (message, type) => {
         this.emit({
@@ -6064,10 +6489,12 @@ export class AgentSessionWrapper {
           method: "notify",
           message,
           notifyType: type,
+          ...(owner ? { sideAskRunId: owner.runId, sideAskLabel: owner.label } : {}),
         } as AgentEvent);
       },
       onTerminalInput: () => () => {},
       setStatus: (key, text) => {
+        if (owner) return;
         if (text === undefined) this.extensionStatuses.delete(key);
         else this.extensionStatuses.set(key, text);
         this.emit({
@@ -6079,6 +6506,7 @@ export class AgentSessionWrapper {
         } as AgentEvent);
       },
       setExtensionUsage: (key, usage) => {
+        if (owner) return;
         if (usage === undefined) this.extensionUsages.delete(key);
         else this.extensionUsages.set(key, { key, ...usage });
         this.emit({
@@ -6094,7 +6522,7 @@ export class AgentSessionWrapper {
       setWorkingIndicator: () => {},
       setHiddenThinkingLabel: () => {},
       setWidget: (key, content, options) => {
-        if (!this._alive || this.extensionWidgetsResetting) return;
+        if (owner || !this._alive || this.extensionWidgetsResetting) return;
         if (typeof content === "function") {
           this.setExtensionWidgetFactory(
             key,
@@ -6129,6 +6557,7 @@ export class AgentSessionWrapper {
       setFooter: () => {},
       setHeader: () => {},
       setTitle: (title) => {
+        if (owner) return;
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -6136,8 +6565,9 @@ export class AgentSessionWrapper {
           title,
         } as AgentEvent);
       },
-      custom: <T = unknown>(factory: unknown, options?: unknown) => this.requestExtensionCustomUi<T>(factory, options),
+      custom: <T = unknown>(factory: unknown, options?: unknown) => this.requestExtensionCustomUi<T>(factory, options, owner),
       pasteToEditor: (text) => {
+        if (owner) return;
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -6146,6 +6576,7 @@ export class AgentSessionWrapper {
         } as AgentEvent);
       },
       setEditorText: (text) => {
+        if (owner) return;
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -6154,6 +6585,7 @@ export class AgentSessionWrapper {
         } as AgentEvent);
       },
       setEditorSuggestion: (text) => {
+        if (owner) return;
         this.editorSuggestion = text?.trim() ? text : null;
         this.emit({
           type: "extension_ui_request",
@@ -6193,17 +6625,23 @@ export class AgentSessionWrapper {
     await this.reconcileProjectPluginsBeforeReload();
     this.resetExtensionWidgetsForReload();
     this.createExtensionUiContext().setEditorSuggestion(undefined);
+    const reloadTrust = getProjectTrustStatus(this.cwd, this.agentDir ?? getAgentDir()).trusted;
     this.syncProjectTrust();
     await this.inner.reload({
       beforeSessionStart: async () => {
         this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
       },
     });
+    invalidateModelRuntimeWithExtensions();
     this.setActiveToolSelection(activeToolNames);
     await this.refreshRemoteClaudeHostBinding();
     this.applyForcedEmptySystemPrompt();
     this.applyRuntimeAutoCompactionOverride();
     invalidateModelsCache();
+    if (getProjectTrustStatus(this.cwd, this.agentDir ?? getAgentDir()).trusted !== reloadTrust) {
+      throw new Error("Project trust changed during resource reload; reload again");
+    }
+    this.projectTrusted = reloadTrust;
   }
 
   private createExtensionCommandContextActions(): ExtensionCommandContextActionsLike {
@@ -6302,7 +6740,7 @@ export class AgentSessionWrapper {
   }
 
   private syncProjectTrust(): void {
-    const status = getProjectTrustStatus(this.cwd, getAgentDir());
+    const status = getProjectTrustStatus(this.cwd, this.agentDir ?? getAgentDir());
     this.inner.settingsManager.setProjectTrusted(status.trusted);
   }
 }
@@ -6494,8 +6932,52 @@ export function associateRemoteClaudeProviderSession(
   return associateRemoteClaudeProviderHostSession(input);
 }
 
+function sideAskChildReference(sessionId: string, sessionPath: string, parentSessionPath: string) {
+  const childPath = relative(resolve(getAgentDir(), "sessions"), sessionPath);
+  if (!sessionId || !childPath || isAbsolute(childPath) || childPath === ".." || childPath.startsWith(`..${sep}`)) {
+    throw new Error("Side Ask child session is outside the native session root");
+  }
+  return { version: 1, sessionId, childPath, parentSessionPath };
+}
+
+function createSideAskPeerGuard(ownership: SideAskPeerOwnership) {
+  const allowed = new Set(ownership.callableTools);
+  return { name: "pi-web-side-ask-peer-guard", hidden: true, factory: (pi: ExtensionAPI) => {
+    pi.on("tool_call", (event, ctx) => {
+      if (event.toolName === "session_control"
+        && isProtectedSideAskControl(event.input, ctx.sessionManager.getSessionId(), ownership.sourceSessionId)) {
+        return { block: true, reason: "Cannot control the source session or approve its Side Ask requests" };
+      }
+      const source = getRpcSession(ownership.sourceSessionId);
+      const parent = source?.inner as unknown as Pick<AgentSession, "getCallableToolNames" | "getAllTools"> | undefined;
+      const current = source && parent && typeof parent.getCallableToolNames === "function"
+        ? new Set([...source.inner.getActiveToolNames(), ...parent.getCallableToolNames()]) : new Set<string>();
+      if (!source?.isAlive() || !allowed.has(event.toolName) || !current.has(event.toolName)) {
+        return { block: true, reason: "Tool is outside the source session's current Side Ask scope" };
+      }
+      const parentTool = parent?.getAllTools().find((tool) => tool.name === event.toolName);
+      const childTool = pi.getAllTools().find((tool) => tool.name === event.toolName);
+      if ((parentTool && isMcpTool(parentTool)) || (childTool && isMcpTool(childTool))) {
+        const selection = readSessionToolSelection(source.inner.sessionManager.getEntries() as unknown as SessionEntry[]);
+        if (isReadOnlySelection(selection)
+          && (parentTool?.annotations?.readOnlyHint !== true || childTool?.annotations?.readOnlyHint !== true)) {
+          return { block: true, reason: readOnlyMcpBlockReason(event.toolName) };
+        }
+      }
+    });
+  } };
+}
+
+function assertSideAskPeerOwnership(manager: SessionManager, expected?: SideAskPeerOwnership): void {
+  if (!expected) return;
+  const actual = readSideAskPeerOwnership(manager.getEntries() as unknown as SessionEntry[]);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("Side Ask peer ownership does not match the existing session");
+}
+
+const SIDE_ASK_SUBAGENT_HOSTS = new Map<string, HostSession>();
 const SUBAGENT_CONTROLLER = createSubagentController({
-  getSession: (sessionId) => getRpcSession(sessionId),
+  getSession: (sessionId) => getRpcSession(sessionId) ?? SIDE_ASK_SUBAGENT_HOSTS.get(sessionId),
+  getSessionAgentDir: (sessionId) => (getRpcSession(sessionId) ?? SIDE_ASK_SUBAGENT_HOSTS.get(sessionId))?.agentDir,
   registerSession: (inner, options) => {
     let wrapper: AgentSessionWrapper | undefined;
     try {
@@ -6503,13 +6985,20 @@ const SUBAGENT_CONTROLLER = createSubagentController({
         ...(options?.mcpHost ? { mcpHost: options.mcpHost } : {}),
         ...(options?.remoteHost ? { remoteClaudeHost: options.remoteHost } : {}),
         ...(options?.skillRuntimeContext ? { skillRuntimeContext: options.skillRuntimeContext } : {}),
+        ...(options?.projectTrusted !== undefined ? { projectTrusted: options.projectTrusted } : {}),
         ...(options?.runtimeOwnership ? { runtimeOwnership: options.runtimeOwnership } : {}),
+        ...(options?.agentDir ? { agentDir: options.agentDir } : {}),
+        ...(options?.protectedSessionId ? { protectedSessionId: options.protectedSessionId } : {}),
+        ...(options?.sideAskGuard ? { sideAskGuard: options.sideAskGuard } : {}),
+        ...(options?.sideAskControl ? { sideAskControl: options.sideAskControl } : {}),
+        ...(options?.sideAskPeerOwnership ? { sideAskPeerOwnership: options.sideAskPeerOwnership } : {}),
       });
       const subagentPolicy = { suppressCompletionNotifications: true };
       if (subagentPolicy.suppressCompletionNotifications) wrapper.setSuppressCompletionNotifications(true);
       if (options?.chatOnly) wrapper.setForceEmptySystemPrompt(true);
       registerRpcSession(wrapper);
-      wrapper.beginExtensionBinding();
+      wrapper.beginExtensionBinding(options?.sideAskUiContext
+        ? { uiContext: options.sideAskUiContext as ExtensionUiContextLike } : {});
       return wrapper;
     } catch (error) {
       if (wrapper) wrapper.destroy();
@@ -6520,15 +7009,20 @@ const SUBAGENT_CONTROLLER = createSubagentController({
       throw error;
     }
   },
-  reopenSession: async (sessionId, sessionFile, parentSessionId) =>
-    (await startRpcSession(sessionId, sessionFile, undefined, {
-      ...(parentSessionId && getRpcSession(parentSessionId)?.inner.model?.provider === REMOTE_CLAUDE_PROVIDER_ID
-        ? { parentRemoteHost: resolveRemoteClaudeHost(parentSessionId) }
+  reopenSession: async (sessionId, sessionFile, parentSessionId) => {
+    const parent = parentSessionId
+      ? getRpcSession(parentSessionId) ?? SIDE_ASK_SUBAGENT_HOSTS.get(parentSessionId)
+      : undefined;
+    return (await startRpcSession(sessionId, sessionFile, undefined, {
+      ...(parent?.agentDir ? { agentDir: parent.agentDir } : {}),
+      ...(parent?.inner.model?.provider === REMOTE_CLAUDE_PROVIDER_ID
+        ? { parentRemoteHost: resolveRemoteClaudeHost(parentSessionId!) }
         : {}),
-    })).session,
+    })).session;
+  },
   resolveSessionPath,
   invalidateSessionList: invalidateSessionListCache,
-  isBuiltInSubagentsEnabled,
+  isBuiltInSubagentsEnabled: (agentDir) => isBuiltInSubagentsEnabled(getSubagentSettingsPath(agentDir)),
 });
 
 export function getSubagentRun(sessionId: string, parentSessionId?: string) {
@@ -6996,6 +7490,7 @@ async function withDurableSessionAdmissionLock(
 async function findExistingDurableRpcSession(
   request: DurableSessionCreateRequest,
   isolatedSessionDir?: string,
+  sideAskPeerOwnership?: SideAskPeerOwnership,
 ): Promise<DurableSessionObservation | undefined> {
   const targetCwd = normalizeRpcCwd(request.scope.cwd);
   for (const session of globalThis.__piSessions?.values() ?? []) {
@@ -7003,6 +7498,7 @@ async function findExistingDurableRpcSession(
     if (isolatedSessionDir && resolve(session.inner.sessionManager.getSessionDir()) !== resolve(isolatedSessionDir)) continue;
     const selected = durableRecordForManager(session.inner.sessionManager, request);
     if (!selected?.record) continue;
+    assertSideAskPeerOwnership(session.inner.sessionManager, sideAskPeerOwnership);
     const facts = await durableSessionFacts(
       request.scope.cwd,
       session.inner.sessionManager.getSessionDir(),
@@ -7031,6 +7527,7 @@ async function findExistingDurableRpcSession(
       const manager = SessionManager.open(info.path, isolatedSessionDir);
       const selected = durableRecordForManager(manager, request);
       if (!selected?.record) continue;
+      assertSideAskPeerOwnership(manager, sideAskPeerOwnership);
       const sessionFile = manager.getSessionFile() || info.path;
       const facts = await durableSessionFacts(
         request.scope.cwd,
@@ -7049,7 +7546,8 @@ async function findExistingDurableRpcSession(
         messageDigest: selected.record.messageDigest,
         nativeRecordValid: selected.nativeRecordValid,
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("Side Ask peer ownership")) throw error;
       // An unrelated malformed transcript must not prevent a keyed create.
     }
   }
@@ -7060,6 +7558,8 @@ async function createNativeDurableRpcSession(
   request: DurableSessionCreateRequest,
   isolatedSessionDir: string | undefined,
   lease: DurableSessionAdmissionLease,
+  sideAskPeerOwnership?: SideAskPeerOwnership,
+  agentDir?: string,
 ): Promise<DurableSessionResult> {
   const cwd = normalizeRpcCwd(request.scope.cwd);
   const source = request.initialMessage === undefined ? "initialization" : "agent-message";
@@ -7081,6 +7581,7 @@ async function createNativeDurableRpcSession(
     // native marker/custom-message appends are now persisted by the SDK.
     lease.assert();
     appendDurableSessionCreate(manager, request);
+    if (sideAskPeerOwnership) manager.appendCustomEntry(SIDE_ASK_PEER_OWNERSHIP, sideAskPeerOwnership);
     // A compromised lease may be reported by the heartbeat immediately after
     // the native append. The surrounding catch records the actual facts.
     lease.assert();
@@ -7095,7 +7596,10 @@ async function createNativeDurableRpcSession(
     invalidateSessionListCache();
     try {
       lease.assert();
-      const started = await startRpcSession(sessionId, sessionFile, cwd, { sessionDir: manager.getSessionDir() });
+      const started = await startRpcSession(sessionId, sessionFile, cwd, {
+        sessionDir: manager.getSessionDir(),
+        ...(agentDir ? { agentDir } : {}),
+      });
       lease.assert();
       initialUserPromptSent = await ensureInitialUserPrompt(started.session, request.initialMessage);
       lease.assert();
@@ -7179,6 +7683,7 @@ async function recoverDurableRpcSession(
   facts: DurableSessionObservation,
   request: DurableSessionCreateRequest,
   lease: DurableSessionAdmissionLease,
+  agentDir?: string,
 ): Promise<DurableSessionResult> {
   const cwd = normalizeRpcCwd(request.scope.cwd);
   if (!facts.sessionFile || !facts.persisted || !facts.nativeListVisible) {
@@ -7187,7 +7692,10 @@ async function recoverDurableRpcSession(
 
   try {
     lease.assert();
-    const started = await startRpcSession(facts.sessionId, facts.sessionFile, cwd, { sessionDir: facts.sessionDir });
+    const started = await startRpcSession(facts.sessionId, facts.sessionFile, cwd, {
+      sessionDir: facts.sessionDir,
+      ...(agentDir ? { agentDir } : {}),
+    });
     lease.assert();
     invalidateSessionListCache();
     const manager = started.session.inner.sessionManager;
@@ -7249,7 +7757,7 @@ async function recoverDurableRpcSession(
 /** Host adapter for the first-party durable session-control protocol. */
 export function createDurableRpcSession(
   request: DurableSessionCreateRequest,
-  options: { sessionDir?: string } = {},
+  options: { sessionDir?: string; sideAskPeerOwnership?: SideAskPeerOwnership; agentDir?: string } = {},
 ): Promise<DurableSessionResult> {
   const scopedRequest: DurableSessionCreateRequest = {
     ...request,
@@ -7257,9 +7765,9 @@ export function createDurableRpcSession(
   };
   return createOrReuseDurableSession(scopedRequest, {
     withAdmissionLock: (candidate, operation) => withDurableSessionAdmissionLock(candidate, options.sessionDir, operation),
-    findExisting: (candidate) => findExistingDurableRpcSession(candidate, options.sessionDir),
-    create: (candidate, lease) => createNativeDurableRpcSession(candidate, options.sessionDir, lease),
-    recover: (facts, candidate, lease) => recoverDurableRpcSession(facts, candidate, lease),
+    findExisting: (candidate) => findExistingDurableRpcSession(candidate, options.sessionDir, options.sideAskPeerOwnership),
+    create: (candidate, lease) => createNativeDurableRpcSession(candidate, options.sessionDir, lease, options.sideAskPeerOwnership, options.agentDir),
+    recover: (facts, candidate, lease) => recoverDurableRpcSession(facts, candidate, lease, options.agentDir),
   });
 }
 
@@ -7550,7 +8058,7 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { sessionDir, toolNames, strictToolAllowlist, initialModel, fastMode } = options;
+  const { agentDir: requestedAgentDir, sessionDir, toolNames, strictToolAllowlist, initialModel, fastMode } = options;
   let thinkingLevel: ThinkingLevel | undefined = options.thinkingLevel;
   const registry = getRegistry();
   const locks = getLocks();
@@ -7602,13 +8110,19 @@ export async function startRpcSession(
     readSessionAutoCompaction(sessionManager.getEntries());
     const runtimeProjectRoot = await readerRuntimeProjectRoot(sessionCwd);
     const startupEntries = sessionManager.getEntries() as unknown as SessionEntry[];
+    const agentDir = requestedAgentDir ?? getAgentDir();
+    const sideAskPeerOwnership = readSideAskPeerOwnership(startupEntries);
+    const sideAskPeerGuard = sideAskPeerOwnership ? createSideAskPeerGuard(sideAskPeerOwnership) : undefined;
+    const sideAskPeerControl = sideAskPeerOwnership ? createSessionControlExtension({
+      protectedSessionId: sideAskPeerOwnership.sourceSessionId,
+      createSession: (request) => createDurableRpcSession(request, { agentDir, sideAskPeerOwnership }),
+    }) : undefined;
     const subagentResources = sessionFile
       ? readValidSubagentResources(startupEntries)
       : null;
     finishStartingSession = trackStartingSession(sessionCwd);
     // Some extensions access the SDK's global theme even outside the terminal UI.
     initTheme();
-    const agentDir = getAgentDir();
 
     // Determine which tools to pass based on an explicit request or the newest
     // persisted Reader selection. Legacy sessions keep SDK defaults.
@@ -7616,7 +8130,9 @@ export async function startRpcSession(
       ? undefined
       : readSessionToolSelectionPolicy(sessionManager.getEntries() as unknown as SessionEntry[]);
     const persistedToolNames = persistedToolPolicy?.tools;
-    const effectiveToolNames = subagentResources?.tools ?? toolNames ?? persistedToolNames;
+    const effectiveToolNames = subagentResources?.tools ?? (sideAskPeerOwnership
+      ? (toolNames ?? persistedToolNames ?? sideAskPeerOwnership.activeTools).filter((name) => sideAskPeerOwnership.activeTools.includes(name))
+      : toolNames ?? persistedToolNames);
     if (!subagentResources && strictToolAllowlist === true) {
       if (toolNames === undefined) {
         throw new Error("strictToolAllowlist requires an explicit toolNames allow-list");
@@ -7788,7 +8304,7 @@ export async function startRpcSession(
     ]);
     const subagentBuiltinFactories = builtinResources?.extensions.filter((extension) => subagentBuiltinNames.has(extension.name)) ?? [];
     const subagentStopBridge = createSubagentStopBridge();
-    const services = await createAgentSessionServices({
+    const services = await createReaderAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
       settingsManager,
@@ -7797,6 +8313,8 @@ export async function startRpcSession(
             ...subagentLoaderOptions,
             ...(subagentSkillsBinding?.loaderOptions ?? {}),
             ...(subagentRuntimeSkillsOverride ? { skillsOverride: subagentRuntimeSkillsOverride } : {}),
+            ...(sideAskPeerControl && subagentResources.loadExtensions && sideAskPeerOwnership?.callableTools.includes("session_control")
+              ? { extensionsOverride: (base) => preferSideAskSessionControl(subagentLoaderOptions?.extensionsOverride?.(base) ?? base) } : {}),
             noPromptTemplates: true,
             noThemes: true,
             noContextFiles: true,
@@ -7804,9 +8322,12 @@ export async function startRpcSession(
             extensionFactories: [
               createCompactionModelExtension(settingsManager),
               createImageGenerationOutputExtension(),
+              ...(sideAskPeerControl && subagentResources.loadExtensions && sideAskPeerOwnership?.callableTools.includes("session_control")
+                ? [sideAskPeerControl] : []),
               ...subagentBuiltinFactories,
               ...(subagentSkillsBinding?.loaderOptions.extensionFactories ?? []),
               createRemoteClaudeHostGuardExtension(),
+              ...(sideAskPeerGuard ? [sideAskPeerGuard] : []),
               ...(subagentResources.mcp && subagentMcpScope
                 ? [createSubagentMcpPolicyExtension(() => ({
                     tools: subagentInnerRef.current?.getActiveToolNames() ?? subagentMcpScope.tools,
@@ -7822,7 +8343,7 @@ export async function startRpcSession(
               noPromptTemplates: true,
               noThemes: true,
               noContextFiles: true,
-              extensionFactories: [createCompactionModelExtension(settingsManager)],
+              extensionFactories: [createCompactionModelExtension(settingsManager), ...(sideAskPeerGuard ? [sideAskPeerGuard] : [])],
             }
           : {
             // Keep SKILL.md immutable: panel state is applied to the SDK resource
@@ -7852,15 +8373,21 @@ export async function startRpcSession(
                 cwd: sessionCwd,
                 settings: settingsManager,
               }),
-              createSessionControlExtension(),
+              sideAskPeerControl ?? createSessionControlExtension({
+                createSession: (request) => createDurableRpcSession(request, { agentDir }),
+              }),
+              ...(sideAskPeerGuard ? [sideAskPeerGuard] : []),
               subagentStopBridge.extension,
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,
-                () => listSubagentProfiles(sessionCwd),
-                isBuiltInSubagentsEnabled,
+                () => listSubagentProfiles(sessionCwd, agentDir),
+                () => isBuiltInSubagentsEnabled(getSubagentSettingsPath(agentDir)),
               ),
             ],
-            extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+            extensionsOverride: (base) => {
+              const scoped = preferUserBashExtension(preferPiWebSubagentExtension(base));
+              return sideAskPeerOwnership ? preferSideAskSessionControl(scoped) : scoped;
+            },
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
@@ -7868,6 +8395,10 @@ export async function startRpcSession(
       && !services.resourceLoader.getExtensions().extensions.some((extension) => extension.tools.has("codemode"))) {
       throw new Error("Code mode is unavailable: builtin:codemode was not registered");
     }
+    // Extension providers register their native models during resource loading;
+    // wait for the post-registration availability snapshot before enforcing an
+    // enabledModels scope or restoring an explicitly requested model.
+    await services.modelRuntime.refresh({ allowNetwork: false });
     const scope = await resolveVisibleModels(
       services.modelRuntime,
       services.settingsManager.getEnabledModels(),
@@ -7939,11 +8470,13 @@ export async function startRpcSession(
     // the source of truth for extension/package tools and dynamic defaults.
     if (!subagentResources) {
       const initialToolNames = inner.getActiveToolNames();
-      inner.setActiveToolsByName(resolveActiveToolNames(
+      const selectedTools = resolveActiveToolNames(
         inner,
         effectiveToolNames ?? initialToolNames,
         strictToolAllowlistEnabled ? [] : initialToolNames,
-      ));
+      );
+      inner.setActiveToolsByName(sideAskPeerOwnership
+        ? selectedTools.filter((name) => sideAskPeerOwnership.activeTools.includes(name)) : selectedTools);
     }
 
     let remoteClaudeHost: RemoteClaudeHostBinding | undefined;
@@ -7960,7 +8493,7 @@ export async function startRpcSession(
           agentDir,
           activeTools: inner.getActiveToolNames(),
           modelRuntime: services.modelRuntime,
-          builtInEnabled: isBuiltInSubagentsEnabled(),
+          builtInEnabled: isBuiltInSubagentsEnabled(getSubagentSettingsPath(agentDir)),
           allowWorktree: true,
           allowInheritedContext: true,
           allowCancellation: true,
@@ -7972,11 +8505,17 @@ export async function startRpcSession(
         }
       }
       const wrapper = new AgentSessionWrapper(inner, projectSkillRuntime, fastModeState, {
+        agentDir,
         ...((builtinResources?.mcpHost ?? builtins?.mcpHost) ? { mcpHost: builtinResources?.mcpHost ?? builtins?.mcpHost } : {}),
         ...(remoteClaudeHost ? { remoteClaudeHost } : {}),
         ...(strictToolAllowlistEnabled ? { strictToolAllowlist: true } : {}),
         skillRuntimeContext,
+        projectTrusted: projectTrust.trusted,
         runtimeOwnership,
+        ...(sideAskPeerOwnership && sideAskPeerGuard ? { sideAskPeerOwnership, protectedSessionId: sideAskPeerOwnership.sourceSessionId,
+          sideAskGuard: sideAskPeerGuard,
+          ...(sideAskPeerControl && sideAskPeerOwnership.callableTools.includes("session_control") ? { sideAskControl: sideAskPeerControl } : {}),
+        } : {}),
         stopBackgroundRun: subagentStopBridge.stop,
       });
       startingWrapper = wrapper;

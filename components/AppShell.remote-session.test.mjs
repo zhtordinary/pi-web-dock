@@ -6,8 +6,9 @@ const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf
 const newSessionRoute = await readFile(new URL("../app/api/agent/new/route.ts", import.meta.url), "utf8");
 const rpcManager = await readFile(new URL("../lib/rpc-manager.ts", import.meta.url), "utf8");
 
-test("remounts remote ChatWindow when the same session id moves to another peer", () => {
-  assert.match(appShell, /key=\{`\$\{remoteSession\.device\.id\}:\$\{remoteSession\.sessionInfo\.id\}`\}/);
+test("remote ChatWindow keys retain the promoted draft or include both peer and session", () => {
+  assert.match(appShell, /remoteSession\.promotedSessionId === remoteSession\.sessionInfo\.id && remoteSession\.draftInstanceKey/);
+  assert.match(appShell, /`session:\$\{remoteSession\.device\.id\}:\$\{remoteSession\.sessionInfo\.id\}`/);
 });
 
 test("carries context-source metadata through remote and embedded new-session routing", () => {

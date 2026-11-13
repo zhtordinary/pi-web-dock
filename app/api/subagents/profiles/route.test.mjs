@@ -16,7 +16,8 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
 });
 const { GET, PUT, PATCH, DELETE } = await jiti.import("./route.ts");
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
+const { resolveSubagentProfile } = await jiti.import("@/lib/subagents.ts");
+const { writeSubagentProfileOrder } = await jiti.import("@/lib/subagent-settings.ts");
 
 after(async () => {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -56,7 +57,6 @@ function getRequest(url) {
 
 test("runtime profile overrides use Pi settings and reject external CLI model edits", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-runtime-route-"));
-  allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const packageDir = join(testAgentDir, "npm", "node_modules", "pi-subagents", "agents");
   await mkdir(packageDir, { recursive: true });
@@ -77,9 +77,30 @@ test("runtime profile overrides use Pi settings and reject external CLI model ed
   assert.equal(response.status, 400);
 });
 
+test("profiles route applies the persisted profile order without changing runtime discovery order", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-order-route-"));
+  const globalDir = join(testAgentDir, "agents");
+  await mkdir(globalDir, { recursive: true });
+  await writeFile(join(globalDir, "alpha.md"), "---\nname: alpha\ndisplay_name: Alpha\n---\n\nAlpha.\n");
+  await writeFile(join(globalDir, "beta.md"), "---\nname: beta\ndisplay_name: Beta\n---\n\nBeta.\n");
+  writeSubagentProfileOrder(["global:beta", "global:alpha"]);
+  t.after(async () => {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(join(globalDir, "alpha.md"), { force: true });
+    await rm(join(globalDir, "beta.md"), { force: true });
+    writeSubagentProfileOrder([]);
+  });
+
+  const response = await GET(getRequest(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    (await response.json()).profiles.filter((item) => item.scope === "global").map((item) => item.name),
+    ["beta", "alpha"],
+  );
+});
+
 test("profiles route creates, lists, and deletes a project profile", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
-  allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
 
   const putResponse = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: profile() }));
@@ -111,9 +132,48 @@ test("profiles route creates, lists, and deletes a project profile", async (t) =
   assert.equal(afterDeleteBody.profiles.some((item) => item.name === "api-test-agent"), false);
 });
 
+test("profiles route copies unexposed restrictions from the source identity", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-copy-route-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const dir = join(cwd, ".pi", "agents");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "original.md"), "---\nname: original\ntools: read\nload_extensions: true\nextensions: [advisor]\ndisallowed_tools: ext:advisor/secret\n---\nPrompt.\n");
+  const listed = await GET(getRequest(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  const original = (await listed.json()).profiles.find((item) => item.scope === "project" && item.name === "original");
+  assert.ok(original);
+  const copy = { ...original, name: "original-copy", copyFrom: { scope: "project", name: "original" } };
+  const response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: copy }));
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  assert.equal((await response.json()).profile.copyFrom, undefined);
+  const resolved = resolveSubagentProfile(cwd, "original-copy");
+  assert.deepEqual(resolved.extensions, ["advisor"]);
+  assert.deepEqual(resolved.disallowedExtensionTools, ["ext:advisor/secret"]);
+  assert.equal(resolved.loadExtensions, true);
+  const conflict = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: copy }));
+  assert.equal(conflict.status, 400);
+});
+
+test("profiles route rejects invalid Reader limits and chat-only capabilities", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-validation-route-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const reader = { loadSkills: false, loadExtensions: false, codemode: "off", mcp: "off", inheritContext: false, runInBackground: false };
+  for (const maxTurns of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: profile({ reader: { ...reader, maxTurns } }) }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /maxTurns/);
+  }
+  for (const option of [{ mcp: "on" }, { codemode: "on" }]) {
+    const response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: profile({ reader: { ...reader, ...option } }) }));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /require a tool, skill, or extension/);
+  }
+  const allowed = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: profile({ tools: ["read"], reader: { ...reader, mcp: "on", maxTurns: 2 } }) }));
+  assert.equal(allowed.status, 200, JSON.stringify(await allowed.clone().json()));
+  assert.equal(resolveSubagentProfile(cwd, "api-test-agent").maxTurns, 2);
+});
+
 test("profiles route keeps same-name global and project profiles independently editable", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
-  allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
 
   let response = await PUT(jsonRequest("PUT", {
@@ -169,7 +229,6 @@ test("profiles route keeps same-name global and project profiles independently e
 
 test("profiles route toggles a built-in through settings.json without writing a profile file", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
-  allowFileRoot(cwd);
   t.after(async () => {
     await PATCH(jsonRequest("PATCH", { cwd, scope: "builtin", name: "explore", enabled: true }));
     await rm(cwd, { recursive: true, force: true });
@@ -208,7 +267,6 @@ test("profiles route toggles a built-in through settings.json without writing a 
 
 test("profiles route rejects missing paths, malformed profiles, and unsafe names", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-"));
-  allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
 
   let response = await GET(getRequest("http://localhost/api/subagents/profiles"));
@@ -257,7 +315,6 @@ test("profiles route rejects missing paths, malformed profiles, and unsafe names
 
 test("PATCH validates the complete request before toggling and returns the same projection as GET", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-validation-"));
-  allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const putResponse = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: profile({ name: "validation-agent" }) }));
   assert.equal(putResponse.status, 200);
@@ -289,7 +346,6 @@ test("PATCH validates the complete request before toggling and returns the same 
 
 test("external runtime PATCH is rejected without changing the package file", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-external-"));
-  allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const packagePath = join(testAgentDir, "npm", "node_modules", "pi-subagents", "agents", "claude-code.md");
   const before = await readFile(packagePath, "utf8");

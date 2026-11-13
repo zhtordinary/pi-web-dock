@@ -284,6 +284,14 @@ test("Talk Map keeps project identity separate from toolbar actions", () => {
   assert.match(source, /className="talk-map-toolbar-actions"/);
 });
 
+test("Talk Map mobile toolbar keeps close and refresh controls aligned", () => {
+  const mobileToolbar = styles.slice(styles.indexOf("@media (max-width: 640px)", styles.indexOf(".talk-map-toolbar")));
+  assert.match(styles, /\.talk-map-toolbar-identity > button \{[\s\S]*?display: inline-flex;[\s\S]*?align-items: center;[\s\S]*?justify-content: center;/);
+  assert.match(mobileToolbar, /\.talk-map-toolbar-top \{[\s\S]*?flex-wrap: nowrap;[\s\S]*?overflow-x: auto;/);
+  assert.match(mobileToolbar, /\.talk-map-toolbar-top \.talk-map-toolbar-identity \{[\s\S]*?flex: 1 1 auto;/);
+  assert.match(mobileToolbar, /\.talk-map-toolbar-top-actions \{[\s\S]*?flex: 0 0 auto;[\s\S]*?overflow: visible;/);
+});
+
 test("Talk Map exposes new sessions, floating selectors, and per-subproject visibility", () => {
   assert.match(source, /onNewSession\?: \(subprojectId\?: string, subprojectLabel\?: string\) => void/);
   assert.match(source, /MessageSquarePlus/);

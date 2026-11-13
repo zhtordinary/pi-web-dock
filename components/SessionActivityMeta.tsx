@@ -50,7 +50,7 @@ function formatActivityTime(value: string, locale: string, nowMs: number): strin
 function useLazySessionCost(sessionId: string, version: string, peer: string | undefined, rootRef: CostRootRef | undefined) {
   const rowRef = useRef<HTMLSpanElement>(null);
   const [nearViewport, setNearViewport] = useState(false);
-  const { cost } = useSessionDetails({ sessionId, version, peer, costView: "summary", loadCost: nearViewport });
+  const { cost, costState } = useSessionDetails({ sessionId, version, peer, costView: "summary", loadCost: nearViewport });
 
   useEffect(() => {
     const row = rowRef.current;
@@ -74,6 +74,7 @@ function useLazySessionCost(sessionId: string, version: string, peer: string | u
   const presentation = sessionCostPresentation(cost?.totalCost, cost?.extensionCosts);
   return {
     cost: cost?.amount ?? null,
+    costState,
     costStatus: presentation.onlySuggesterPending && cost?.status === "partial" ? "calculated" : cost?.status ?? null,
     cacheHitRate: cost?.cacheHitRate ?? null,
     missingPriceModels: cost?.missingPriceModels ?? [],
@@ -90,7 +91,7 @@ function MetaSeparator() {
 export function SessionActivityMeta({ item, sort = "recent", statusLabel, formatTime, contextLabel, costPeer, costRootRef, showStatus = true, showSubagent = true, modelPlacement, className, style }: Props) {
   const { locale, t } = useI18n();
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const { cost, costStatus, cacheHitRate, missingPriceModels, pendingUsageCount, recordedOnly, rowRef } = useLazySessionCost(item.session.id, item.session.modified, costPeer, costRootRef);
+  const { cost, costState, costStatus, cacheHitRate, missingPriceModels, pendingUsageCount, recordedOnly, rowRef } = useLazySessionCost(item.session.id, item.session.modified, costPeer, costRootRef);
   const status = item.status;
   const subagentCompleted = isSubagentCompletionConfirmed({
     parentRunStatus: item.latestRun?.status,
@@ -103,7 +104,7 @@ export function SessionActivityMeta({ item, sort = "recent", statusLabel, format
   const formattedCost = partialCost
     ? `≥$${(Math.floor(costValue * 100) / 100).toFixed(2)}`
     : typeof cost === "number" && (costValue > 0 || recordedOnly) ? `$${costValue.toFixed(2)}` : null;
-  const costText = formattedCost;
+  const costText = costState === "loading" ? "…" : costState === "error" ? "?" : formattedCost;
   const unpricedText = missingPriceModels.length > 0 && !partialCost ? t("sessionActivity.unpriced") : null;
   const unpricedTitle = missingPriceModels.length > 0
     ? partialCost ? missingPriceModels.join(", ") : `${t("session.unpricedModels")}: ${missingPriceModels.join(", ")}`
@@ -114,7 +115,7 @@ export function SessionActivityMeta({ item, sort = "recent", statusLabel, format
   const timeText = formatTime ? formatTime(timeValue) : formatActivityTime(timeValue, locale, nowMs);
   const modelName = modelPlacement ? item.modelName?.trim() : undefined;
   const replaceTimeWithModel = modelPlacement === "replace-time" && Boolean(modelName);
-  const modelTextStyle: CSSProperties = { color: "var(--text-dim)", minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis" };
+  const modelTextStyle: CSSProperties = { color: "var(--text-dim)", minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: "rtl", textAlign: "left" };
   const nonModelFlexStyle: CSSProperties = modelPlacement ? { flexShrink: 0 } : {};
   const statusText = statusLabel ? statusLabel(status) : t(`sessionActivity.status.${status}`);
 

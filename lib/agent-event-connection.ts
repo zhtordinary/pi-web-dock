@@ -37,7 +37,8 @@ type Connection = {
    * suspended server or a stalled proxy keeps EventSource in OPEN, so `onerror`
    * never fires and the client would wait forever without a completion event.
    */
-  watchdog: ReturnType<typeof setTimeout> | null;
+  watchdog: ReturnType<typeof setInterval> | null;
+  lastSeenAt: number | null;
 };
 
 export interface AgentEventConnectionOptions {
@@ -78,6 +79,16 @@ export class AgentEventConnection {
   close(): void {
     this.stopRetrying();
     if (this.current) this.discard(this.current, new AgentEventConnectionError("closed"));
+  }
+
+  /** Recheck wall-clock silence after a page or network resume. */
+  recheck(): void {
+    const connection = this.current;
+    if (!connection || connection.lastSeenAt === null) return;
+    const silenceTimeoutMs = this.options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
+    if (silenceTimeoutMs > 0 && Date.now() - connection.lastSeenAt >= silenceTimeoutMs) {
+      this.fail(connection, new AgentEventConnectionError("closed"));
+    }
   }
 
   maintain(sessionId: string): void {
@@ -166,21 +177,23 @@ export class AgentEventConnection {
         reject(error);
       },
     };
-    const connection: Connection = { sessionId, source, attempt, watchdog: null };
+    const connection: Connection = { sessionId, source, attempt, watchdog: null, lastSeenAt: null };
     this.current = connection;
 
     const armWatchdog = () => {
-      if (connection.watchdog !== null) clearTimeout(connection.watchdog);
+      if (connection.watchdog !== null) return;
       const silenceTimeoutMs = this.options.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
       if (silenceTimeoutMs <= 0) return;
-      connection.watchdog = setTimeout(() => {
-        connection.watchdog = null;
-        if (this.current !== connection) return;
+      const checkIntervalMs = Math.max(1, Math.floor(silenceTimeoutMs / 3));
+      connection.watchdog = setInterval(() => {
+        if (this.current !== connection || connection.lastSeenAt === null) return;
+        if (Date.now() - connection.lastSeenAt < silenceTimeoutMs) return;
         // Same path as a reported transport error: discard and retry while the
         // session still has demand.
         this.fail(connection, new AgentEventConnectionError("closed"));
-      }, silenceTimeoutMs);
+      }, checkIntervalMs);
       // A watchdog must never be the reason a page or test process stays alive.
+      // SAFETY: Node timer handles expose unref(); browser numeric handles do not.
       (connection.watchdog as unknown as { unref?: () => void }).unref?.();
     };
 
@@ -191,9 +204,11 @@ export class AgentEventConnection {
         event = JSON.parse(message.data) as AgentEventLike;
       } catch {
         // A malformed frame still proves the path is alive.
+        connection.lastSeenAt = Date.now();
         armWatchdog();
         return;
       }
+      connection.lastSeenAt = Date.now();
       armWatchdog();
 
       if (event.type === "connected") {
@@ -225,7 +240,7 @@ export class AgentEventConnection {
 
   private discard(connection: Connection, error: AgentEventConnectionError): void {
     if (connection.watchdog !== null) {
-      clearTimeout(connection.watchdog);
+      clearInterval(connection.watchdog);
       connection.watchdog = null;
     }
     connection.attempt.fail(error);

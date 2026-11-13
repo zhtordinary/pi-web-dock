@@ -73,7 +73,7 @@ function chatExpression(name, arguments_) {
 function renderState(ids, { agentRunning = false, observedSessionRunning = false, bashRunning = false, isStreaming = false, isCompacting = false, activityActive = false, execution = { active: false }, continueUi = { kind: "idle" } } = {}) {
   const sessionBusy = chatExpression("sessionBusy", {
     sessionRunning: ids.has("s"), observedSessionRunning, agentRunning, bashRunning,
-    streamState: { isStreaming }, isCompacting,
+    isStreaming, isCompacting,
   });
   const canStop = chatExpression("canStopExecution", { sessionBusy, activityActive, execution, continueUi });
   const isLiveTail = chatExpression("isLiveTail", { sessionBusy, unfinishedAssistantTail: false, isCurrentTail: true });

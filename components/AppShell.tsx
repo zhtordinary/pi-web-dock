@@ -19,33 +19,35 @@ import { SystemPromptPanel } from "./SystemPromptPanel";
 // 关系：2 与 3 是同一左栏槽位的两种模式（activitySidebarMode 切换）；1 是 3 的外层实例。
 // ---------------------------------------------------------------------------
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, Fragment, type ReactNode } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, type ReactNode, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar, PiWebTitle } from "./SessionSidebar";
-import { TalkMapOverlay } from "./TalkMapOverlay";
-import { WorktreeGraphOverlay } from "./WorktreeGraphOverlay";
-import type { WorktreeGraphItem } from "@/lib/worktree-graph-types";
+import { useAppShellWorktree, useAppShellWorktreeCapability, AppShellWorktreeOverlays, AppShellWorktreeBranchNavigator, AppShellWorktreeBranchPanel, type AppShellWorktreeCallbacks } from "./app-shell-worktree";
+import { AppShellSidekickRightPanel, SIDEKICK_TAB_ID, SidekickMessageIcon, buildSidekickButtonLabel, useAppShellSidekick, useAppShellSidekickLifecycle } from "./app-shell-sidekick";
 import { readSharedFilters, applyRemoteSharedFilters, readSharedRevision, readSharedOwnerEpoch, subscribeSharedFiltersBroadcast, updateSharedFilters, SessionActivityPanel, SessionActivitySidebar, SharedActivityFilters } from "./SessionActivityPanel";
+import { SessionInfoResourcePanel } from "./SessionInfoResourcePanel";
+import { SessionTopBarStats } from "./SessionTopBarStats";
 import { SessionWaitHistory, SessionWaitPanel } from "./SessionWaitPanel";
 import { openReaderEventSource } from "@/lib/reader-events-client";
 import { createRemoteSessionMutationClient, type MutationTarget, type PendingSessionMutation } from "@/lib/remote-session-mutation";
 import { isSessionMutationBridgeAuthenticationRequired } from "@/lib/session-mutation-bridge";
-import { ChatWindow, type SelectionToolbarActions } from "./ChatWindow";
+import { ChatWindow } from "./ChatWindow";
 import { SIDEKICK_RIGHT_PANEL_TARGET_ID, SIDEKICK_TOPBAR_PORTAL_ID } from "./SidekickDrawer";
 import { CUSTOM_PROMPTS_CHANGED_EVENT } from "@/lib/custom-prompt-types";
 
-export const SIDEKICK_TAB_ID = "sidekick";
+export { SIDEKICK_TAB_ID };
 import { ExplorerSection } from "./ExplorerSection";
 import { FileViewer } from "./FileViewer";
 import { BatchContinueButton } from "./BatchContinueButton";
 import { TabBar, type Tab } from "./TabBar";
+import { movePanelTab, orderPanelTabs } from "@/lib/panel-tab-order";
 import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
-import { getFileTabId, openFileTab, replaceFileTab, saveFileViewerState } from "./file-tab-state";
+import { clearFileTabAnchor, getFileTabId, openFileTab, replaceFileTab, saveFileViewerState } from "./file-tab-state";
 import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
-import { BranchNavigator } from "./BranchNavigator";
+import { AgentFamilyMenu } from "./AgentFamilyMenu";
 import { claimSoundRequest, SOUND_CLAIM_REQUEST_EVENT, SOUND_CLAIM_RESPONSE_EVENT, SOUND_UNLOCK_EVENT, statusSoundRequestId, tryPlaySoundRequest, useAudio, waitSoundRequestId, wasSessionDialogRecentlyInteracted } from "@/hooks/useAudio";
 import { getThemeSnapshot, useTheme } from "@/hooks/useTheme";
 import { isThemePreference } from "@/lib/theme";
@@ -57,7 +59,7 @@ import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { Check, Copy, FileInput, Folder, FolderOpen, GitFork, ListX, Map as MapIcon, MessageSquare, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { copyText } from "@/lib/clipboard";
-import { sendAgentCommand } from "@/lib/agent-client";
+import { SESSION_RESOURCES_RELOADED_EVENT } from "@/lib/agent-client";
 import {
   COLLAPSED_PROVIDERS_CHANGED_EVENT,
   COLLAPSED_PROVIDERS_REQUEST_EVENT,
@@ -69,15 +71,14 @@ import {
 import { getFileName, normalizeFilePathSlashes } from "@/lib/file-paths";
 import { apiPathForPeer } from "@/lib/file-api";
 import { clearSessionActivityCache, fetchSessionActivity } from "@/lib/session-activity-fetch";
-import { mergeSessionCostSummaries, sessionCacheHitRate, sessionCostColor, sessionCostPresentation } from "@/lib/session-cost";
 import { formatMetricNumber as formatMetricNumberValue } from "@/lib/format-metric-number";
-import { formatResponseDuration } from "@/lib/response-duration";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
   claimExtensionAttentionNotification,
   shouldShowBrowserNotification,
   showBrowserNotification,
 } from "@/lib/browser-notifications";
+import { sessionCompletionTag, type SessionCompletionIdentity } from "@/lib/session-completion-notification";
 import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { canRefreshPreview, hasRefreshRisk } from "@/lib/preview-refresh";
@@ -101,6 +102,7 @@ import {
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode, UserMessage } from "@/lib/types";
 import type { SessionActivityDevice, SessionActivityItem } from "@/lib/session-activity-types";
+import type { WorktreeBindingDraft } from "@/lib/worktree-bindings";
 import type { SessionForkResult } from "@/hooks/useAgentSession";
 import type { McpRefusalReason, ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
@@ -110,22 +112,14 @@ import type { SettingsSection } from "@/lib/settings-navigation";
 import type { ToolEntry } from "@/lib/tool-presets";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import { resolveAgentExecutionContext, resolveFileReferencePath, resolveMainlineFileContext, type FileContext } from "@/lib/file-context";
-import { buildTalkMapInjectPrompt, buildTalkMapSourceInfo, type TalkMapGhostCardState } from "@/lib/talk-map-types";
-import { stripHiddenUserQuestion } from "@/lib/session-hover-preview";
+import { buildTalkMapSourceInfo } from "@/lib/talk-map-types";
 import { EMBEDDED_MODAL_STATE_EVENT, EMBEDDED_SIDEKICK_DISMISS_EVENT, EMBEDDED_SLASH_DETAILS_CLOSE_EVENT, EMBEDDED_SLASH_DETAILS_EVENT, EMBEDDED_IMAGE_PREVIEW_EVENT, EMBEDDED_IMAGE_PREVIEW_ACK_EVENT, EMBEDDED_IMAGE_PREVIEW_CLOSE_EVENT, EMBEDDED_QUOTE_ANNOTATION_EVENT, EMBEDDED_QUOTE_ANNOTATION_RESULT_EVENT, EMBEDDED_QUOTE_ANNOTATION_CLOSE_EVENT, EMBEDDED_QUOTE_ANNOTATION_DELETE_EVENT, reduceEmbeddedImagePreview, notifyEmbeddedModalState, type EmbeddedModalKind, type EmbeddedSlashDetailsState, type EmbeddedImagePreviewState, type EmbeddedQuoteAnnotationState } from "@/lib/embedded-modal";
 import { SlashCommandDetailsSurface, type SlashCommandDetailsView } from "./SlashCommandDetailsSurface";
 import { ImageLightbox } from "./ImageLightbox";
 import { QuoteAnnotationModal } from "./QuoteAnnotationModal";
+import { ResourceToolbar } from "./app-shell-resource-toolbar";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree" | "sourceInfo";
-type SessionCostDetailRow = {
-  key: string;
-  label: string;
-  value: string;
-  title?: string;
-  models: string[];
-  details?: SessionCostDetailRow[];
-};
 type LayoutControlId = "sessions" | "explorer" | "reader" | "document";
 type LayoutControlSurface = "top" | "panel" | "panel-action" | "recovery" | "sidebar";
 type AutoNameStatus =
@@ -205,18 +199,6 @@ function SessionTopBarButton({
   );
 }
 
-function SidekickMessageIcon({ count, size = 14 }: { count: number; size?: number }) {
-  return (
-    <MessageSquare
-      size={size}
-      strokeWidth={1.8}
-      fill={count > 0 ? "color-mix(in srgb, var(--accent) 55%, transparent)" : "none"}
-      color="currentColor"
-      aria-hidden="true"
-    />
-  );
-}
-
 interface TalkMapGhostConversion {
   ghostId: string;
   projectRoot: string;
@@ -226,6 +208,7 @@ interface NewSessionOptions {
   initialMessage?: string;
   contextSourceSessionId?: string;
   talkMapGhost?: TalkMapGhostConversion;
+  worktreeBinding?: WorktreeBindingDraft;
 }
 
 interface PendingTalkMapGhostConversion extends TalkMapGhostConversion {
@@ -759,120 +742,6 @@ function applyActivityArchiveView(target: URL): void {
   else target.searchParams.delete("view");
 }
 
-function ResourceToolbar({
-  cwd,
-  onOpenModels,
-  onOpenSkills,
-  onOpenPlugins,
-  onOpenAgents,
-}: {
-  cwd: string | null;
-  onOpenModels: () => void;
-  onOpenSkills: () => void;
-  onOpenPlugins: () => void;
-  onOpenAgents: () => void;
-}) {
-  const { t } = useI18n();
-  const actions = [
-    {
-      label: t("common.models"),
-      onClick: onOpenModels,
-      disabled: false,
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-          <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-          <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-          <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-          <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-        </svg>
-      ),
-    },
-    {
-      label: t("common.skills"),
-      onClick: onOpenSkills,
-      disabled: !cwd,
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
-        </svg>
-      ),
-    },
-    {
-      label: t("common.plugins"),
-      onClick: onOpenPlugins,
-      disabled: !cwd,
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M9 7V2" />
-          <path d="M15 7V2" />
-          <path d="M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0Z" />
-          <path d="M12 19v3" />
-        </svg>
-      ),
-    },
-    {
-      label: t("common.agents"),
-      onClick: onOpenAgents,
-      disabled: false,
-      icon: (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-          <circle cx="9" cy="7" r="4" />
-          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-        </svg>
-      ),
-    },
-  ] as const;
-
-  return (
-    <div
-      data-resource-toolbar="true"
-      style={{
-        padding: "8px",
-        flexShrink: 0,
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        gap: 4,
-      }}
-    >
-      {actions.map(({ label, onClick, disabled, icon }) => (
-        <button
-          key={label}
-          type="button"
-          onClick={onClick}
-          disabled={disabled}
-          title={label}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            height: 32, padding: "0 6px", background: "none", border: "none",
-            borderRadius: 7, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-            fontSize: 12, whiteSpace: "nowrap", opacity: disabled ? 0.35 : 1,
-            transition: "background 0.12s, color 0.12s",
-          }}
-          onMouseEnter={(event) => {
-            if (!disabled) {
-              event.currentTarget.style.background = "var(--bg-hover)";
-              event.currentTarget.style.color = "var(--text)";
-            }
-          }}
-          onMouseLeave={(event) => {
-            event.currentTarget.style.background = "none";
-            event.currentTarget.style.color = "var(--text-muted)";
-          }}
-        >
-          {icon}
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: string; localDeviceName: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -962,7 +831,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [embeddedReaderUrl, unlockAudio]);
-  // 全局等待播报：没有挂载 ChatWindow 时由 AppShell 消费 waiting/events。
+  // 全局等待播报：没有挂载 ChatWindow 时由 AppShell 消费 Reader 活动 SSE。
   // 嵌入页不独立订阅，由外层 Activity/父级 broker 负责，避免同一 intent 双播。
   useEffect(() => {
     if (embeddedReaderMode) return;
@@ -1022,7 +891,10 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   const [toDiscussView, setToDiscussView] = useState(false);
   const [toReviseView, setToReviseView] = useState(false);
   const [completedView, setCompletedView] = useState(false);
-  const [remoteSession, setRemoteSession] = useState<{ device: SessionActivityDevice; sessionInfo: SessionInfo | null; searchTerm: string | null; newSessionCwd: string | null; sessionRunning: boolean; newSessionSubprojectId?: string | null; newSessionSubprojectLabel?: string | null; newSessionContextSourceId?: string | null } | null>(null);
+  const [remoteSession, setRemoteSession] = useState<{ device: SessionActivityDevice; sessionInfo: SessionInfo | null; searchTerm: string | null; newSessionCwd: string | null; sessionRunning: boolean; newSessionSubprojectId?: string | null; newSessionSubprojectLabel?: string | null; newSessionContextSourceId?: string | null; newSessionWorktreeBinding?: WorktreeBindingDraft | null; draftInstanceKey?: string; promotedSessionId?: string } | null>(null);
+  const committedRemoteSessionRef = useRef(remoteSession);
+  useLayoutEffect(() => { committedRemoteSessionRef.current = remoteSession; }, [remoteSession]);
+  const remoteDraftInstanceRef = useRef(0);
   const remoteNewSessionDraftKeyRef = useRef<string | null>(null);
   /** Search term that opened the current session; ChatWindow highlights it. */
   const [highlightTerm, setHighlightTerm] = useState<string | null>(null);
@@ -1056,30 +928,24 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   const embeddedDeviceIdRef = useRef<string | null>(null);
   embeddedSessionKeyRef.current = embeddedSessionKey;
   embeddedDeviceIdRef.current = embeddedDeviceId;
-  const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
-  const [talkMapOpen, setTalkMapOpen] = useState(false);
-  const [talkMapProjectRoot, setTalkMapProjectRoot] = useState<string | null>(null);
-  const [talkMapDevice, setTalkMapDevice] = useState<SessionActivityDevice | null>(null);
-  const [talkMapFocusSessionId, setTalkMapFocusSessionId] = useState<string | null>(null);
-  const [talkMapSidebarSessionId, setTalkMapSidebarSessionId] = useState<string | null>(null);
-  const closeTalkMap = useCallback(() => {
-    setTalkMapOpen(false);
-    setTalkMapDevice(null);
-    setTalkMapFocusSessionId(null);
-    setTalkMapSidebarSessionId(null);
+  const [selectedSession, setSelectedSessionState] = useState<SessionInfo | null>(null);
+  const [sessionKey, setSessionKey] = useState(0);
+  const committedSelectedSessionRef = useRef(selectedSession);
+  useLayoutEffect(() => { committedSelectedSessionRef.current = selectedSession; }, [selectedSession]);
+  const setSelectedSession = useCallback((next: SetStateAction<SessionInfo | null>) => {
+    if (next === null && committedSelectedSessionRef.current) setSessionKey((key) => key + 1);
+    setSelectedSessionState(next);
   }, []);
-  const [worktreeGraphOpen, setWorktreeGraphOpen] = useState(false);
-  const [worktreeGraphProjectRoot, setWorktreeGraphProjectRoot] = useState<string | null>(null);
-  const [worktreeGraphDevice, setWorktreeGraphDevice] = useState<SessionActivityDevice | null>(null);
-  const [worktreeGraphSessionId, setWorktreeGraphSessionId] = useState<string | null>(null);
-  const [worktreeGraphSessionPath, setWorktreeGraphSessionPath] = useState<string | null>(null);
-  const closeWorktreeGraph = useCallback(() => {
-    setWorktreeGraphOpen(false);
-    setWorktreeGraphProjectRoot(null);
-    setWorktreeGraphDevice(null);
-    setWorktreeGraphSessionId(null);
-    setWorktreeGraphSessionPath(null);
-  }, []);
+  const worktreeCallbacksRef = useRef<AppShellWorktreeCallbacks | null>(null);
+  const {
+    talkMapOpen, talkMapProjectRoot, talkMapDevice, talkMapFocusSessionId, talkMapSidebarSessionId,
+    worktreeGraphOpen, worktreeGraphProjectRoot, worktreeGraphDevice, worktreeGraphSessionId, worktreeGraphSessionPath,
+    closeTalkMap, closeWorktreeGraph, openTalkMap, openWorktreeGraph, handleOpenWorktreeGraph,
+    handleWorktreeGraphNewSession, handleWorktreeGraphOpenSession, handleOpenTalkMapForSession,
+    handleTalkMapSession, talkMapActionDevice, handleTalkMapSelectCard, handleTalkMapSessionMutation,
+    handleTalkMapNewSession, handleTalkMapConvertGhost, handleTalkMapInjectContext, handleTalkMapFork,
+    handleActivityTalkMap, handleActivityInjectContext, clearTalkMapSelection, cancelWorktreeGraphOpen,
+  } = useAppShellWorktree({ callbacksRef: worktreeCallbacksRef, localDeviceId, localDeviceName, translate });
   const [activitySidebarMode, setActivitySidebarMode] = useState(() => (!embeddedReaderMode && !sessionOnlyMode) || searchParams.get(EMBEDDED_ACTIVITY_SIDEBAR_PARAM) === "1");
   // 完整设备视图（monitor 进入）：设备切换条覆盖 iframe 顶部，iframe 保持全宽。
   const [embeddedDeviceWorkspaceActive, setEmbeddedDeviceWorkspaceActive] = useState(false);
@@ -1256,6 +1122,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     };
   }, [applyRunningSnapshot]);
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
+  const [newSessionWorktreeBinding, setNewSessionWorktreeBinding] = useState<WorktreeBindingDraft | null>(null);
   const [newSessionSubprojectId, setNewSessionSubprojectId] = useState<string | null>(() => initialNavigation.subprojectId);
   const [newSessionSubprojectLabel, setNewSessionSubprojectLabel] = useState<string | null>(() => initialNavigation.subprojectLabel);
   const activeNewSessionDraftKeyRef = useRef<string | null>(null);
@@ -1264,7 +1131,6 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   );
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [settingsModalTab, setSettingsModalTab] = useState<SettingsTab | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
@@ -1560,7 +1426,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     setManualFileContext(context);
   }, []);
   const topBarRef = useRef<HTMLDivElement>(null);
-  const sessionStatsPanelRef = useRef<HTMLDivElement>(null);
+  const topPanelRef = useRef<HTMLDivElement>(null);
 
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
@@ -2153,7 +2019,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "activity" | "language" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | "activity" | "agents" | "language" | null>(null);
   activeTopPanelRef.current = activeTopPanel;
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const suppressActivityPanelRestoreRef = useRef(false);
@@ -2168,7 +2034,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   }, []);
 
   const toggleTopPanel = useCallback((
-    panel: "branches" | "system" | "session" | "activity",
+    panel: "branches" | "system" | "session" | "activity" | "agents",
     _mobile = false,
   ) => {
     if (isMobileViewport()) setSidebarOpen(false);
@@ -2325,16 +2191,14 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     return () => ro.disconnect();
   }, [activeTopPanel, isMobile, mobileSidebarReady, updateTopPanelPosition]);
 
-  // Session statistics is a transient popover. Keep clicks inside its trigger
-  // and content interactive, but close it as soon as the user clicks elsewhere.
-  // Other top panels (activity, branches, and system) keep their existing
-  // interaction model because some of them occupy the whole available area.
+  // All top panels close when the pointer lands outside the top-bar trigger
+  // and the shared panel content.
   useEffect(() => {
-    if (activeTopPanel !== "session") return;
+    if (!activeTopPanel) return;
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
-      if (topBarRef.current?.contains(target) || sessionStatsPanelRef.current?.contains(target)) return;
+      if (topBarRef.current?.contains(target) || topPanelRef.current?.contains(target)) return;
       setActiveTopPanel(null);
     };
     document.addEventListener("pointerdown", handlePointerDown);
@@ -2347,9 +2211,32 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
   const [terminalCleanupError, setTerminalCleanupError] = useState<string | null>(null);
-  const [sidekickRightPanelOpen, setSidekickRightPanelOpen] = useState(false);
-  const isSidekickTabActive = sidekickRightPanelOpen && activeFileTabId === SIDEKICK_TAB_ID;
-  const panelTabs: Tab[] = [
+  const [panelTabOrder, setPanelTabOrder] = useState<string[]>([]);
+  const sidekickSessionIdentity = remoteSession
+    ? `remote:${remoteSession.device.id}:${remoteSession.sessionInfo?.id ?? remoteSession.newSessionCwd ?? ""}`
+    : `local:${selectedSession?.id ?? ""}`;
+  const {
+    sidekickOpen,
+    sidekickCount,
+    sidekickRightPanelOpen,
+    isSidekickTabActive,
+    selectionToolbar,
+    setSidekickCount,
+    toggleSidekick,
+    toggleSidekickRightPanel,
+    closeSidekickRightPanel,
+    closeSidekickTab,
+    handleSelectionToolbarChange,
+  } = useAppShellSidekick({
+    sessionIdentity: sidekickSessionIdentity,
+    activeFileTabId,
+    fileTabs,
+    terminalTabs,
+    rightPanelOpen,
+    setActiveFileTabId,
+    setRightPanelOpen,
+  });
+  const rawPanelTabs: Tab[] = [
     ...fileTabs,
     ...terminalTabs.filter((tab) => tab.closing !== "close").map((tab) => ({
       id: tab.id,
@@ -2359,6 +2246,16 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       closing: Boolean(tab.closing),
     })),
   ];
+  const panelTabs = orderPanelTabs(rawPanelTabs, panelTabOrder);
+  const panelTabIds = rawPanelTabs.map((tab) => tab.id).join("\n");
+
+  useEffect(() => {
+    const openIds = new Set(panelTabIds ? panelTabIds.split("\n") : []);
+    setPanelTabOrder((current) => {
+      const next = current.filter((id) => openIds.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [panelTabIds]);
 
   useEffect(() => {
     try {
@@ -2553,7 +2450,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     urlRestoreTokenRef.current += 1;
     mountRestorePendingRef.current = false;
     invalidateEmbeddedSessionRequest();
-  }, [invalidateEmbeddedSessionRequest]);
+    cancelWorktreeGraphOpen?.();
+  }, [cancelWorktreeGraphOpen, invalidateEmbeddedSessionRequest]);
 
   const clearEmbeddedReaderOwner = useCallback(() => {
     invalidateEmbeddedSessionRequest();
@@ -3041,6 +2939,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     closeWorktreeGraph();
     remoteNewSessionDraftKeyRef.current = null;
     setPendingContextSourceSessionId(options?.contextSourceSessionId ?? null);
+    setNewSessionWorktreeBinding(options?.worktreeBinding ?? null);
     const nextSubprojectId = subprojectId || null;
     const nextSubprojectLabel = nextSubprojectId ? subprojectLabel?.trim() || null : null;
     if (embeddedReaderMode && typeof window !== "undefined" && window.parent !== window) {
@@ -3053,6 +2952,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         ...(nextSubprojectLabel ? { subprojectLabel: nextSubprojectLabel } : {}),
         ...(options?.initialMessage ? { initialMessage: options.initialMessage } : {}),
         ...(options?.contextSourceSessionId ? { contextSourceSessionId: options.contextSourceSessionId } : {}),
+        ...(options?.worktreeBinding ? { worktreeBinding: options.worktreeBinding } : {}),
         ...(options?.talkMapGhost ? { talkMapGhost: options.talkMapGhost } : {}),
       }, "*");
     }
@@ -3210,6 +3110,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     activeNewSessionDraftKeyRef.current = null;
     setPendingRestoreMessage(null);
     setPendingContextSourceSessionId(null);
+    setNewSessionWorktreeBinding(null);
     setNewSessionCwd(null);
     setNewSessionSubprojectId(null);
     setNewSessionSubprojectLabel(null);
@@ -3226,12 +3127,14 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     title,
     body,
     tag,
+    identity,
   }: {
     targetSession: SessionInfo | null;
     targetDevice?: SessionActivityDevice;
     title: string;
     body: string;
     tag?: string;
+    identity?: SessionCompletionIdentity;
   }) => {
     if (!("Notification" in window)) return;
 
@@ -3245,6 +3148,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         body,
         sessionUrl,
         tag,
+        identity,
         onClick: () => {
           window.focus();
           if (targetSession && targetDevice && targetDevice.id !== localDeviceId) {
@@ -3317,6 +3221,9 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     if (kind !== "done" || !shouldShowBrowserNotification()) return;
     // Notification and audio share the existing claim store, but cannot consume each other's claim.
     const notificationKey = `notification:${soundKey}`;
+    const identity = item.latestRun?.runId
+      ? { deviceId: item.device.id, sessionId: item.session.id, runId: item.latestRun.runId }
+      : undefined;
     void claimSoundRequest(notificationKey).then((claimed) => {
       if (!claimed) return;
       deliverSessionNotification({
@@ -3324,7 +3231,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         targetDevice: item.device,
         title: item.session.name ?? translate("i18n.sessionComplete"),
         body: translate("i18n.taskFinished"),
-        tag: notificationKey,
+        tag: sessionCompletionTag(identity),
+        identity,
       });
     });
   }, [canPlaySound, deliverSessionNotification, playDoneSound, playErrorSound, refreshTopBarSessionMetadata, translate]);
@@ -3396,7 +3304,14 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   }, []);
 
   const handleSessionForked = useCallback((result: SessionForkResult) => {
+    if (remoteSession) {
+      const current = committedRemoteSessionRef.current;
+      if (!current || current.device.id !== remoteSession.device.id
+        || current.sessionInfo?.id !== remoteSession.sessionInfo?.id
+        || current.draftInstanceKey !== remoteSession.draftInstanceKey) return;
+    } else if (committedRemoteSessionRef.current || committedSelectedSessionRef.current?.id !== selectedSession?.id) return;
     invalidateWorkspaceRestore();
+    const forkRestoreToken = urlRestoreTokenRef.current;
     activeNewSessionDraftKeyRef.current = null;
     const sourceSession = remoteSession?.sessionInfo ?? selectedSession;
     const inheritedSubprojectId = sourceSession?.subprojectId ?? null;
@@ -3405,7 +3320,10 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       if (!cwd) return;
       if (remoteSession) {
         // 远程会话 fork 首条消息（编辑式新聊天）：转远程新建草稿并保留恢复消息。
-        setRemoteSession((prev) => (prev ? { ...prev, sessionInfo: null, sessionRunning: false, newSessionCwd: cwd, newSessionSubprojectId: inheritedSubprojectId, newSessionSubprojectLabel: null } : prev));
+        remoteNewSessionDraftKeyRef.current = `remote-new:${remoteSession.device.id}:${cwd}:${inheritedSubprojectId ?? ""}`;
+        const draftInstanceKey = `remote-draft:${++remoteDraftInstanceRef.current}`;
+        setRemoteSession((prev) => (prev?.device.id === remoteSession.device.id && prev.sessionInfo?.id === remoteSession.sessionInfo?.id && prev.draftInstanceKey === remoteSession.draftInstanceKey
+          ? { ...prev, sessionInfo: null, sessionRunning: false, newSessionCwd: cwd, newSessionSubprojectId: inheritedSubprojectId, newSessionSubprojectLabel: null, newSessionContextSourceId: null, draftInstanceKey, promotedSessionId: undefined } : prev));
         setPendingRestoreMessage(result.restoreMessage);
         return;
       }
@@ -3446,7 +3364,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         // 用已知信息（forkId + 原 cwd）立即回填 fork 视图，避免 fetch 往返期间
         // 空草稿中间态闪烁；后台经 peer 代理拉取真实 sessionInfo 校准（ChatWindow
         // 挂载后自行经 /api/remote 拉会话数据，临时对象仅作标识）。
-        setRemoteSession((prev) => (prev ? {
+        setRemoteSession((prev) => (prev?.device.id === deviceId && prev.sessionInfo?.id === remoteSession.sessionInfo?.id && prev.draftInstanceKey === remoteSession.draftInstanceKey ? {
           ...prev,
           sessionInfo: {
             id: newSessionId,
@@ -3458,18 +3376,21 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
           sessionRunning: false,
         } : prev));
       } else {
-        setRemoteSession((prev) => (prev ? { ...prev, sessionInfo: null, sessionRunning: false } : prev));
+        setRemoteSession((prev) => (prev?.device.id === deviceId && prev.sessionInfo?.id === remoteSession.sessionInfo?.id && prev.draftInstanceKey === remoteSession.draftInstanceKey
+          ? { ...prev, sessionInfo: null, sessionRunning: false } : prev));
       }
       void fetch(`/api/remote/sessions?peer=${encodeURIComponent(deviceId)}`, { cache: "no-store" })
         .then((res) => (res.ok ? (res.json() as Promise<{ sessions?: SessionInfo[] }>) : null))
         .then((body) => {
+          if (forkRestoreToken !== urlRestoreTokenRef.current) return;
           const fork = body?.sessions?.find((s) => s.id === newSessionId);
           if (fork) {
-            setRemoteSession((prev) => (prev ? { ...prev, sessionInfo: fork, sessionRunning: false } : prev));
+            setRemoteSession((prev) => (prev?.device.id === deviceId && (fallbackCwd ? prev.sessionInfo?.id === newSessionId : prev.sessionInfo === null)
+              ? { ...prev, sessionInfo: fork, sessionRunning: false } : prev));
           } else if (!fallbackCwd) {
             // 未能临时回填且 fork 未出现在远程会话列表（极端时序）：退出远程会话视图
             // 回聚合列表，列表刷新后 fork 可见、侧栏不再残留原会话。
-            setRemoteSession(null);
+            setRemoteSession((prev) => prev?.device.id === deviceId && prev.sessionInfo === null ? null : prev);
           }
         })
         .catch(() => { /* 保留临时 fork 视图（fork 已创建，仅校准失败） */ });
@@ -3526,7 +3447,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       setNewSessionSubprojectId(null);
       setNewSessionSubprojectLabel(null);
       setSelectedSession(null);
-      setRemoteSession({ device, sessionInfo: null, searchTerm: null, newSessionCwd: cwd, sessionRunning: false, newSessionSubprojectId: subprojectId || null, newSessionSubprojectLabel: subprojectLabel?.trim() || null, newSessionContextSourceId: options?.contextSourceSessionId ?? null });
+      const draftInstanceKey = `remote-draft:${++remoteDraftInstanceRef.current}`;
+      setRemoteSession({ device, sessionInfo: null, searchTerm: null, newSessionCwd: cwd, sessionRunning: false, newSessionSubprojectId: subprojectId || null, newSessionSubprojectLabel: subprojectLabel?.trim() || null, newSessionContextSourceId: options?.contextSourceSessionId ?? null, newSessionWorktreeBinding: options?.worktreeBinding ?? null, draftInstanceKey });
       return;
     }
     if (device && embeddedReaderUrl && embeddedIframeReadyRef.current) {
@@ -3535,7 +3457,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       if (embeddedDevice === device.id && iframe) {
         // 当前 iframe 已明确支持该协议：把请求交给目标 Reader 内部处理，不能
         // 回退到 URL 重建，否则会卸载整个 Reader，造成运行态闪切。
-        iframe.postMessage({ type: EMBEDDED_NEW_SESSION_REQUEST_EVENT, cwd, ...(subprojectId ? { subprojectId } : {}), ...(subprojectLabel?.trim() ? { subprojectLabel: subprojectLabel.trim() } : {}), ...(options?.initialMessage ? { initialMessage: options.initialMessage } : {}), ...(options?.contextSourceSessionId ? { contextSourceSessionId: options.contextSourceSessionId } : {}), ...(options?.talkMapGhost ? { talkMapGhost: options.talkMapGhost } : {}) }, "*");
+        iframe.postMessage({ type: EMBEDDED_NEW_SESSION_REQUEST_EVENT, cwd, ...(subprojectId ? { subprojectId } : {}), ...(subprojectLabel?.trim() ? { subprojectLabel: subprojectLabel.trim() } : {}), ...(options?.initialMessage ? { initialMessage: options.initialMessage } : {}), ...(options?.contextSourceSessionId ? { contextSourceSessionId: options.contextSourceSessionId } : {}), ...(options?.worktreeBinding ? { worktreeBinding: options.worktreeBinding } : {}), ...(options?.talkMapGhost ? { talkMapGhost: options.talkMapGhost } : {}) }, "*");
         setEmbeddedResourceSession({ deviceId: device.id, sessionId: null, cwd, path: null });
         setActiveTopPanel(null);
         setActivitySidebarMode(true);
@@ -3554,7 +3476,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         ...(subprojectLabel?.trim() ? { subprojectLabel: subprojectLabel.trim() } : {}),
         ...(options ?? {}),
       };
-      pendingEmbeddedNewSessionRef.current = options?.initialMessage || options?.contextSourceSessionId || options?.talkMapGhost
+      pendingEmbeddedNewSessionRef.current = options?.initialMessage || options?.contextSourceSessionId || options?.worktreeBinding || options?.talkMapGhost
         ? { deviceId: device.id, request: pendingRequest }
         : null;
       target.searchParams.set("cwd", cwd);
@@ -3582,7 +3504,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     if (!embeddedReaderMode || typeof window === "undefined" || window.parent === window) return;
     const handleNewSessionRequest = (event: MessageEvent) => {
       if (event.source !== window.parent) return;
-      const data = event.data as { type?: unknown; cwd?: unknown; subprojectId?: unknown; subprojectLabel?: unknown; initialMessage?: unknown; contextSourceSessionId?: unknown; talkMapGhost?: unknown } | null;
+      const data = event.data as { type?: unknown; cwd?: unknown; subprojectId?: unknown; subprojectLabel?: unknown; initialMessage?: unknown; contextSourceSessionId?: unknown; worktreeBinding?: unknown; talkMapGhost?: unknown } | null;
       if (data?.type !== EMBEDDED_NEW_SESSION_REQUEST_EVENT || typeof data.cwd !== "string" || !data.cwd) return;
       const subprojectId = typeof data.subprojectId === "string" && data.subprojectId ? data.subprojectId : undefined;
       const subprojectLabel = typeof data.subprojectLabel === "string" && data.subprojectLabel.trim() ? data.subprojectLabel.trim() : undefined;
@@ -3594,8 +3516,12 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         : undefined;
       const initialMessage = typeof data.initialMessage === "string" && data.initialMessage.trim() ? data.initialMessage : undefined;
       const contextSourceSessionId = typeof data.contextSourceSessionId === "string" && data.contextSourceSessionId.trim() ? data.contextSourceSessionId.trim() : undefined;
-      handleNewSession(`activity-${Date.now()}`, data.cwd, subprojectId, subprojectLabel, initialMessage || contextSourceSessionId || talkMapGhost
-        ? { ...(initialMessage ? { initialMessage } : {}), ...(contextSourceSessionId ? { contextSourceSessionId } : {}), ...(talkMapGhost ? { talkMapGhost } : {}) }
+      const bindingData = data.worktreeBinding && typeof data.worktreeBinding === "object" ? data.worktreeBinding as { projectRoot?: unknown; worktreePath?: unknown; relation?: unknown } : null;
+      const worktreeBinding = bindingData && typeof bindingData.projectRoot === "string" && typeof bindingData.worktreePath === "string"
+        ? { projectRoot: bindingData.projectRoot, worktreePath: bindingData.worktreePath, relation: (bindingData.relation === "creator" ? "creator" : "task-root") as WorktreeBindingDraft["relation"] }
+        : undefined;
+      handleNewSession(`activity-${Date.now()}`, data.cwd, subprojectId, subprojectLabel, initialMessage || contextSourceSessionId || worktreeBinding || talkMapGhost
+        ? { ...(initialMessage ? { initialMessage } : {}), ...(contextSourceSessionId ? { contextSourceSessionId } : {}), ...(worktreeBinding ? { worktreeBinding } : {}), ...(talkMapGhost ? { talkMapGhost } : {}) }
         : undefined);
     };
     window.addEventListener("message", handleNewSessionRequest);
@@ -4198,7 +4124,9 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         setEmbeddedReaderUrl(null);
       }
     }
-    setTalkMapSidebarSessionId((current) => current === sessionId ? null : current);
+    // The worktree hook compares against its live selection ref so an older
+    // deletion callback cannot clear a newer Talk Map selection.
+    clearTalkMapSelection(sessionId);
     if (currentWorkspaceOwnsSession) {
       setPendingRestoreMessage(null);
       setHighlightTerm(null);
@@ -4228,7 +4156,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       setSystemPrompt(null);
       replaceWorkspaceRoot();
     }
-  }, [embeddedDeviceId, embeddedIframeSessionId, embeddedReaderMode, embeddedReaderUrl, embeddedResourceSession, embeddedSessionKey, invalidateEmbeddedSessionRequest, invalidateWorkspaceRestore, remoteSession, replaceWorkspaceRoot, selectedSession]);
+  }, [clearTalkMapSelection, embeddedDeviceId, embeddedIframeSessionId, embeddedReaderMode, embeddedReaderUrl, embeddedResourceSession, embeddedSessionKey, invalidateEmbeddedSessionRequest, invalidateWorkspaceRestore, remoteSession, replaceWorkspaceRoot, selectedSession]);
 
   // An outer activity list can delete the session currently rendered inside an
   // iframe. Ask that document to leave the deleted session; the local callback
@@ -4254,7 +4182,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   const handleOpenFile = useCallback((
     filePath: string,
     fileName: string,
-    options?: { sourceSessionId?: string | null; modeHint?: "diff"; remotePeer?: string; cwd?: string; projectRoot?: string; page?: number; reuseActiveTab?: boolean },
+    options?: { sourceSessionId?: string | null; modeHint?: "diff"; remotePeer?: string; cwd?: string; projectRoot?: string; page?: number; anchor?: string; reuseActiveTab?: boolean },
   ) => {
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
@@ -4305,8 +4233,11 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       modeHint,
       sourceSessionId,
       page: options?.page,
+      anchor: options?.anchor,
       tabId,
     };
+    const targetTab = fileTabs.find((tab) => tab.id === tabId);
+    if (options?.anchor && targetTab?.dirty && !confirmDiscardFileChanges(targetTab)) return;
 
     if (options?.reuseActiveTab && activeFileTabId) {
       const activeTab = fileTabs.find((tab) => tab.id === activeFileTabId);
@@ -4587,10 +4518,10 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   }, [remoteSession]);
 
   const handleSelectFileTab = useCallback((tabId: string) => {
-    setSidekickRightPanelOpen(false);
+    closeSidekickRightPanel();
     if (tabId === activeFileTabId) return;
     setActiveFileTabId(tabId);
-  }, [activeFileTabId]);
+  }, [activeFileTabId, closeSidekickRightPanel]);
 
   const handleOpenTerminal = useCallback((cwd: string, peer?: string) => {
     updateManualFileContext(resolveMainlineFileContext({ deviceId: peer ?? null, projectRoot: cwd, cwd }));
@@ -4615,14 +4546,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   }, [fileTabs, sidekickRightPanelOpen, terminalTabs]);
   const handleCloseFileTab = useCallback((tabId: string) => {
     if (tabId === SIDEKICK_TAB_ID) {
-      setSidekickRightPanelOpen(false);
-      const terminalList = (Array.isArray(terminalTabs) ? terminalTabs : []).filter((tab) => !tab.closing);
-      setActiveFileTabId((current) => {
-        if (current !== SIDEKICK_TAB_ID) return current;
-        return fileTabs.at(-1)?.id ?? terminalList.at(-1)?.id ?? null;
-      });
       // Only the panel that hosted Sidekick closes; explorer and reading layout stay as they were.
-      if (fileTabs.length === 0 && terminalList.length === 0) setRightPanelOpen(false);
+      closeSidekickTab();
       return;
     }
     const terminalList = Array.isArray(terminalTabs) ? terminalTabs : [];
@@ -4841,6 +4766,17 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     setCompletedView(false);
   }, []);
 
+  const selectRemoteActivitySession = useCallback((item: SessionActivityItem, searchTerm?: string) => {
+    setRemoteSession((previous) => ({
+      ...(previous?.device.id === item.device.id && previous.sessionInfo?.id === item.session.id ? previous : {}),
+      device: item.device,
+      sessionInfo: item.session,
+      searchTerm: searchTerm?.trim() || null,
+      newSessionCwd: null,
+      sessionRunning: item.status === "running" || item.status === "retrying",
+    }));
+  }, []);
+
   const handleOpenActivitySession = useCallback((item: SessionActivityItem, searchTerm?: string, deviceFilter?: string) => {
     closeTalkMap();
     // 活动列表选择是新的会话导航：取消旧新建草稿/工作区恢复，避免异步完成回写旧会话。
@@ -4977,7 +4913,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         updateManualFileContext(null);
         markActivitySessionViewed(item.session.id);
         setSelectedSession(null);
-        setRemoteSession({ device: item.device, sessionInfo: item.session, searchTerm: searchTerm?.trim() || null, newSessionCwd: null, sessionRunning: item.status === "running" || item.status === "retrying" });
+        selectRemoteActivitySession(item, searchTerm);
       }
       return;
     }
@@ -5002,7 +4938,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         // 本机残留会话槽一并清（单槽语义：归档/删除远程会话后主区回列表，不跳回旧本机会话）。
         markActivitySessionViewed(item.session.id);
         setSelectedSession(null);
-        setRemoteSession({ device: item.device, sessionInfo: item.session, searchTerm: searchTerm?.trim() || null, newSessionCwd: null, sessionRunning: item.status === "running" || item.status === "retrying" });
+        selectRemoteActivitySession(item, searchTerm);
       }
       return;
     }
@@ -5017,15 +4953,17 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     } else {
       window.open(target.toString(), "_blank", "noopener,noreferrer");
     }
-  }, [aggregateWorkspaceActive, clearEmbeddedReaderOwner, closeTalkMap, completedView, embeddedDeviceId, embeddedDeviceWorkspaceActive, embeddedReaderMode, embeddedReaderUrl, embeddedResourceSession, embeddedSessionKey, favoritesView, handleSelectSession, hiddenView, invalidateEmbeddedSessionRequest, invalidateWorkspaceRestore, localDeviceId, markActivitySessionViewed, resourceToolbarOwnedByParent, router, searchParams, sessionOnlyMode, toDiscussView, toReviseView, updateManualFileContext, writeDeviceUrlCache]);
+  }, [aggregateWorkspaceActive, clearEmbeddedReaderOwner, closeTalkMap, completedView, embeddedDeviceId, embeddedDeviceWorkspaceActive, embeddedReaderMode, embeddedReaderUrl, embeddedResourceSession, embeddedSessionKey, favoritesView, handleSelectSession, hiddenView, invalidateEmbeddedSessionRequest, invalidateWorkspaceRestore, localDeviceId, markActivitySessionViewed, resourceToolbarOwnedByParent, router, searchParams, selectRemoteActivitySession, sessionOnlyMode, toDiscussView, toReviseView, updateManualFileContext, writeDeviceUrlCache]);
 
   // 远程草稿创建成功后原地切换为会话视图（不离开聚合完整视图）。
-  const handleRemoteSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
+  const handleRemoteSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string, instanceKey?: string) => {
     setRefreshKey((k) => k + 1);
-    if (remoteNewSessionDraftKeyRef.current !== sourceDraftKey) return;
+    const current = committedRemoteSessionRef.current;
+    if (remoteNewSessionDraftKeyRef.current !== sourceDraftKey || !instanceKey
+      || !current || current.draftInstanceKey !== instanceKey || current.sessionInfo !== null) return;
     remoteNewSessionDraftKeyRef.current = null;
     completeTalkMapGhostConversion(session.id, sourceDraftKey);
-    setRemoteSession((prev) => (prev ? { ...prev, sessionInfo: session, sessionRunning: false, newSessionCwd: null, newSessionSubprojectId: null, newSessionSubprojectLabel: null, newSessionContextSourceId: null } : prev));
+    setRemoteSession((prev) => (prev?.draftInstanceKey === instanceKey && prev.sessionInfo === null ? { ...prev, sessionInfo: session, sessionRunning: false, newSessionCwd: null, newSessionSubprojectId: null, newSessionSubprojectLabel: null, newSessionContextSourceId: null, newSessionWorktreeBinding: null, promotedSessionId: session.id } : prev));
   }, [completeTalkMapGhostConversion]);
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
@@ -5046,61 +4984,11 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   // Aggregate remote sessions use a separate remoteSession slot instead of
   // selectedSession, but still own the outer top-bar usage/status display.
   const topBarSessionActive = showChat || Boolean(remoteSession);
-  const [sidekickOpen, setSidekickOpen] = useState(false);
-  const [sidekickCount, setSidekickCount] = useState(0);
-  const toggleSidekick = useCallback(() => {
-    setSidekickRightPanelOpen(false);
-    setActiveFileTabId((current) => current === SIDEKICK_TAB_ID
-      ? fileTabs.at(-1)?.id ?? terminalTabs.filter((tab) => !tab.closing).at(-1)?.id ?? null
-      : current);
-    setSidekickOpen((open) => !open);
-  }, [fileTabs, terminalTabs]);
-  const toggleSidekickRightPanel = useCallback(() => {
-    setSidekickOpen(false);
-    if (sidekickRightPanelOpen && activeFileTabId === SIDEKICK_TAB_ID && rightPanelOpen) {
-      setSidekickRightPanelOpen(false);
-      setActiveFileTabId(fileTabs.at(-1)?.id ?? terminalTabs.filter((tab) => !tab.closing).at(-1)?.id ?? null);
-      if (fileTabs.length === 0 && terminalTabs.length === 0) setRightPanelOpen(false);
-    } else {
-      setSidekickRightPanelOpen(true);
-      setActiveFileTabId(SIDEKICK_TAB_ID);
-      setRightPanelOpen(true);
-    }
-  }, [activeFileTabId, fileTabs, rightPanelOpen, sidekickRightPanelOpen, terminalTabs]);
-  const closeSidekickRightPanel = useCallback(() => {
-    setSidekickRightPanelOpen(false);
-    setActiveFileTabId((current) => current === SIDEKICK_TAB_ID
-      ? fileTabs.at(-1)?.id ?? terminalTabs.filter((tab) => !tab.closing).at(-1)?.id ?? null
-      : current);
-    if (fileTabs.length === 0 && terminalTabs.length === 0) setRightPanelOpen(false);
-  }, [fileTabs, terminalTabs]);
-  const [selectionToolbar, setSelectionToolbar] = useState<SelectionToolbarActions | null>(null);
-  const handleSelectionToolbarChange = useCallback((actions: SelectionToolbarActions | null) => {
-    setSelectionToolbar(actions);
-  }, []);
-
-  useEffect(() => {
-    setSidekickOpen(false);
-    setSidekickRightPanelOpen(false);
-    // Workspace file/terminal tabs survive session changes; only the old session's Sidekick tab is removed.
-    setActiveFileTabId((current) => current === SIDEKICK_TAB_ID
-      ? fileTabs.at(-1)?.id ?? terminalTabs.filter((tab) => !tab.closing).at(-1)?.id ?? null
-      : current);
-    setSidekickCount(0);
-    setSelectionToolbar(null);
-  }, [remoteSession?.device.id, remoteSession?.sessionInfo?.id, selectedSession?.id]);
-
-  useEffect(() => {
-    if (!topBarSessionActive || !topBarSession?.id) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
-        event.preventDefault();
-        toggleSidekick();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [toggleSidekick, topBarSession?.id, topBarSessionActive]);
+  useAppShellSidekickLifecycle({
+    sessionId: topBarSession?.id ?? null,
+    sessionActive: topBarSessionActive,
+    onToggle: toggleSidekick,
+  });
 
   // 新建项目/面板操作跟随的当前设备：打开中的远程会话（聚合完整视图）→
   // 嵌入的远程会话（聚合视图 iframe，embeddedSessionKey 格式 device:session）→
@@ -5675,179 +5563,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       onOpenAgents={() => setSettingsModalTab("agents")}
     />
   ) : null;
-  const openTalkMap = useCallback((projectRoot: string | null, device: SessionActivityDevice | undefined, focusSessionId: string | null = null) => {
-    const root = projectRoot?.trim();
-    if (!root) return;
-    setTalkMapProjectRoot(root);
-    setTalkMapDevice(device ?? null);
-    setTalkMapFocusSessionId(focusSessionId);
-    setTalkMapSidebarSessionId(focusSessionId);
-    setTalkMapOpen(true);
-  }, []);
 
-  const openWorktreeGraph = useCallback((projectRoot: string | null, device?: SessionActivityDevice, sessionContext?: { id?: string | null; cwd?: string | null }) => {
-    const root = projectRoot?.trim();
-    if (!root) return;
-    setWorktreeGraphProjectRoot(root);
-    setWorktreeGraphDevice(device ?? null);
-    setWorktreeGraphSessionId(sessionContext?.id ?? null);
-    setWorktreeGraphSessionPath(sessionContext?.cwd?.trim() || null);
-    setWorktreeGraphOpen(true);
-  }, []);
-
-  const handleOpenWorktreeGraph = useCallback((projectRoot: string | null, device?: SessionActivityDevice) => {
-    openWorktreeGraph(projectRoot, device);
-  }, [openWorktreeGraph]);
-
-  const handleWorktreeGraphNewSession = useCallback((wt: WorktreeGraphItem, prompt: string) => {
-    closeWorktreeGraph();
-    handleNewActivitySession(wt.path, worktreeGraphDevice ?? undefined, undefined, undefined, { initialMessage: prompt });
-  }, [closeWorktreeGraph, handleNewActivitySession, worktreeGraphDevice]);
-
-  const handleWorktreeGraphOpenSession = useCallback((sessionId: string, worktreePath: string) => {
-    const device = worktreeGraphDevice;
-    closeWorktreeGraph();
-    if (device && localDeviceId && device.id !== localDeviceId) {
-      openRemoteSession(device, sessionId, null, { cwd: worktreePath });
-      return;
-    }
-    invalidateWorkspaceRestore();
-    const token = urlRestoreTokenRef.current;
-    void loadLocalSession(sessionId).then((session) => {
-      if (token !== urlRestoreTokenRef.current) return;
-      if (!session) throw new Error("Session not found");
-      handleSelectSession(session);
-    }).catch((cause) => {
-      if (token === urlRestoreTokenRef.current) window.alert(cause instanceof Error ? cause.message : String(cause));
-    });
-  }, [closeWorktreeGraph, handleSelectSession, invalidateWorkspaceRestore, localDeviceId, openRemoteSession, worktreeGraphDevice]);
-
-  const handleOpenTalkMapForSession = useCallback((projectRoot: string | null, device: SessionActivityDevice | undefined, sessionId?: string | null) => {
-    openTalkMap(projectRoot, device, sessionId);
-  }, [openTalkMap]);
-
-  const handleTalkMapSession = useCallback((session: SessionInfo) => {
-    const device = talkMapDevice;
-    closeTalkMap();
-    if (device && localDeviceId && device.id !== localDeviceId) {
-      openRemoteSession(device, session.id, null, { cwd: session.cwd, path: session.path });
-      return;
-    }
-    handleSelectSession(session);
-  }, [closeTalkMap, handleSelectSession, localDeviceId, openRemoteSession, talkMapDevice]);
-
-  const talkMapActionDevice = useCallback((): SessionActivityDevice | undefined => (
-    talkMapDevice ?? (localDeviceId ? { id: localDeviceId, name: localDeviceName ?? translate("remote.localDevice") } : undefined)
-  ), [localDeviceId, localDeviceName, talkMapDevice, translate]);
-
-  const handleTalkMapSelectCard = useCallback((session: SessionInfo | null) => {
-    setTalkMapSidebarSessionId(session?.id ?? null);
-  }, []);
-
-  const handleTalkMapSessionMutation = useCallback(async (session: SessionInfo, op: "archive" | "delete"): Promise<void> => {
-    const device = talkMapActionDevice();
-    if (device && localDeviceId && device.id !== localDeviceId) {
-      const ok = await mutateRemoteSession(device, op, session.id);
-      if (!ok) throw new Error(`Talk Map session ${op} failed`);
-    } else {
-      const archived = op === "archive";
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}${archived ? "/archive" : ""}`, {
-        method: archived ? "POST" : "DELETE",
-        headers: archived ? { "Content-Type": "application/json" } : undefined,
-        body: archived ? JSON.stringify({ archived: true }) : undefined,
-      });
-      if (!response.ok) throw new Error(`Talk Map session HTTP ${response.status}`);
-    }
-    handleSessionDeleted(session.id);
-    setRefreshKey((k) => k + 1);
-  }, [handleSessionDeleted, localDeviceId, mutateRemoteSession, talkMapActionDevice]);
-
-  const handleTalkMapNewSession = useCallback((subprojectId?: string, subprojectLabel?: string) => {
-    if (!talkMapProjectRoot) return;
-    handleNewActivitySession(talkMapProjectRoot, talkMapActionDevice(), subprojectId, subprojectLabel);
-  }, [handleNewActivitySession, talkMapActionDevice, talkMapProjectRoot]);
-
-  const handleTalkMapConvertGhost = useCallback((ghostId: string, ghost: TalkMapGhostCardState, subprojectId?: string) => {
-    if (!talkMapProjectRoot) return;
-    const label = ghost.label.trim();
-    const body = ghost.body?.trim();
-    const initialMessage = body ? `${label}\n\n${body}` : label;
-    handleNewActivitySession(
-      talkMapProjectRoot,
-      talkMapActionDevice(),
-      subprojectId,
-      undefined,
-      {
-        initialMessage,
-        talkMapGhost: { ghostId, projectRoot: talkMapProjectRoot },
-      },
-    );
-  }, [handleNewActivitySession, talkMapActionDevice, talkMapProjectRoot]);
-
-  const handleTalkMapInjectContext = useCallback((session: SessionInfo, targetDevice?: SessionActivityDevice) => {
-    const device = targetDevice ?? talkMapActionDevice();
-    const rawTitle = session.name?.trim() || session.id;
-    const title = stripHiddenUserQuestion(rawTitle) || session.id;
-    const deviceLabel = device?.name ?? localDeviceName ?? "本机";
-    const initialMessage = buildTalkMapInjectPrompt({
-      sourceDevice: deviceLabel,
-      sourceSessionId: session.id,
-      sourceTitle: title,
-      sourcePath: session.path,
-      sourceProject: session.projectRoot ?? session.cwd,
-    });
-    closeTalkMap();
-    handleNewActivitySession(session.cwd, device, session.subprojectId, undefined, { initialMessage, contextSourceSessionId: session.id });
-  }, [closeTalkMap, handleNewActivitySession, localDeviceName, talkMapActionDevice]);
-
-  const handleTalkMapFork = useCallback(async (session: SessionInfo) => {
-    const device = talkMapActionDevice();
-    const peer = device && localDeviceId && device.id !== localDeviceId ? device.id : undefined;
-    const contextPath = apiPathForPeer(peer, `sessions/${encodeURIComponent(session.id)}/context?deferThinking=1&deferMedia=1`);
-    const contextResponse = await fetch(contextPath, { cache: "no-store" });
-    if (!contextResponse.ok) throw new Error(`Context HTTP ${contextResponse.status}`);
-    const contextBody = await contextResponse.json() as {
-      context?: { messages?: Array<{ role?: string }>; entryIds?: Array<string | null | undefined> };
-    };
-    const messages = contextBody.context?.messages ?? [];
-    const entryIds = contextBody.context?.entryIds ?? [];
-    let userIndex = -1;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index]?.role === "user" && typeof entryIds[index] === "string" && entryIds[index]) {
-        userIndex = index;
-        break;
-      }
-    }
-    if (userIndex < 0) throw new Error(translate("talkMap.forkUnavailable"));
-    const result = await sendAgentCommand<{ cancelled?: boolean; newSessionId?: string; restoreMessage?: UserMessage; subprojectAssignmentFailed?: boolean }>(
-      session.id,
-      { type: "fork", entryId: entryIds[userIndex] },
-      peer,
-    );
-    if (result.cancelled) return;
-    closeTalkMap();
-    if (result.restoreMessage?.role === "user") {
-      handleNewActivitySession(session.cwd, device, session.subprojectId);
-      setPendingRestoreMessage(result.restoreMessage);
-      return;
-    }
-    if (!result.newSessionId) throw new Error(translate("talkMap.forkUnavailable"));
-    const fork = {
-      ...session,
-      id: result.newSessionId,
-      parentSessionId: session.id,
-      messageCount: 0,
-      firstMessage: "",
-      subprojectId: result.subprojectAssignmentFailed ? undefined : session.subprojectId,
-      created: new Date().toISOString(),
-      modified: new Date().toISOString(),
-    };
-    if (peer && device) {
-      openRemoteSession(device, result.newSessionId, null, { cwd: session.cwd, path: session.path });
-    } else {
-      handleSelectSession(fork);
-    }
-  }, [closeTalkMap, handleNewActivitySession, handleSelectSession, localDeviceId, openRemoteSession, talkMapActionDevice, translate]);
 
   const activitySidebarContainerVisible = mobileFullDeviceSelectorVisible || shouldShowActivitySidebarContainer({
     conversationSidebarVisible,
@@ -5880,12 +5596,6 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     && activitySidebarContainerVisible
     && explorerSectionOpen
     && Boolean(activityExplorerCwd);
-  const handleActivityTalkMap = useCallback((item: SessionActivityItem) => {
-    handleOpenTalkMapForSession(item.session.projectRoot ?? item.session.cwd, item.device, item.session.id);
-  }, [handleOpenTalkMapForSession]);
-  const handleActivityInjectContext = useCallback((item: SessionActivityItem) => {
-    handleTalkMapInjectContext(item.session, item.device);
-  }, [handleTalkMapInjectContext]);
   const handleActivityCopySessionInfo = useCallback((item: SessionActivityItem) => {
     if (!item.session.path) return;
     const title = item.session.name?.trim() || item.session.firstMessage?.trim().split("\n")[0]?.slice(0, 100) || item.session.id;
@@ -6099,23 +5809,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     handleOpenTalkMapForSession(topBarProjectPath, device, topBarSessionId);
   }, [handleOpenTalkMapForSession, localDeviceId, remoteSession?.device, topBarDeviceName, topBarProjectPath, topBarSessionId]);
   const capabilityPath = topBarProjectPath ? apiPathForPeer(topBarSessionPeer ?? undefined, `worktrees?cwd=${encodeURIComponent(topBarProjectPath)}`) : null;
-  const [worktreeCapability, setWorktreeCapability] = useState<{ path: string; isGit: boolean | null; failed?: boolean } | null>(null);
-  const [worktreeCapabilityRevision, setWorktreeCapabilityRevision] = useState(0);
-  useEffect(() => {
-    if (!capabilityPath) return;
-    const controller = new AbortController();
-    setWorktreeCapability({ path: capabilityPath, isGit: null });
-    void fetch(capabilityPath, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]) })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json() as { isGit?: boolean };
-        if (!controller.signal.aborted) setWorktreeCapability({ path: capabilityPath, isGit: data.isGit === true });
-      }).catch(() => {
-        if (!controller.signal.aborted) setWorktreeCapability({ path: capabilityPath, isGit: null, failed: true });
-      });
-    return () => controller.abort();
-  }, [capabilityPath, worktreeCapabilityRevision]);
-  const activeWorktreeCapability = worktreeCapability?.path === capabilityPath ? worktreeCapability : null;
+  const { activeWorktreeCapability, setWorktreeCapabilityRevision } = useAppShellWorktreeCapability(capabilityPath);
   const topBarIsGit = activeWorktreeCapability?.isGit === true;
   const handleTopBarWorktreeGraph = useCallback(() => {
     if (!topBarProjectPath) return;
@@ -6132,7 +5826,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     loadCost: Boolean(topBarSessionId),
     loadPreview: false,
   });
-  const contextUsage = liveContextUsage ?? topBarDetails.cost?.contextUsage ?? null;
+  const contextUsage = liveContextUsage ?? topBarDetails.cost?.contextUsage ?? sessionStats?.contextUsage ?? null;
   const handleTopBarInjectContext = useCallback(() => {
     if (!topBarSession) return;
     const device = remoteSession?.device ?? (localDeviceId ? { id: localDeviceId, name: topBarDeviceName } : undefined);
@@ -6142,7 +5836,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     if (!topBarSession?.path || !topBarSessionInfoText) return;
     return handleCopySessionField("sourceInfo", topBarSessionInfoText).catch(() => {});
   }, [handleCopySessionField, topBarSession?.path, topBarSessionInfoText]);
-  const sidekickButtonLabel = `${translate("sidekick.title")}${sidekickCount > 0 ? ` (${sidekickCount})` : ""}`;
+  const sidekickButtonLabel = buildSidekickButtonLabel(sidekickCount, translate);
   // Historical top bar padding reference for regression tests: padding: "8px 14px 8px 8px"
   const sessionTopBar = (
     <div style={{
@@ -6294,6 +5988,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       newSessionCwd={effectiveNewSessionCwd}
       newSessionSubprojectId={effectiveNewSessionSubprojectId}
       newSessionContextSourceId={effectiveNewSessionCwd ? pendingContextSourceSessionId : null}
+      newSessionWorktreeBinding={effectiveNewSessionCwd ? newSessionWorktreeBinding : null}
       newSessionPrefill={newSessionPrefill}
       newSessionDraftKey={newSessionDraftKey}
       onAgentEnd={() => handleAgentEnd()}
@@ -6399,6 +6094,18 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     ?? selectedSession?.projectRoot
     ?? newSessionCwd
     ?? null;
+  worktreeCallbacksRef.current = {
+    handleSelectSession,
+    openRemoteSession,
+    loadLocalSession,
+    invalidateWorkspaceRestore,
+    handleNewActivitySession,
+    handleSessionDeleted,
+    mutateRemoteSession,
+    handleCwdChange,
+    bumpRefresh: () => setRefreshKey((key) => key + 1),
+    applyTalkMapRestoreMessage: (message) => setPendingRestoreMessage(message),
+  };
   const mutationRecoveryVisible = pendingRemoteMutations.length > 0
     || Boolean(mutationRecoveryOpen && (remoteMutationNotice || mutationRecoveryBusy));
 
@@ -6900,7 +6607,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
                   {!isMobile && <span>{translate("worktreeGraph.open")}</span>}
                 </button>
               )}
-              <BranchNavigator
+              <AppShellWorktreeBranchNavigator
                 tree={branchTree}
                 activeLeafId={branchActiveLeafId}
                 onLeafChange={handleBranchLeafChange}
@@ -6946,105 +6653,20 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
           )}
           {/* Keep cost, cache-hit rate, and context usage in the top bar; input/output/cache-read counts stay in the expanded panel. */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", height: "100%", flexShrink: 0 }}>
-            {topBarSessionActive && (sessionStats || contextUsage) && (() => {
-            const tokens = sessionStats?.tokens;
-            const cost = sessionStats?.cost ?? 0;
-            const costStatus = sessionStats?.costStatus;
-            const missingPriceModels = sessionStats?.missingPriceModels ?? [];
-            const missingPriceText = missingPriceModels.join(", ");
-            const presentation = sessionCostPresentation(sessionStats?.totalCost ?? {
-              status: costStatus ?? "unavailable",
-              pendingUsageCount: sessionStats?.pendingUsageCount ?? 0,
-              missingPriceModels,
-            }, sessionStats?.extensionCosts);
-            const costCalculated = costStatus === "calculated" || (costStatus === "partial" && presentation.onlySuggesterPending);
-            const costPartial = costStatus === "partial" && !presentation.onlySuggesterPending;
-            const costAvailable = costCalculated || costPartial;
-            const pendingUsageCount = presentation.pendingUsageCount;
-            const sessionStatsTitle = [
-              translate("session.title"),
-              presentation.recordedOnly ? translate("session.costPartialHint") : "",
-              missingPriceText ? `${translate("session.unpricedModels")}: ${missingPriceText}` : "",
-              pendingUsageCount > 0 ? translate("session.pendingUsageCount", { count: pendingUsageCount }) : "",
-            ].filter(Boolean).join(" · ");
-            const missingPriceTitle = missingPriceText
-              ? costPartial ? missingPriceText : `${translate("session.unpricedModels")}: ${missingPriceText}`
-              : undefined;
-            const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-            const formattedCost = costPartial
-              ? `≥$${(Math.floor(cost * 100) / 100).toFixed(2)}`
-              : costCalculated ? (cost >= 0.01 ? `$${cost.toFixed(2)}` : "<$0.01") : null;
-            const costStr = formattedCost;
-            const cacheHitRate = tokens
-              ? sessionCacheHitRate(tokens.input, tokens.cacheRead, tokens.cacheWrite)
-              : null;
-            const cacheHitStr = cacheHitRate !== null ? `CH ${cacheHitRate.toFixed(1)}%` : null;
-            let ctxColor = "var(--text-muted)";
-            let ctxStr: string | null = null;
-            if (contextUsage?.contextWindow) {
-              const pct = contextUsage.percent;
-              if (pct !== null && pct > 90) ctxColor = "#ef4444";
-              else if (pct !== null && pct > 70) ctxColor = "rgba(234,179,8,0.95)";
-              ctxStr = pct !== null ? `${pct.toFixed(0)}% / ${fmt(contextUsage.contextWindow)}` : `? / ${fmt(contextUsage.contextWindow)}`;
-            }
-
-            return (
-              <button
-                type="button"
-                onClick={handleSessionStatsButtonClick}
-                title={sessionStatsTitle}
-                aria-label={translate("session.title")}
-                aria-haspopup="dialog"
-                aria-expanded={activeTopPanel === "session"}
-                style={{
-                  display: "flex", alignItems: "center", gap: 10,
-                  padding: "0 10px", height: "100%",
-                  background: activeTopPanel === "session" ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  fontSize: 11, color: "var(--text-muted)",
-                  whiteSpace: "nowrap", cursor: "pointer",
-                  fontVariantNumeric: "tabular-nums",
-                  transition: "color 0.1s, background 0.1s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "session" ? "var(--text)" : "var(--text-muted)"; }}
-              >
-                {cacheHitStr && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
-                    </svg>
-                    {cacheHitStr}
-                  </span>
-                )}
-                {ctxStr && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: ctxColor }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="M1 9 L1 5 Q1 1 5 1 Q9 1 9 5 L9 9" /><line x1="1" y1="9" x2="9" y2="9" />
-                    </svg>
-                    {ctxStr}
-                  </span>
-                )}
-                {costAvailable && costStr && <span title={[presentation.recordedOnly ? translate("session.costPartialHint") : "", costPartial ? missingPriceTitle : ""].filter(Boolean).join(" · ") || undefined} style={{ color: sessionCostColor(cost), fontWeight: 500 }}>{costStr}</span>}
-                {!costAvailable && <span title={presentation.onlySuggesterPending ? translate("session.costPartialHint") : translate("session.unpriced")} style={{ color: presentation.onlySuggesterPending ? "var(--text-muted)" : "#d97706", fontWeight: 600 }}>{presentation.onlySuggesterPending ? "—" : "?"}</span>}
-                {missingPriceText && !costPartial && (
-                  <span title={missingPriceTitle} style={{ color: "#d97706", fontWeight: 600 }}>+?</span>
-                )}
-                {!costStr && costCalculated && !cacheHitStr && !ctxStr && !missingPriceText && (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><circle cx="12" cy="7.5" r="0.7" fill="currentColor" stroke="none" />
-                  </svg>
-                )}
-              </button>
-            );
-          })()}
+            <SessionTopBarStats
+              sessionActive={topBarSessionActive}
+              sessionStats={sessionStats}
+              contextUsage={contextUsage}
+              active={activeTopPanel === "session"}
+              onOpen={handleSessionStatsButtonClick}
+            />
             <BatchContinueButton />
             {/* Scheme A: fixed right panel toggle always anchored in top-right */}
             {renderLayoutControl("document", "top")}
           </div>
           {/* Top panel dropdown — shared, only one active at a time */}
           {activeTopPanel && topPanelPos && typeof document !== "undefined" && createPortal((
-            <div style={{
+            <div ref={topPanelRef} style={{
               position: "fixed",
               top: topPanelPos.top,
               left: topPanelPos.left,
@@ -7076,6 +6698,30 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
                   <SessionWaitHistory onOpenSession={handleOpenRelatedSession} />
                 </div>
               )}
+              {activeTopPanel === "agents" && topBarSessionId && localDeviceId && (
+                <AgentFamilyMenu
+                  key={`${topBarPeer ?? localDeviceId}:${topBarSessionId}:${Boolean(topBarSession?.archived)}:${hiddenView}`}
+                  sessionId={topBarSessionId}
+                  deviceId={topBarPeer ?? localDeviceId}
+                  peer={topBarPeer}
+                  includeHidden={hiddenView}
+                  archived={Boolean(topBarSession?.archived)}
+                  onSelectSession={(item) => handleOpenActivitySession({
+                    ...item,
+                    device: remoteSession?.device.id === item.device.id ? { ...item.device, ...remoteSession.device } : item.device,
+                  }, undefined, item.device.id)}
+                />
+              )}
+              {activeTopPanel === "branches" && (
+                <AppShellWorktreeBranchPanel
+                  tree={branchTree}
+                  activeLeafId={branchActiveLeafId}
+                  onLeafChange={handleBranchLeafChange}
+                  onToggle={() => toggleTopPanel("branches")}
+                  locked={branchSwitchLocked}
+                  hasSession={Boolean(topBarSession)}
+                />
+              )}
               {activeTopPanel === "system" && (
                 runtimeInspection ? (
                   <SystemPromptInspector
@@ -7092,7 +6738,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
                 )
               )}
               {activeTopPanel === "session" && (
-                <div ref={sessionStatsPanelRef} className="session-info-popover" style={{
+                <div className="session-info-popover" style={{
                   background: "var(--bg-panel)",
                   borderBottom: "1px solid var(--border)",
                   boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
@@ -7117,277 +6763,14 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
                        { label: translate("session.toolCalls"), value: formatMetricNumber(sessionStats.toolCalls), raw: sessionStats.toolCalls },
                        { label: translate("session.toolResults"), value: formatMetricNumber(sessionStats.toolResults), raw: sessionStats.toolResults },
                     ];
-                    const promptTokens = (sessionStats.tokens.input ?? 0) + (sessionStats.tokens.cacheRead ?? 0) + (sessionStats.tokens.cacheWrite ?? 0);
-                    const cacheHitRate = promptTokens > 0 && sessionStats.tokens.cacheRead > 0
-                      ? ((sessionStats.tokens.cacheRead / promptTokens) * 100)
-                      : null;
-                    const tokenDetailRows = [
-                       { label: translate("session.input"), labelNode: null, value: formatMetricNumber(sessionStats.tokens.input), raw: sessionStats.tokens.input },
-                       { label: translate("session.output"), labelNode: null, value: formatMetricNumber(sessionStats.tokens.output), raw: sessionStats.tokens.output },
-                       ...(sessionStats.tokens.cacheRead > 0 ? [{
-                         label: translate("session.cacheRead"),
-                         labelNode: cacheHitRate !== null ? (
-                           <span>
-                             {translate("session.cacheRead")}{" "}
-                             <span style={{ color: "var(--accent, #3b82f6)" }}>({cacheHitRate.toFixed(1)}%)</span>
-                           </span>
-                         ) : null,
-                         value: formatMetricNumber(sessionStats.tokens.cacheRead),
-                         raw: sessionStats.tokens.cacheRead,
-                       }] : []),
-                       ...(sessionStats.tokens.cacheWrite > 0 ? [{ label: translate("session.cacheWrite"), labelNode: null, value: formatMetricNumber(sessionStats.tokens.cacheWrite), raw: sessionStats.tokens.cacheWrite }] : []),
-                    ];
-                    const ctx = contextUsage ?? sessionStats.contextUsage;
-                    const formatCompact = (n: number) => formatMetricNumber(n);
-                    const missingPriceModels = sessionStats.missingPriceModels ?? [];
-                    const timing = sessionStats.timing;
-                    const timingAvailable = timing !== undefined && typeof timing.effectiveMs === "number" && timing.quality !== "unavailable";
-                    const timingTitle = (() => {
-                      const base = translate("session.timingTitle");
-                      if (!timing || !timingAvailable) return base;
-                      const lines = [base, ""];
-                      if (timing.scope === "fork-execution") lines.push(`• ${translate("session.forkExecutionScope")}`);
-                      lines.push(`• ${translate("session.timingParent", {
-                        total: formatResponseDuration(timing.parent.agentTotalMs),
-                        model: formatResponseDuration(timing.parent.modelResponseMs),
-                      })}`);
-                      if (timing.children.count > 0) {
-                        lines.push(`• ${translate("session.timingChildren", {
-                          count: String(timing.children.count),
-                          total: formatResponseDuration(timing.children.agentTotalMs),
-                          model: formatResponseDuration(timing.children.modelResponseMs),
-                        })}`);
-                      }
-                      lines.push(`• ${translate("session.timingTools", { duration: formatResponseDuration(timing.toolMs) })}`);
-                      lines.push(`• ${timing.retryWaitMs > 0
-                        ? translate("session.timingOtherWithRetry", { duration: formatResponseDuration(timing.otherMs), retry: formatResponseDuration(timing.retryWaitMs) })
-                        : translate("session.timingOther", { duration: formatResponseDuration(timing.otherMs) })}`);
-                      if (timing.userWaitMs > 0) lines.push(`• ${translate("session.timingUserWait", { duration: formatResponseDuration(timing.userWaitMs) })}`);
-                      if (timing.children.missingRecords > 0) {
-                        lines.push(`• ${translate("session.timingMissingChildren", { count: String(timing.children.missingRecords) })}`);
-                      }
-                      return lines.join("\n");
-                    })();
-                    const timingValue = (durationMs: number | undefined) => timingAvailable && durationMs !== undefined
-                      ? formatResponseDuration(durationMs)
-                      : translate("session.timingUnavailable");
-                    const effectiveDurationValue = timingValue(timing?.effectiveMs);
-                    const agentTotalValue = timingValue(timing?.agentTotalMs);
-                    const modelResponseValue = timingValue(timing?.modelResponseMs);
-                    const timingChildCount = timingAvailable ? timing?.children.count ?? 0 : 0;
-                    const timingPartial = timingAvailable && timing?.quality === "partial";
-                    const modelResponseShareValue = timingAvailable && timing?.modelResponsePercent !== undefined
-                      ? `${timing.modelResponsePercent.toFixed(1)}%`
-                      : translate("session.timingUnavailable");
-                    const presentation = sessionCostPresentation(sessionStats.totalCost ?? {
-                      status: sessionStats.costStatus ?? "unavailable",
-                      pendingUsageCount: sessionStats.pendingUsageCount ?? 0,
-                      missingPriceModels,
-                    }, sessionStats.extensionCosts);
-                    const costCalculated = sessionStats.costStatus === "calculated";
-                    const costPartial = sessionStats.costStatus === "partial";
-                    const formatCostModels = (summary: SessionStatsInfo["totalCost"]) => {
-                      const rawModels = summary?.models ?? [];
-                      const models = [...new Set(rawModels.map((item) => item?.trim()).filter((model) => Boolean(model) && model !== "unknown/unknown"))] as string[];
-                      if (models.length === 0) return { label: "", title: undefined, models: [] };
-                      if (models.length === 1) return { label: ` (${models[0]})`, title: models[0], models };
-                      return {
-                        label: ` (${translate("session.costModelCount", { count: models.length })})`,
-                        title: models.join(", "),
-                        models,
-                      };
-                    };
-                    const formatCostSummary = (summary: SessionStatsInfo["totalCost"], onlySuggesterPending = false) => {
-                      const amount = summary?.amount ?? (!summary && (costCalculated || costPartial) ? sessionStats.cost : null);
-                      const status = summary?.status ?? sessionStats.costStatus;
-                      if ((status === "calculated" || status === "partial") && typeof amount === "number") {
-                        return status === "partial" && !onlySuggesterPending
-                          ? `≥$${(Math.floor(amount * 10_000) / 10_000).toFixed(4)}`
-                          : `$${amount.toFixed(4)}`;
-                      }
-                      return onlySuggesterPending ? "—" : translate("session.unpriced");
-                    };
-                     const childSessionCount = sessionStats.childCost?.sessionCount ?? 0;
-                     const childCostLabel = childSessionCount > 0
-                      ? translate("session.childCostCount", { count: childSessionCount })
-                      : translate("session.childCost");
-                     const parentCostModels = formatCostModels(sessionStats.parentCost);
-                     const childCostModels = formatCostModels(sessionStats.childCost);
-                     const totalCostModels = formatCostModels(sessionStats.totalCost);
-                     const extensionCosts = sessionStats.extensionCosts ?? [];
-                     const parentOnlySuggesterPending = presentation.onlySuggesterPending && (sessionStats.parentCost?.pendingUsageCount ?? 0) > 0;
-                     const childOnlySuggesterPending = presentation.onlySuggesterPending && (sessionStats.childCost?.pendingUsageCount ?? 0) > 0;
-                     const compactionCostModels = formatCostModels(sessionStats.compactionCost);
-                     const compactionCostRow: SessionCostDetailRow = {
-                       key: "plugin:compaction",
-                       label: `${translate("session.compactionCost")}${compactionCostModels.label}`,
-                       value: formatCostSummary(sessionStats.compactionCost),
-                       title: compactionCostModels.title,
-                       models: compactionCostModels.models,
-                     };
-                     const recapCostModels = formatCostModels(sessionStats.recapCost);
-                     const recapCostRow: SessionCostDetailRow = {
-                       key: "plugin:recap",
-                       label: `${translate("session.recapCost")}${recapCostModels.label}`,
-                       value: formatCostSummary(sessionStats.recapCost),
-                       title: recapCostModels.title,
-                       models: recapCostModels.models,
-                     };
-                     const extensionCostRows: SessionCostDetailRow[] = extensionCosts.map((summary) => {
-                       const name = (sessionStats.extensionUsages?.find((usage) => usage.key === summary.id)?.label ?? summary.id).replace(/\s+usage$/i, "");
-                       const models = formatCostModels({ ...summary, models: summary.models.filter((model) => model !== "unknown/unknown") });
-                       const historical = summary.historicalEstimated
-                         ? translate(summary.missingPriceModels.length > 0 ? "session.extensionHistoricalEstimatedPartial" : "session.extensionHistoricalEstimated")
-                         : summary.historicalIncomplete ? translate("session.extensionHistoricalUnpriced") : "";
-                       const extensionPresentation = sessionCostPresentation(summary, [summary]);
-                       const pending = extensionPresentation.pendingUsageCount > 0
-                         ? translate("session.pendingUsageCount", { count: extensionPresentation.pendingUsageCount })
-                         : "";
-                       return {
-                         key: `plugin:extension:${summary.id}`,
-                         label: `${translate("session.extensionCost", { name })}${models.label}${historical ? ` · ${historical}` : ""}${pending ? ` · ${pending}` : ""}`,
-                         value: formatCostSummary(summary, extensionPresentation.onlySuggesterPending),
-                         title: [models.title, historical, extensionPresentation.recordedOnly ? translate("session.costPartialHint") : ""].filter(Boolean).join("\n") || undefined,
-                         models: models.models,
-                       };
-                     });
-                     const pluginCostDetails = [
-                       ...(sessionStats.compactionCost ? [compactionCostRow] : []),
-                       ...(sessionStats.recapCost ? [recapCostRow] : []),
-                       ...extensionCostRows,
-                     ];
-                     const pluginCostSummary = mergeSessionCostSummaries([
-                       sessionStats.compactionCost,
-                       sessionStats.recapCost,
-                       ...extensionCosts,
-                     ]);
-                     const pluginCostModels = formatCostModels(pluginCostSummary ?? undefined);
-                     const pluginCostRow: SessionCostDetailRow | null = pluginCostSummary ? {
-                       key: "plugin",
-                       label: translate("session.pluginCost"),
-                       value: formatCostSummary(pluginCostSummary),
-                       title: pluginCostModels.title,
-                       models: pluginCostModels.models,
-                       details: pluginCostDetails,
-                     } : null;
-                     const costDetailRows: SessionCostDetailRow[] = [
-                       { key: "parent", label: `${translate("session.parentCost")}${parentCostModels.label}`, value: formatCostSummary(sessionStats.parentCost, parentOnlySuggesterPending), title: parentCostModels.title, models: parentCostModels.models },
-                       ...(childSessionCount > 0 ? [{ key: "child", label: `${childCostLabel}${childCostModels.label}`, value: formatCostSummary(sessionStats.childCost, childOnlySuggesterPending), title: childCostModels.title, models: childCostModels.models }] : []),
-                       ...(pluginCostRow ? [pluginCostRow] : []),
-                     ];
-                    const costTotalRow = {
-                      label: translate("session.totalCost"),
-                      value: formatCostSummary(sessionStats.totalCost, presentation.onlySuggesterPending),
-                      title: [totalCostModels.title, presentation.recordedOnly ? translate("session.costPartialHint") : ""].filter(Boolean).join("\n") || undefined,
-                    };
-                    const renderCostDetailRow = (row: SessionCostDetailRow): ReactNode => {
-                      const hasMultipleModels = row.models.length > 1;
-                      const hasDetails = (row.details?.length ?? 0) > 0;
-                      const isExpandable = hasDetails || hasMultipleModels;
-                      const isExpanded = Boolean(expandedCostModels[row.key]);
-                      return (
-                        <Fragment key={`cost:${row.key}`}>
-                          <div style={{ display: "contents" }}>
-                            {isExpandable ? (
-                              <button
-                                type="button"
-                                onClick={() => toggleCostModels(row.key)}
-                                aria-expanded={isExpanded}
-                                title={row.title}
-                                style={{
-                                  background: "none",
-                                  border: "none",
-                                  padding: 0,
-                                  margin: 0,
-                                  font: "inherit",
-                                  color: isExpanded ? "var(--text)" : "var(--text-dim)",
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: 3,
-                                  cursor: "pointer",
-                                  textAlign: "left",
-                                  whiteSpace: "nowrap",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  minWidth: 0,
-                                }}
-                              >
-                                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{row.label}</span>
-                                <span aria-hidden="true" style={{
-                                  fontSize: 10,
-                                  color: isExpanded ? "var(--accent)" : "var(--text-muted)",
-                                  flexShrink: 0,
-                                }}>
-                                  {isExpanded ? "▾" : "▸"}
-                                </span>
-                              </button>
-                            ) : (
-                              <div
-                                title={row.title}
-                                style={{
-                                  color: "var(--text-dim)",
-                                  whiteSpace: "nowrap",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  minWidth: 0,
-                                }}
-                              >{row.label}</div>
-                            )}
-                            <div style={{
-                              color: "var(--text-muted)",
-                              textAlign: "right",
-                              fontVariantNumeric: "tabular-nums",
-                              whiteSpace: "nowrap",
-                              flexShrink: 0,
-                            }}>{row.value}</div>
-                          </div>
-                          {isExpanded && hasDetails && (
-                            <div style={{
-                              gridColumn: "1 / -1",
-                              margin: "2px 0 4px",
-                              padding: "5px 8px",
-                              borderRadius: 4,
-                              background: "var(--bg-hover)",
-                              border: "1px solid var(--border)",
-                              display: "grid",
-                              gridTemplateColumns: "minmax(0, 1fr) auto",
-                              columnGap: 10,
-                              rowGap: 3,
-                            }}>
-                              {row.details?.map(renderCostDetailRow)}
-                            </div>
-                          )}
-                          {isExpanded && !hasDetails && hasMultipleModels && (
-                            <div style={{
-                              gridColumn: "1 / -1",
-                              margin: "2px 0 4px",
-                              padding: "5px 8px",
-                              borderRadius: 4,
-                              background: "var(--bg-hover)",
-                              border: "1px solid var(--border)",
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: 3,
-                            }}>
-                              {row.models.map((model) => (
-                                <div
-                                  key={model}
-                                  style={{
-                                    fontFamily: "var(--font-mono)",
-                                    fontSize: 10.5,
-                                    color: "var(--text)",
-                                    lineHeight: 1.4,
-                                    overflowWrap: "anywhere",
-                                  }}
-                                >
-                                  • {model}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </Fragment>
-                      );
-                    };
+                    const resourceSection = (
+                      <SessionInfoResourcePanel
+                        sessionStats={sessionStats}
+                        contextUsage={contextUsage}
+                        expandedCostModels={expandedCostModels}
+                        toggleCostModels={toggleCostModels}
+                      />
+                    );
                     const copyTitleKey: Record<SessionCopyField, string> = {
                       file: "session.copyFile",
                       id: "session.copyId",
@@ -7519,151 +6902,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
                         </div>
                       </div>
                     );
-                    const resourceSection = (
-                      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
-                        <div>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)" }}>{translate("session.tokens")}</div>
-                            {ctx?.contextWindow ? (
-                              <span style={{ fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                                <span style={{ color: "var(--text-dim)", marginRight: 4 }}>{translate("session.context")}</span>
-                                <span style={{ color: (ctx.percent ?? 0) > 85 ? "var(--error, #ef4444)" : (ctx.percent ?? 0) > 65 ? "var(--warning, #f59e0b)" : "var(--accent, #3b82f6)", fontWeight: 500 }}>
-                                  {ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"}
-                                </span>
-                                {" / "}
-                                {formatCompact(ctx.contextWindow)}
-                              </span>
-                            ) : null}
-                          </div>
-                          {ctx?.contextWindow ? (
-                            <div style={{
-                              height: 4,
-                              background: "var(--border)",
-                              borderRadius: 2,
-                              overflow: "hidden",
-                              marginBottom: 8,
-                            }}>
-                              <div style={{
-                                width: `${Math.min(100, Math.max(0, ctx.percent ?? 0))}%`,
-                                height: "100%",
-                                background: (ctx.percent ?? 0) > 85
-                                  ? "var(--error, #ef4444)"
-                                  : (ctx.percent ?? 0) > 65
-                                    ? "var(--warning, #f59e0b)"
-                                    : "var(--accent, #3b82f6)",
-                                borderRadius: 2,
-                                transition: "width 0.2s ease",
-                              }} />
-                            </div>
-                          ) : null}
-                          <div style={{
-                            display: "grid",
-                            gridTemplateColumns: "auto minmax(0, 1fr)",
-                            columnGap: 14,
-                            rowGap: 4,
-                            alignItems: "center",
-                          }}>
-                            {tokenDetailRows.map((row) => (
-                              <div key={`token:${row.label}`} style={{ display: "contents" }}>
-                                <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{row.labelNode ?? row.label}</div>
-                                <div
-                                  title={`${row.raw.toLocaleString(locale)} tokens`}
-                                  style={{
-                                    color: "var(--text-muted)",
-                                    textAlign: "right",
-                                    fontVariantNumeric: "tabular-nums",
-                                    whiteSpace: "nowrap",
-                                  }}
-                                >{row.value}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
 
-                        <div>
-                          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>{translate("session.cost")}</div>
-                          <div style={{
-                            display: "grid",
-                            gridTemplateColumns: "minmax(0, 1fr) auto",
-                            columnGap: 14,
-                            rowGap: 4,
-                            alignItems: "center",
-                          }}>
-                            {costDetailRows.map(renderCostDetailRow)}
-                            <div style={{ display: "contents" }}>
-                              <div
-                                title={costTotalRow.title}
-                                style={{
-                                  color: "var(--text-muted)",
-                                  whiteSpace: "nowrap",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  minWidth: 0,
-                                }}
-                              >{costTotalRow.label}</div>
-                              <div style={{
-                                color: costCalculated ? sessionCostColor(sessionStats.cost) : "var(--text-muted)",
-                                fontWeight: costCalculated ? 600 : 400,
-                                textAlign: "right",
-                                fontVariantNumeric: "tabular-nums",
-                                whiteSpace: "nowrap",
-                                flexShrink: 0,
-                              }}>{costTotalRow.value}</div>
-                            </div>
-                            {missingPriceModels.length > 0 && (
-                              <div style={{
-                                gridColumn: "1 / -1",
-                                marginTop: 4,
-                                padding: "3px 6px",
-                                borderRadius: 4,
-                                background: "var(--bg-hover)",
-                                fontSize: 10,
-                                color: "var(--text-dim)",
-                                lineHeight: 1.4,
-                                overflowWrap: "anywhere",
-                              }}>
-                                <span style={{ color: "var(--warning, #f59e0b)", marginRight: 4 }}>⚠</span>
-                                {sessionStats.costStatus === "partial"
-                                  ? missingPriceModels.join(", ")
-                                  : `${translate("session.unpricedModels")}: ${missingPriceModels.join(", ")}`}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        <div title={timingTitle}>
-                          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>
-                            {translate("session.timing")}
-                          </div>
-                          <div style={{
-                            display: "grid",
-                            gridTemplateColumns: "auto minmax(0, 1fr)",
-                            columnGap: 14,
-                            rowGap: 4,
-                            alignItems: "center",
-                          }}>
-                            <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{translate("session.effectiveDuration")}</div>
-                            <div title={timingTitle} style={{ color: "var(--text-muted)", textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{effectiveDurationValue}</div>
-                            <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>
-                              {translate("session.agentTotalDuration")}
-                              {timingChildCount > 0 ? (
-                                <span style={{ color: "var(--text-muted)", marginLeft: 4, fontSize: 10 }}>({timingChildCount})</span>
-                              ) : null}
-                            </div>
-                            <div title={timingTitle} style={{ color: "var(--text-muted)", textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{agentTotalValue}</div>
-                            <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{translate("session.modelResponseTotal")}</div>
-                            <div title={timingTitle} style={{ color: "var(--text-muted)", textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
-                              {modelResponseValue}
-                              {timingPartial ? (
-                                <span style={{ color: "var(--text-dim)", marginLeft: 4, fontSize: 10 }}>{translate("session.timingPartial")}</span>
-                              ) : null}
-                            </div>
-                            <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{translate("session.modelResponseShare")}</div>
-                            <div title={timingTitle} style={{ color: "var(--accent)", textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{modelResponseShareValue}</div>
-                          </div>
-                        </div>
-                      </div>
-                    );
 
                     return (
                       <div style={{
@@ -7709,7 +6948,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
                 <div style={{ flex: 1, minHeight: 0 }}>
                   {remoteSession.sessionInfo ? (
                     <ChatWindow
-                      key={`${remoteSession.device.id}:${remoteSession.sessionInfo.id}`}
+                      key={remoteSession.promotedSessionId === remoteSession.sessionInfo.id && remoteSession.draftInstanceKey
+                        ? remoteSession.draftInstanceKey : `session:${remoteSession.device.id}:${remoteSession.sessionInfo.id}`}
                       session={remoteSession.sessionInfo}
                       sessionRunning={Boolean(remoteSession.sessionInfo && remoteSession.sessionRunning)}
                       deviceName={remoteSession.device.name}
@@ -7752,18 +6992,19 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
                     />
                   ) : (
                     <ChatWindow
-                      key={`new:${remoteSession.device.id}:${remoteSession.newSessionCwd ?? ""}:${remoteSession.newSessionSubprojectId ?? ""}:${remoteSession.newSessionSubprojectLabel ?? ""}:${remoteSession.newSessionContextSourceId ?? ""}`}
+                      key={remoteSession.draftInstanceKey ?? `new:${remoteSession.device.id}:${remoteSession.newSessionCwd ?? ""}:${remoteSession.newSessionSubprojectId ?? ""}:${remoteSession.newSessionSubprojectLabel ?? ""}:${remoteSession.newSessionContextSourceId ?? ""}`}
                       session={null}
                       deviceName={remoteSession.device.name}
                       remotePeer={remoteSession.device.id}
                       newSessionCwd={remoteSession.newSessionCwd}
                       newSessionSubprojectId={remoteSession.newSessionSubprojectId ?? null}
                       newSessionContextSourceId={remoteSession.newSessionContextSourceId ?? null}
+                      newSessionWorktreeBinding={remoteSession.newSessionWorktreeBinding ?? null}
                       newSessionPrefill={buildNewSessionPrefill(remoteSession.newSessionSubprojectLabel)}
                       newSessionDraftKey={remoteSession.newSessionCwd ? `remote-new:${remoteSession.device.id}:${remoteSession.newSessionCwd}:${remoteSession.newSessionSubprojectId ?? ""}${remoteSession.newSessionContextSourceId ? `:context:${remoteSession.newSessionContextSourceId}` : ""}` : null}
                       onAgentEnd={() => handleAgentEnd(remoteSession.sessionInfo?.id ?? undefined, remoteSession.device.id)}
                       onAttentionNeeded={(request) => handleAttentionNeeded(request, remoteSession.sessionInfo)}
-                      onSessionCreated={handleRemoteSessionCreated}
+                      onSessionCreated={(created, draftKey) => handleRemoteSessionCreated(created, draftKey, remoteSession.draftInstanceKey)}
                       onSessionForked={handleSessionForked}
                       restoreMessage={pendingRestoreMessage}
                       onRestoreMessageApplied={handleRestoreMessageApplied}
@@ -7915,6 +7156,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
               activeTabId={activeFileTabId ?? ""}
               onSelectTab={handleSelectFileTab}
               onCloseTab={handleCloseFileTab}
+              onReorderTab={(source, target, after) => setPanelTabOrder((current) => movePanelTab(panelTabs.map((tab) => tab.id), source, target, after))}
             />
           </div>
           <button
@@ -7998,17 +7240,19 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         </div>
 
         {/* The same side-question state can occupy this full-height, resizable panel. */}
-        <div
-          id={SIDEKICK_RIGHT_PANEL_TARGET_ID}
-          data-right-panel-sidekick="true"
-          style={{
-            display: isSidekickTabActive ? "flex" : "none",
-            flex: 1,
-            minHeight: 0,
-            overflow: "hidden",
-            paddingBottom: "env(safe-area-inset-bottom)",
-          }}
-        />
+        <AppShellSidekickRightPanel active={isSidekickTabActive}>
+          <div
+            id={SIDEKICK_RIGHT_PANEL_TARGET_ID}
+            data-right-panel-sidekick="true"
+            style={{
+              display: isSidekickTabActive ? "flex" : "none",
+              flex: 1,
+              minHeight: 0,
+              overflow: "hidden",
+              paddingBottom: "env(safe-area-inset-bottom)",
+            }}
+          />
+        </AppShellSidekickRightPanel>
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
         <div
@@ -8030,6 +7274,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
               panelOpen={rightPanelOpen}
               initialDisplayMode={activeFileTab.initialDisplayMode}
               initialPage={activeFileTab.page}
+              initialAnchor={activeFileTab.anchor}
+              onAnchorApplied={() => setFileTabs((tabs) => clearFileTabAnchor(tabs, activeFileTab.id, activeFileTab.viewerRevision ?? 0))}
               initialState={activeFileTab.viewerState}
               watchEnabled={rightPanelOpen}
               onStateChange={(viewerState) => handleFileViewerStateChange(
@@ -8040,10 +7286,10 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
               onDirtyChange={(dirty) => handleFileViewerDirtyChange(activeFileTab.id, dirty)}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
               onAtMention={handleAtMention}
-              onOpenFile={(filePath, page) => handleOpenFile(
+              onOpenFile={(filePath, page, anchor) => handleOpenFile(
                 filePath,
                 getFileName(filePath),
-                { sourceSessionId: activeFileTab.sourceSessionId, remotePeer: activeFileTab.remotePeer, cwd: activeFileCwd ?? undefined, projectRoot: activeFileTab.projectRoot ?? activeFileCwd ?? undefined, page },
+                { sourceSessionId: activeFileTab.sourceSessionId, remotePeer: activeFileTab.remotePeer, cwd: activeFileCwd ?? undefined, projectRoot: activeFileTab.projectRoot ?? activeFileCwd ?? undefined, page, anchor },
               )}
             />
           ) : !activeTerminalTab ? (
@@ -8128,6 +7374,12 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         sessionId={resourceSessionId}
         remotePeer={resourcePeer}
         trust={projectTrust}
+        onSessionReloaded={() => {
+          if (resourceSessionId) window.dispatchEvent(new CustomEvent(SESSION_RESOURCES_RELOADED_EVENT, {
+            detail: { sessionId: resourceSessionId, remotePeer: resourcePeer ?? null },
+          }));
+          setModelsRefreshKey((k) => k + 1);
+        }}
         onTrustProject={() => {
           setProjectTrustError(null);
           setProjectTrustDialogOpen(true);
@@ -8136,9 +7388,9 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
           if (cwd === projectTrustCwd) setProjectTrust(status);
         }}
         onUseSkill={handleUseSkill}
-        onOpenFile={(filePath) => {
-          const fileName = filePath.split("/").pop() || filePath;
-          handleOpenFile(filePath, fileName, { remotePeer: resourcePeer, cwd: resourceCwd ?? undefined });
+        onOpenFile={(filePath, page, anchor) => {
+          const fileName = getFileName(filePath);
+          handleOpenFile(filePath, fileName, { remotePeer: resourcePeer, sourceSessionId: resourceSessionId, cwd: resourceCwd ?? undefined, page, anchor });
           setSettingsModalTab(null);
         }}
       />
@@ -8164,14 +7416,15 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         initialPage={sessionPopupFile.page}
         onMentionLines={handleFileLineMention}
         onAtMention={handleAtMention}
-        onOpenInReaderView={() => {
+        onOpenInReaderView={(filePath, page, anchor) => {
           const target = sessionPopupFile;
           setSessionPopupFile(null);
-          handleOpenFile(target.filePath, getFileName(target.filePath), {
+          handleOpenFile(filePath, getFileName(filePath), {
             remotePeer: target.remotePeer,
             sourceSessionId: target.sourceSessionId,
             cwd: target.cwd,
-            page: target.page,
+            page,
+            anchor,
           });
           activateReaderMode(target.cwd, target.remotePeer);
         }}
@@ -8207,42 +7460,38 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         onClose={closeEmbeddedImagePreview}
       />
     )}
-    {talkMapOpen && (
-      <TalkMapOverlay
-        open={talkMapOpen}
-        projectRoot={talkMapProjectRoot}
-        deviceName={talkMapDevice?.name ?? localDeviceName ?? undefined}
-        focusSessionId={talkMapFocusSessionId}
-        remotePeer={talkMapDevice && localDeviceId && talkMapDevice.id !== localDeviceId ? talkMapDevice.id : undefined}
-        refreshKey={refreshKey}
-        onClose={closeTalkMap}
-        onNewSession={handleTalkMapNewSession}
-        onConvertGhost={handleTalkMapConvertGhost}
-        onOpenSession={handleTalkMapSession}
-        onSelectCard={handleTalkMapSelectCard}
-        onForkSession={handleTalkMapFork}
-        onInjectContext={handleTalkMapInjectContext}
-        onCopySessionInfo={handleActivityCopySessionInfo}
-        onArchiveSession={(session) => handleTalkMapSessionMutation(session, "archive")}
-        onDeleteSession={(session) => handleTalkMapSessionMutation(session, "delete")}
-      />
-    )}
-    {worktreeGraphOpen && (
-      <WorktreeGraphOverlay
-        open={worktreeGraphOpen}
-        projectRoot={worktreeGraphProjectRoot}
-        deviceName={worktreeGraphDevice?.name ?? localDeviceName ?? undefined}
-        currentWorktreePath={worktreeGraphSessionPath ?? worktreeGraphCurrentPath}
-        currentSessionId={worktreeGraphSessionId ?? topBarSessionId}
-        remotePeer={worktreeGraphDevice && localDeviceId && worktreeGraphDevice.id !== localDeviceId ? worktreeGraphDevice.id : undefined}
-        onClose={closeWorktreeGraph}
-        onSwitchWorktree={worktreeGraphDevice && localDeviceId && worktreeGraphDevice.id !== localDeviceId ? undefined : (wtPath) => {
-          handleCwdChange(wtPath, worktreeGraphProjectRoot);
-        }}
-        onOpenSession={handleWorktreeGraphOpenSession}
-        onNewSessionFromNode={handleWorktreeGraphNewSession}
-      />
-    )}
+    <AppShellWorktreeOverlays
+      talkMapOpen={talkMapOpen}
+      talkMapProjectRoot={talkMapProjectRoot}
+      talkMapDevice={talkMapDevice}
+      talkMapFocusSessionId={talkMapFocusSessionId}
+      talkMapSidebarSessionId={talkMapSidebarSessionId}
+      worktreeGraphOpen={worktreeGraphOpen}
+      worktreeGraphProjectRoot={worktreeGraphProjectRoot}
+      worktreeGraphDevice={worktreeGraphDevice}
+      worktreeGraphSessionId={worktreeGraphSessionId}
+      worktreeGraphSessionPath={worktreeGraphSessionPath}
+      worktreeGraphCurrentPath={worktreeGraphCurrentPath}
+      topBarSessionId={topBarSessionId} currentSessionId={worktreeGraphSessionId ?? topBarSessionId}
+      localDeviceId={localDeviceId}
+      localDeviceName={localDeviceName}
+      refreshKey={refreshKey}
+      onCloseTalkMap={closeTalkMap}
+      onTalkMapNewSession={handleTalkMapNewSession}
+      onTalkMapConvertGhost={handleTalkMapConvertGhost}
+      onTalkMapSession={handleTalkMapSession}
+      onTalkMapSelectCard={handleTalkMapSelectCard}
+      onTalkMapFork={handleTalkMapFork}
+      onTalkMapInjectContext={handleTalkMapInjectContext}
+      onCopySessionInfo={handleActivityCopySessionInfo}
+      onTalkMapSessionMutation={handleTalkMapSessionMutation}
+      onCloseWorktreeGraph={closeWorktreeGraph}
+      onSwitchWorktree={worktreeGraphDevice && localDeviceId && worktreeGraphDevice.id !== localDeviceId ? undefined : (wtPath) => {
+        handleCwdChange(wtPath, worktreeGraphProjectRoot);
+      }}
+      onOpenSession={handleWorktreeGraphOpenSession}
+      onNewSessionFromNode={handleWorktreeGraphNewSession}
+    />
     </>
   );
 }

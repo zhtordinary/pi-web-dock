@@ -22,8 +22,6 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
 });
 const { GET } = await jiti.import("./[...path]/route.ts");
-const { allowFileRoot } = await jiti.import("../../../lib/allowed-roots.ts");
-allowFileRoot(root);
 
 function write(filePath, content = "") {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -58,8 +56,10 @@ test("shows Git-ignored entries by default and hides them when the project enabl
   assert.deepEqual(await listNames(repo, "hideGitIgnored=1"), ["build", "src"]);
   // Explicit dotfile filtering is independent of Git visibility.
   assert.deepEqual(await listNames(repo, "hideDot=1"), ["build", "dist", "src"]);
-  // The eye clears UI filters only; the project Git setting remains separate.
-  assert.deepEqual(await listNames(repo, "hideDot=0"), ["build", "dist", "src", ".gitignore"]);
+  // Revealing dotfiles includes .git; filtering is not an access boundary.
+  const visibleDotfiles = await listNames(repo, "hideDot=0");
+  assert.ok(visibleDotfiles.includes(".git"));
+  assert.ok(visibleDotfiles.includes(".gitignore"));
 
   // Visibility only: an ignored file is still readable by its path.
   const read = await request(path.join(repo, "dist/bundle.js"), "read");

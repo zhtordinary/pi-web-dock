@@ -23,7 +23,11 @@ export function filterContinuableSessions(
   sessions: SessionActivityItem[] | undefined | null,
 ): SessionActivityItem[] {
   if (!Array.isArray(sessions)) return [];
-  return sessions.filter((item) => item.status === "unknown" || item.status === "failed");
+  return sessions.filter((item) =>
+    (item.status === "unknown" || item.status === "failed")
+    && item.session.relation?.kind !== "subagent"
+    && item.latestRun != null,
+  );
 }
 
 export function shouldShowBatchContinue(count: number): boolean {

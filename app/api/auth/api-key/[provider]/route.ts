@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { removeProviderEnabledModels } from "@/lib/enabled-models-runtime";
 import { invalidateModelsCache } from "@/lib/models-cache";
+import { annotateOpenAIProviderCredential } from "@/lib/openai-provider-aliases";
 import { removeStoredCredentialIfType, storeProviderCredential } from "@/lib/provider-credential-store";
-import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
+import { createModelRuntimeWithExtensions, disposeModelRuntime } from "@/lib/model-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -16,33 +18,40 @@ export async function POST(req: Request, { params }: Params) {
       return NextResponse.json({ error: "apiKey is required" }, { status: 400 });
     }
     const modelRuntime = await createModelRuntimeWithExtensions();
-    const apiKeyAuth = modelRuntime.getProvider(provider)?.auth.apiKey;
-    if (!apiKeyAuth?.login) {
-      throw new Error(`${provider} does not support API key login`);
+    try {
+      const apiKeyAuth = modelRuntime.getProvider(provider)?.auth.apiKey;
+      if (!apiKeyAuth?.login) {
+        throw new Error(`${provider} does not support API key login`);
+      }
+      let keySubmitted = false;
+      const credential = await apiKeyAuth.login({
+        signal: req.signal,
+        notify: () => {},
+        prompt: async (prompt) => {
+          if (prompt.type === "select") {
+            const keyOption = prompt.options.find((option) => option.id === "api-key" || option.id === "bearer-token");
+            if (keyOption) return keyOption.id;
+            throw new Error(`${provider} requires interactive authentication setup`);
+          }
+          if (!keySubmitted && prompt.type === "secret") {
+            keySubmitted = true;
+            return apiKey.trim();
+          }
+          throw new Error(`${provider} requires additional authentication settings`);
+        },
+      });
+      // ModelRuntime.login() persists the credential and then performs an
+      // unbounded network catalog refresh. Store the returned credential
+      // directly so a slow catalog cannot leave the save request hanging.
+      // `openai-api` is reserved for the API key issued with ChatGPT subscription quota.
+      // Keep the provenance beside the credential without storing any additional secret.
+      const storedCredential = annotateOpenAIProviderCredential(provider, credential);
+      await storeProviderCredential(provider, storedCredential);
+      invalidateModelsCache();
+      return NextResponse.json({ success: true });
+    } finally {
+      disposeModelRuntime(modelRuntime);
     }
-    let keySubmitted = false;
-    const credential = await apiKeyAuth.login({
-      signal: req.signal,
-      notify: () => {},
-      prompt: async (prompt) => {
-        if (prompt.type === "select") {
-          const keyOption = prompt.options.find((option) => option.id === "api-key" || option.id === "bearer-token");
-          if (keyOption) return keyOption.id;
-          throw new Error(`${provider} requires interactive authentication setup`);
-        }
-        if (!keySubmitted && prompt.type === "secret") {
-          keySubmitted = true;
-          return apiKey.trim();
-        }
-        throw new Error(`${provider} requires additional authentication settings`);
-      },
-    });
-    // ModelRuntime.login() persists the credential and then performs an
-    // unbounded network catalog refresh. Store the returned credential
-    // directly so a slow catalog cannot leave the save request hanging.
-    await storeProviderCredential(provider, credential);
-    invalidateModelsCache();
-    return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
@@ -59,8 +68,9 @@ export async function DELETE(_req: Request, { params }: Params) {
         { status: 409 },
       );
     }
+    const enabledModelsRemoved = await removeProviderEnabledModels(provider);
     invalidateModelsCache();
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, enabledModelsRemoved });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

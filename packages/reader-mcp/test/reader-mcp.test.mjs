@@ -29,6 +29,7 @@ test("read-only Reader MCP speaks stdio and reports bounded local inventory", as
   assert.equal(initialized.capabilities.tools.listChanged, false);
   assert.equal(initialized.capabilities.experimental["reader.snapshot"].bounded, true);
   assert.equal(initialized.capabilities.experimental["reader.liveEvents"].gapRecovery, "reader-required");
+  assert.deepEqual(initialized.capabilities.experimental["reader.streamDiagnostics"].excludes, ["ip", "userAgent", "requestMetadata", "eventContent"]);
   assert.equal(initialized.capabilities.experimental["reader.control"].dryRunDefault, true);
   assert.equal(initialized.capabilities.experimental["reader.controlPlane"].transport, "GET-only");
   assert.equal(initialized.capabilities.experimental["reader.controlPlane"].remote, "unsupported until Reader exposes a registered remote control-plane route");
@@ -39,7 +40,7 @@ test("read-only Reader MCP speaks stdio and reports bounded local inventory", as
   const listedTools = await client.call("tools/list", {});
   assert.deepEqual(
     listedTools.tools.map((tool) => tool.name),
-    ["reader_list_sessions", "reader_get_session_metadata", "reader_read_tail", "reader_read_live_events", "reader_session_control", "reader_read_control_plane", "reader_write_control_plane", "reader_get_control_plane_receipt", "reader_get_session_control_receipt"],
+    ["reader_list_sessions", "reader_get_session_metadata", "reader_read_tail", "reader_read_live_events", "reader_get_stream_diagnostics", "reader_session_control", "reader_read_control_plane", "reader_write_control_plane", "reader_get_control_plane_receipt", "reader_get_session_control_receipt"],
   );
 
   const inventory = await client.tool("reader_list_sessions", { scope: "both", limit: 500 });
@@ -214,6 +215,41 @@ test("control-plane reads use allowlisted GET routes with exact device/cwd/scope
   assert.equal(controlPlaneRequests.some((request) => request.path === "/api/agent/new" || request.method === "POST"), false);
 
   await client.close();
+});
+
+
+test("stream diagnostics is read-only and uses the remote proxy for remote devices", async (t) => {
+  const reader = await createMockReaderServer({ onlineRemote: true });
+  t.after(() => reader.close());
+  const client = await managedClient(t, reader);
+
+  const local = await client.tool("reader_get_stream_diagnostics", { deviceId: "dev-a" });
+  assert.equal(local.outcome, "observed");
+  assert.equal(local.streams[0].sessionId, "active-001");
+  assert.equal(local.streams[0].queuedBytes, 128);
+  assert.equal(local.readerDeviceId, "dev-a");
+  assert.equal(local.readerCoverage.streamKinds.excluded.length, 0);
+  assert.equal(local.readerCoverage.sampling.queuedBytes.includes("write-time"), true);
+  assert.equal(local.readerCoverage.secret, undefined);
+  assert.doesNotMatch(JSON.stringify(local), /private|user-agent|eventContent/i);
+  assert.ok(reader.requests.some((request) => request.path === "/api/reader/stream-diagnostics" && !request.query.peer));
+
+  const remote = await client.tool("reader_get_stream_diagnostics", { deviceId: "dev-b" });
+  assert.equal(remote.outcome, "observed");
+  assert.equal(remote.streams[0].sessionId, "remote-001");
+  assert.ok(reader.requests.some((request) => request.path === "/api/remote/reader/stream-diagnostics" && request.query.peer === "dev-b"));
+  assert.equal(reader.requests.some((request) => request.path.endsWith("stream-diagnostics") && request.method !== "GET"), false);
+});
+
+test("stream diagnostics rejects a response bound to another device", async (t) => {
+  const reader = await createMockReaderServer({ onlineRemote: true, streamDiagnosticsDeviceId: "wrong-device" });
+  t.after(() => reader.close());
+  const client = await managedClient(t, reader);
+  const result = await client.tool("reader_get_stream_diagnostics", { deviceId: "dev-a" });
+  assert.equal(result.outcome, "unknown");
+  assert.equal(result.code, "reader_device_mismatch");
+  assert.equal(result.readerDeviceId, "wrong-device");
+  assert.equal(result.streams, undefined);
 });
 
 
@@ -690,7 +726,7 @@ test("malformed tool envelopes and unknown tools are protocol errors, business v
   const badValue = await client.call("tools/call", { name: "reader_list_sessions", arguments: { limit: -1 } });
   assert.equal(badValue.isError, true);
   assert.match(badValue.content[0].text, /minimum/);
-  assert.equal((await client.call("tools/list", {})).tools.length, 9, "errors do not poison the connection");
+  assert.equal((await client.call("tools/list", {})).tools.length, 10, "errors do not poison the connection");
 });
 
 test("initialize requires the standard client identity and negotiation fields", async t => {
@@ -864,15 +900,14 @@ test("Reader API mode reports live coverage and keeps control dry-run/idempotent
     action: "prompt",
     deviceId: "dev-a",
     sessionId: "hidden-001",
-    message: "must not auto-start",
+    message: "starts the persisted runtime like the UI",
     dryRun: false,
     confirm: true,
     confirmationReason: "fixture",
     idempotencyKey: "fixture-key-002",
   });
-  assert.equal(inactive.outcome, "blocked");
-  assert.match(inactive.reason, /not alive|no POST/);
-  assert.equal(reader.requests.filter((request) => request.path === "/api/agent/hidden-001" && request.method === "POST").length, 0);
+  assert.equal(inactive.outcome, "accepted");
+  assert.equal(reader.requests.filter((request) => request.path === "/api/agent/hidden-001" && request.method === "POST").length, 1);
 
   const created = await client.tool("reader_session_control", {
     action: "create_session",
@@ -1005,122 +1040,192 @@ test("real control contract validates confirmation before routing and sends JSON
   await client.close();
 });
 
-test("create_session accepts empty or built-in read-only tool allow-lists", async (t) => {
-  const reader = await createMockReaderServer();
+const REAL_CONTROL = { dryRun: false, confirm: true, confirmationReason: "fixture" };
+
+test("create_session accepts any built-in tool selection and the new session can be prompted", async (t) => {
+  const reader = await createMockReaderServer({ createdRuntimeStrict: false, createdRuntimeTools: ["bash", "read", "edit", "write"] });
   t.after(() => reader.close());
   const client = startClient(undefined, { url: reader.url });
   t.after(() => client.close());
+  await client.call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "tool-selection-test", version: "1" } });
+  const createBodies = () => reader.requests.filter((request) => request.path === "/api/agent/new" && request.method === "POST").map((request) => request.body);
 
-  await client.call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "tool-isolation-test", version: "1" } });
-
-  const nonEmpty = await client.tool("reader_session_control", {
-    action: "create_session",
-    deviceId: "dev-a",
-    cwd: "/tmp",
-    toolNames: ["bash"],
-    dryRun: false,
-    confirm: true,
-    confirmationReason: "fixture",
-    idempotencyKey: "tool-isolation-invalid-001",
-  });
-  assert.equal(nonEmpty.__toolError, true);
-  assert.match(nonEmpty.error, /unique subset|safe read-only/);
-  assert.equal(reader.requests.filter((request) => request.path === "/api/agent/new" && request.method === "POST").length, 0);
-
-  const promptWithTools = await client.tool("reader_session_control", {
-    action: "prompt",
-    deviceId: "dev-a",
-    sessionId: "active-001",
-    message: "must not send this fixture prompt",
-    toolNames: [],
-  });
+  // Names Reader does not know are rejected locally; nothing is sent.
+  const unknownTool = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", toolNames: ["rm"], ...REAL_CONTROL, idempotencyKey: "tool-selection-unknown-001" });
+  assert.equal(unknownTool.__toolError, true);
+  assert.match(unknownTool.error, /built-in tools/);
+  const duplicate = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", toolNames: ["bash", "bash"], ...REAL_CONTROL, idempotencyKey: "tool-selection-dup-001" });
+  assert.equal(duplicate.__toolError, true);
+  const promptWithTools = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: "active-001", message: "must not send this fixture prompt", toolNames: [] });
   assert.equal(promptWithTools.__toolError, true);
-  assert.match(promptWithTools.error, /only for create_session/);
-  assert.equal(reader.requests.filter((request) => request.path === "/api/agent/active-001" && request.method === "POST").length, 0);
+  assert.match(promptWithTools.error, /only for create_session or set_tools/);
+  assert.equal(createBodies().length, 0);
 
-  const dryRun = await client.tool("reader_session_control", {
-    action: "create_session",
-    deviceId: "dev-a",
-    cwd: "/tmp",
-    toolNames: [],
-  });
+  // Dry-run reports the selection without sending.
+  const dryRun = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", toolNames: ["bash", "edit", "write", "read"] });
   assert.equal(dryRun.outcome, "dry_run");
-  assert.equal(dryRun.payloadSummary.toolsDisabled, true);
-  assert.equal(reader.requests.filter((request) => request.path === "/api/agent/new" && request.method === "POST").length, 0);
+  assert.deepEqual(dryRun.payloadSummary.toolNames, ["bash", "edit", "write", "read"]);
+  assert.equal(dryRun.payloadSummary.strictToolAllowlist, true);
+  assert.equal(createBodies().length, 0);
 
-  const created = await client.tool("reader_session_control", {
-    action: "create_session",
-    deviceId: "dev-a",
-    cwd: "/tmp",
-    toolNames: [],
-    dryRun: false,
-    confirm: true,
-    confirmationReason: "fixture",
-    idempotencyKey: "tool-isolation-valid-001",
-  });
-  assert.equal(created.outcome, "accepted");
-  const createRequest = reader.requests.find((request) => request.path === "/api/agent/new" && request.method === "POST");
-  assertReaderCommandBody(createRequest.body, { cwd: "/tmp", type: "ensure_session", toolNames: [], strictToolAllowlist: true }, "tool-isolation-valid-001");
+  // Omitting toolNames keeps Reader's normal tool selection (bash/edit/write plus extensions).
+  const normal = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", provider: "fixture", modelId: "model-a", thinkingLevel: "high", ...REAL_CONTROL, idempotencyKey: "tool-selection-normal-001" });
+  assert.equal(normal.outcome, "accepted");
+  assertReaderCommandBody(createBodies()[0], { cwd: "/tmp", type: "ensure_session", provider: "fixture", modelId: "model-a", thinkingLevel: "high" }, "tool-selection-normal-001");
+  const prompt = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: normal.createdSessionId, message: "implement the task", expectedBootId: normal.createdSessionBootId, ...REAL_CONTROL, idempotencyKey: "tool-selection-normal-prompt-001" });
+  assert.equal(prompt.outcome, "accepted");
+  const sent = reader.requests.filter((request) => request.path === "/api/agent/created-001" && request.method === "POST");
+  assert.equal(sent.length, 1);
+  assertReaderCommandBody(sent[0].body, { type: "prompt", message: "implement the task", expectedBootId: normal.createdSessionBootId }, "tool-selection-normal-prompt-001");
 
-  const transientInspection = await client.tool("reader_session_control", {
-    action: "inspect",
-    deviceId: "dev-a",
-    sessionId: created.createdSessionId,
-  });
-  assert.equal(transientInspection.outcome, "observed");
-  assert.equal(transientInspection.running, true);
-
-  const firstPrompt = await client.tool("reader_session_control", {
-    action: "prompt",
-    deviceId: "dev-a",
-    sessionId: created.createdSessionId,
-    message: "first transient prompt",
-    dryRun: false,
-    confirm: true,
-    confirmationReason: "fixture",
-    expectedBootId: created.createdSessionBootId,
-    idempotencyKey: "tool-isolation-first-prompt-001",
-  });
-  assert.equal(firstPrompt.outcome, "accepted");
-  const transientPrompt = reader.requests.filter((request) => request.path === "/api/agent/created-001" && request.method === "POST");
-  assert.equal(transientPrompt.length, 1);
-  assertReaderCommandBody(transientPrompt[0].body, { type: "prompt", message: "first transient prompt", expectedBootId: created.createdSessionBootId }, "tool-isolation-first-prompt-001");
+  // A built-in list with bash/edit/write is a strict allow-list by default; strictToolAllowlist=false keeps the normal runtime.
+  const strict = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", toolNames: ["bash", "read", "edit", "write"], ...REAL_CONTROL, idempotencyKey: "tool-selection-strict-001" });
+  assert.equal(strict.outcome, "accepted");
+  assertReaderCommandBody(createBodies()[1], { cwd: "/tmp", type: "ensure_session", toolNames: ["bash", "read", "edit", "write"], strictToolAllowlist: true }, "tool-selection-strict-001");
+  const loose = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", toolNames: ["read"], strictToolAllowlist: false, ...REAL_CONTROL, idempotencyKey: "tool-selection-loose-002" });
+  assert.equal(loose.outcome, "accepted");
+  assertReaderCommandBody(createBodies()[2], { cwd: "/tmp", type: "ensure_session", toolNames: ["read"], strictToolAllowlist: false }, "tool-selection-loose-002");
+  const chatOnly = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", toolNames: [], ...REAL_CONTROL, idempotencyKey: "tool-selection-chat-001" });
+  assert.equal(chatOnly.outcome, "accepted");
+  assertReaderCommandBody(createBodies()[3], { cwd: "/tmp", type: "ensure_session", toolNames: [], strictToolAllowlist: true }, "tool-selection-chat-001");
 
   await client.close();
 });
 
-test("transient binding matches a restricted read-only tool allow-list", async (t) => {
+test("a strict read-only session is still prompted and keeps its exact allow-list", async (t) => {
   const reader = await createMockReaderServer({ createdRuntimeTools: ["ls"] });
   t.after(() => reader.close());
   const client = startClient(undefined, { url: reader.url });
   t.after(() => client.close());
   await client.call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "restricted-tool-binding-test", version: "1" } });
 
-  const created = await client.tool("reader_session_control", {
-    action: "create_session",
-    deviceId: "dev-a",
-    cwd: "/tmp",
-    toolNames: ["ls"],
-    dryRun: false,
-    confirm: true,
-    confirmationReason: "fixture",
-    idempotencyKey: "restricted-tool-create-001",
-  });
+  const created = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", toolNames: ["ls"], ...REAL_CONTROL, idempotencyKey: "restricted-tool-create-001" });
   assert.equal(created.outcome, "accepted");
-  const prompt = await client.tool("reader_session_control", {
-    action: "prompt",
-    deviceId: "dev-a",
-    sessionId: created.createdSessionId,
-    message: "restricted fixture prompt",
-    dryRun: false,
-    confirm: true,
-    confirmationReason: "fixture",
-    idempotencyKey: "restricted-tool-prompt-001",
-  });
+  const prompt = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: created.createdSessionId, message: "restricted fixture prompt", ...REAL_CONTROL, idempotencyKey: "restricted-tool-prompt-001" });
   assert.equal(prompt.outcome, "accepted");
   const restrictedPrompt = reader.requests.filter((request) => request.path === "/api/agent/created-001" && request.method === "POST");
   assert.equal(restrictedPrompt.length, 1);
   assertReaderCommandBody(restrictedPrompt[0].body, { type: "prompt", message: "restricted fixture prompt" }, "restricted-tool-prompt-001");
+  await client.close();
+});
+
+test("a created session whose runtime Reader recycled is still prompted and Reader starts it", async (t) => {
+  const reader = await createMockReaderServer({ createdRuntimeRecycled: true });
+  t.after(() => reader.close());
+  const client = startClient(undefined, { url: reader.url });
+  t.after(() => client.close());
+  await client.call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "recycled-created-session-test", version: "1" } });
+  const created = await client.tool("reader_session_control", { action: "create_session", deviceId: "dev-a", cwd: "/tmp", ...REAL_CONTROL, idempotencyKey: "recycled-create-001" });
+  assert.equal(created.outcome, "accepted");
+
+  const inspected = await client.tool("reader_session_control", { action: "inspect", deviceId: "dev-a", sessionId: created.createdSessionId });
+  assert.equal(inspected.outcome, "observed");
+  assert.equal(inspected.running, false);
+
+  const prompt = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: created.createdSessionId, message: "wake and work", ...REAL_CONTROL, idempotencyKey: "recycled-prompt-001" });
+  assert.equal(prompt.outcome, "accepted");
+  const posts = reader.requests.filter((request) => request.path === "/api/agent/created-001" && request.method === "POST");
+  assert.equal(posts.length, 1);
+  assertReaderCommandBody(posts[0].body, { type: "prompt", message: "wake and work" }, "recycled-prompt-001");
+
+  // Acting on a runtime that does not exist is a no-op, not a permission denial.
+  const abort = await client.tool("reader_session_control", { action: "abort", deviceId: "dev-a", sessionId: created.createdSessionId, ...REAL_CONTROL, idempotencyKey: "recycled-abort-001" });
+  assert.equal(abort.outcome, "blocked");
+  assert.match(abort.reason, /no running runtime/);
+  assert.equal(reader.requests.filter((request) => request.path === "/api/agent/created-001" && request.method === "POST").length, 1);
+  await client.close();
+});
+
+test("a persisted idle session is started by prompt, steer, follow_up and open_session like opening it in the UI", async (t) => {
+  const reader = await createMockReaderServer();
+  t.after(() => reader.close());
+  const client = startClient(undefined, { url: reader.url });
+  t.after(() => client.close());
+  await client.call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "persisted-wake-test", version: "1" } });
+  const posts = () => reader.requests.filter((request) => request.path === "/api/agent/hidden-001" && request.method === "POST");
+
+  // Dry-run never starts anything.
+  const dry = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: "hidden-001", message: "dry" });
+  assert.equal(dry.outcome, "dry_run");
+  assert.equal(posts().length, 0);
+
+  for (const [action, expectedType, extra] of [["prompt", "prompt", { message: "persisted prompt" }], ["continue", "prompt", { message: "persisted continue" }], ["steer", "steer", { message: "persisted steer" }], ["follow_up", "follow_up", { message: "persisted follow-up" }], ["open_session", "initialize_runtime", {}]]) {
+    const result = await client.tool("reader_session_control", { action, deviceId: "dev-a", sessionId: "hidden-001", ...extra, ...REAL_CONTROL, idempotencyKey: `persisted-${action}-0001` });
+    assert.equal(result.outcome, "accepted", `${action}: ${JSON.stringify(result)}`);
+    assertReaderCommandBody(posts().at(-1).body, { type: expectedType, ...extra }, `persisted-${action}-0001`);
+  }
+  assert.equal(posts().length, 5);
+
+  // Confirmation and idempotency still apply.
+  const unconfirmed = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: "hidden-001", message: "no confirm", dryRun: false, confirmationReason: "fixture", idempotencyKey: "persisted-noconfirm-001" });
+  assert.equal(unconfirmed.outcome, "blocked");
+  const replay = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: "hidden-001", message: "persisted prompt", ...REAL_CONTROL, idempotencyKey: "persisted-prompt-0001" });
+  assert.equal(replay.replayed, true);
+  const conflict = await client.tool("reader_session_control", { action: "prompt", deviceId: "dev-a", sessionId: "hidden-001", message: "different text", ...REAL_CONTROL, idempotencyKey: "persisted-prompt-0001" });
+  assert.equal(conflict.outcome, "conflict");
+  assert.equal(posts().length, 5);
+
+  // Actions that need a running runtime say so and send nothing.
+  for (const [action, extra] of [["abort", {}], ["stop", {}], ["clear_queue", { expectedQueueRevision: "a".repeat(64) }], ["set_tools", { cwd: "/tmp", toolNames: ["bash"], expectedBootId: "boot", expectedRevision: "rev" }]]) {
+    const blocked = await client.tool("reader_session_control", { action, deviceId: "dev-a", sessionId: "hidden-001", ...extra, ...REAL_CONTROL, idempotencyKey: `persisted-${action}-blocked` });
+    assert.equal(blocked.outcome, "blocked", action);
+    assert.match(blocked.reason, /no running runtime/);
+  }
+  assert.equal(posts().length, 5);
+  await client.close();
+});
+
+test("session lifecycle actions use Reader's durable session-mutation owner with dry-run, confirmation and the idempotency key as operationId", async (t) => {
+  const reader = await createMockReaderServer({ onlineRemote: true });
+  t.after(() => reader.close());
+  const client = startClient(undefined, { url: reader.url });
+  t.after(() => client.close());
+  await client.call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "session-lifecycle-test", version: "1" } });
+  const mutations = () => reader.requests.filter((request) => request.path.endsWith("/session-mutations") && request.method === "POST");
+
+  const dry = await client.tool("reader_session_control", { action: "archive_session", deviceId: "dev-a", sessionId: "active-001" });
+  assert.equal(dry.outcome, "dry_run");
+  assert.deepEqual(dry.payloadSummary, { type: "session_mutation", op: "archive", force: false });
+  const unconfirmed = await client.tool("reader_session_control", { action: "delete_session", deviceId: "dev-a", sessionId: "active-001", dryRun: false, confirmationReason: "fixture", idempotencyKey: "lifecycle-noconfirm-001" });
+  assert.equal(unconfirmed.outcome, "blocked");
+  assert.equal(mutations().length, 0);
+
+  const renamed = await client.tool("reader_session_control", { action: "rename_session", deviceId: "dev-a", sessionId: "active-001", name: "Implementation task", ...REAL_CONTROL, idempotencyKey: "lifecycle-rename-001" });
+  assert.equal(renamed.outcome, "completed", JSON.stringify(renamed));
+  assert.deepEqual(mutations().at(-1).body, { operationId: "lifecycle-rename-001", deviceId: "dev-a", sessionId: "active-001", op: "rename", name: "Implementation task", force: false });
+
+  const archived = await client.tool("reader_session_control", { action: "archive_session", deviceId: "dev-a", sessionId: "active-001", force: true, ...REAL_CONTROL, idempotencyKey: "lifecycle-archive-001" });
+  assert.equal(archived.outcome, "completed");
+  assert.deepEqual(mutations().at(-1).body, { operationId: "lifecycle-archive-001", deviceId: "dev-a", sessionId: "active-001", op: "archive", force: true });
+
+  // Restoring finds the session in the archived snapshot only.
+  const restored = await client.tool("reader_session_control", { action: "unarchive_session", deviceId: "dev-a", sessionId: "archived-001", ...REAL_CONTROL, idempotencyKey: "lifecycle-unarchive-001" });
+  assert.equal(restored.outcome, "completed");
+  assert.equal(mutations().at(-1).body.op, "unarchive");
+  const wrongScope = await client.tool("reader_session_control", { action: "unarchive_session", deviceId: "dev-a", sessionId: "active-001", ...REAL_CONTROL, idempotencyKey: "lifecycle-unarchive-002" });
+  assert.equal(wrongScope.outcome, "blocked");
+
+  const deleted = await client.tool("reader_session_control", { action: "delete_session", deviceId: "dev-a", sessionId: "archived-001", ...REAL_CONTROL, idempotencyKey: "lifecycle-delete-001" });
+  assert.equal(deleted.outcome, "completed");
+  assert.equal(mutations().at(-1).body.op, "delete");
+
+  const remote = await client.tool("reader_session_control", { action: "rename_session", deviceId: "dev-b", sessionId: "remote-001", name: "Remote", ...REAL_CONTROL, idempotencyKey: "lifecycle-remote-001" });
+  assert.equal(remote.outcome, "completed");
+  const remotePost = mutations().at(-1);
+  assert.equal(remotePost.path, "/api/remote/session-mutations");
+  assert.equal(remotePost.query.peer, "dev-b");
+
+  const count = mutations().length;
+  const replay = await client.tool("reader_session_control", { action: "rename_session", deviceId: "dev-a", sessionId: "active-001", name: "Implementation task", ...REAL_CONTROL, idempotencyKey: "lifecycle-rename-001" });
+  assert.equal(replay.replayed, true);
+  const conflict = await client.tool("reader_session_control", { action: "rename_session", deviceId: "dev-a", sessionId: "active-001", name: "Another name", ...REAL_CONTROL, idempotencyKey: "lifecycle-rename-001" });
+  assert.equal(conflict.outcome, "conflict");
+  assert.equal(mutations().length, count);
+
+  const missingName = await client.tool("reader_session_control", { action: "rename_session", deviceId: "dev-a", sessionId: "active-001", ...REAL_CONTROL, idempotencyKey: "lifecycle-rename-002" });
+  assert.equal(missingName.__toolError, true);
+  const strayName = await client.tool("reader_session_control", { action: "archive_session", deviceId: "dev-a", sessionId: "active-001", name: "x", ...REAL_CONTROL, idempotencyKey: "lifecycle-archive-002" });
+  assert.equal(strayName.__toolError, true);
   await client.close();
 });
 
@@ -1892,6 +1997,7 @@ async function createMockReaderServer(options = {}) {
   const createdRuntimeCwd = typeof options.createdRuntimeCwd === "string" ? options.createdRuntimeCwd : "/tmp";
   const createdRuntimeTools = Array.isArray(options.createdRuntimeTools) ? options.createdRuntimeTools : [];
   const createdRuntimeStrict = options.createdRuntimeStrict !== false;
+  const createdRuntimeRecycled = options.createdRuntimeRecycled === true;
   const stopReceiptMode = options.stopReceiptMode ?? "not_found";
   const stopRuntimeRunningAfterPost = options.stopRuntimeRunningAfterPost !== false;
   let stopPostAccepted = false;
@@ -1946,6 +2052,33 @@ async function createMockReaderServer(options = {}) {
             : { id: "dev-b", name: "Offline laptop", online: false, error: "offline" },
         ],
         sessions,
+      });
+    }
+
+    if (request.method === "GET" && /^\/api\/(?:remote\/)?reader\/stream-diagnostics$/.test(url.pathname)) {
+      const remote = url.pathname.startsWith("/api/remote/");
+      if (remote && url.searchParams.get("peer") !== "dev-b") return sendJson(response, 404, { error: "peer missing" });
+      return sendJson(response, 200, {
+        schemaVersion: 1,
+        deviceId: options.streamDiagnosticsDeviceId ?? (remote ? "dev-b" : "dev-a"),
+        source: "reader-stream-registry",
+        capturedAt: "2026-10-12T10:06:00.000Z",
+        coverage: {
+          complete: true,
+          scope: "in-process-registered-sse-streams",
+          streamCount: 2,
+          readOnly: true,
+          streamKinds: { included: ["agent", "ui-requests"], excluded: [] },
+          includes: ["kind", "sessionId", "holder", "openedAt", "connectedAt", "lastWriteAt", "droppedEvents", "queuedBytes"],
+          excludes: ["ip", "userAgent", "requestMetadata", "eventContent"],
+          sampling: { queuedBytes: "write-time ReadableStream desiredSize estimate; not a continuously drained queue length", timestamps: "wall-clock milliseconds captured in process" },
+          secret: "must-not-cross-adapter-boundary",
+        },
+        counts: { agent: 1, "ui-requests": 1 },
+        streams: [
+          { kind: "agent", sessionId: remote ? "remote-001" : "active-001", holder: "foreground", openedAt: 1, connectedAt: 2, lastWriteAt: 3, droppedEvents: 0, queuedBytes: 128 },
+          { kind: "ui-requests", sessionId: remote ? "remote-001" : "active-001", holder: null, openedAt: 4, connectedAt: 5, lastWriteAt: 6, droppedEvents: 1, queuedBytes: 0 },
+        ],
       });
     }
 
@@ -2145,6 +2278,7 @@ async function createMockReaderServer(options = {}) {
     }
 
     if (request.method === "GET" && url.pathname === "/api/agent/created-001") {
+      if (createdRuntimeRecycled) return sendJson(response, 200, { running: false });
       return sendJson(response, 200, {
         running: true,
         state: {
@@ -2287,8 +2421,12 @@ async function createMockReaderServer(options = {}) {
       return sendJson(response, 200, { success: true, data: { accepted: true, token: "secret-token" } });
     }
 
-    if (request.method === "POST" && url.pathname === "/api/agent/created-001") {
+    if (request.method === "POST" && (url.pathname === "/api/agent/created-001" || url.pathname === "/api/agent/hidden-001")) {
       return sendJson(response, 200, { success: true, data: { accepted: true } });
+    }
+
+    if (request.method === "POST" && /^\/api\/(?:remote\/)?session-mutations$/.test(url.pathname)) {
+      return sendJson(response, 200, { operationId: body.operationId, deviceId: body.deviceId, sessionId: body.sessionId, status: "completed", httpStatus: 200 });
     }
 
     if (request.method === "POST" && url.pathname === "/api/agent/new") {
@@ -2518,7 +2656,7 @@ test("profile CRUD binds exact scope and explicit tools to the existing managed 
 });
 
 
-test("session control treats injected strictToolAllowlist false as a no-op outside create_session", async (t) => {
+test("session control rejects strictToolAllowlist outside create_session", async (t) => {
   const reader = await createMockReaderServer();
   t.after(() => reader.close());
   const client = await managedClient(t, reader);
@@ -2540,7 +2678,8 @@ test("session control treats injected strictToolAllowlist false as a no-op outsi
     sessionId: "active-001",
     strictToolAllowlist: false,
   });
-  assert.equal(explicitFalse.outcome, "observed");
+  assert.equal(explicitFalse.__toolError, true);
+  assert.match(explicitFalse.error, /only for create_session/);
 
   const explicitTrue = await client.tool("reader_session_control", {
     action: "inspect",
@@ -2550,7 +2689,40 @@ test("session control treats injected strictToolAllowlist false as a no-op outsi
   });
   assert.equal(explicitTrue.__toolError, true);
   assert.match(explicitTrue.error, /only for create_session/);
+  const strayForce = await client.tool("reader_session_control", {
+    action: "inspect",
+    deviceId: "dev-a",
+    sessionId: "active-001",
+    force: false,
+  });
+  assert.equal(strayForce.__toolError, true);
+  assert.match(strayForce.error, /force is supported only/);
   assert.equal(reader.requests.filter((request) => request.path === "/api/agent/active-001" && request.method === "POST").length, 0);
+});
+
+test("session control rejects create_session message and sessionId instead of ignoring them", async (t) => {
+  const reader = await createMockReaderServer();
+  t.after(() => reader.close());
+  const client = await managedClient(t, reader);
+
+  const message = await client.tool("reader_session_control", {
+    action: "create_session",
+    deviceId: "dev-a",
+    cwd: "/tmp",
+    message: "send after creation",
+  });
+  assert.equal(message.__toolError, true);
+  assert.match(message.error, /create the session first, then use prompt/);
+
+  const sessionId = await client.tool("reader_session_control", {
+    action: "create_session",
+    deviceId: "dev-a",
+    cwd: "/tmp",
+    sessionId: "should-not-be-ignored",
+  });
+  assert.equal(sessionId.__toolError, true);
+  assert.match(sessionId.error, /does not accept sessionId/);
+  assert.equal(reader.requests.some((request) => request.method === "POST"), false);
 });
 
 test("session control supports multimodal images, answer_question, dry-run hints, and tail sessionFilePath guidance", async (t) => {
@@ -2791,13 +2963,28 @@ test("UI read mode and resource reads preserve full authoritative question conte
   const client = await managedClient(t, reader);
   const initialized = await client.call("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "ui-client", version: "1" } });
   assert.equal(initialized.capabilities.resources.subscribe, true);
-  assert.equal((await client.call("tools/list", {})).tools.length, 9);
+  assert.equal((await client.call("tools/list", {})).tools.length, 10);
   const templates = await client.call("resources/templates/list", {});
   assert.equal(templates.resourceTemplates[0].uriTemplate, "reader://ui-requests/{deviceId}/{sessionId}");
-  const result = await client.tool("reader_read_live_events", { sessionId: "active-001", device: "dev-a", mode: "ui_requests" });
+  const result = await client.tool("reader_read_live_events", {
+    sessionId: "active-001",
+    device: "dev-a",
+    mode: "ui_requests",
+    cursor: 0,
+    maxEvents: 50,
+    maxBytes: 64 * 1024,
+  });
   assert.equal(result.resourceUri, UI_URI);
   assert.deepEqual(result.requests, snapshot.requests);
   assert.equal(result.runtimeStartAttempted, false);
+  const nonDefaultCursor = await client.tool("reader_read_live_events", {
+    sessionId: "active-001",
+    device: "dev-a",
+    mode: "ui_requests",
+    cursor: 1,
+  });
+  assert.equal(nonDefaultCursor.__toolError, true);
+  assert.match(nonDefaultCursor.error, /do not accept event cursors/);
   const resource = await client.call("resources/read", { uri: UI_URI });
   assert.deepEqual(JSON.parse(resource.contents[0].text).requests, snapshot.requests);
   assert.ok(reader.requests.every((request) => request.method === "GET"));
@@ -2831,14 +3018,33 @@ test("UI SSE wait wakes on revision or generation change and timeout never impli
   const reader = await createMockReaderServer(); t.after(() => reader.close());
   const client = await managedClient(t, reader);
   const opened = reader.nextUiStream();
-  const pending = client.tool("reader_read_live_events", { sessionId: "active-001", device: "dev-a", mode: "wait_ui_requests", runtimeGeneration: "generation-1", revision: 1, timeoutMs: 2_000 });
+  const pending = client.tool("reader_read_live_events", {
+    sessionId: "active-001",
+    device: "dev-a",
+    mode: "wait_ui_requests",
+    runtimeGeneration: "generation-1",
+    revision: 1,
+    cursor: 0,
+    maxEvents: 50,
+    maxBytes: 64 * 1024,
+    timeoutMs: 2_000,
+  });
   await opened;
   reader.updateUiSnapshot(fixtureUiSnapshot({ runtimeGeneration: "generation-2", revision: 1, requests: [fixtureUiRequest("new-generation", "input", "generation-2")] }));
   const changed = await pending;
   assert.equal(changed.outcome, "changed");
   assert.equal(changed.runtimeGeneration, "generation-2");
   assert.equal(changed.requests[0].id, "new-generation");
-  const timed = await client.tool("reader_read_live_events", { sessionId: "active-001", mode: "wait_ui_requests", runtimeGeneration: "generation-2", revision: 1, timeoutMs: 100 });
+  const timed = await client.tool("reader_read_live_events", {
+    sessionId: "active-001",
+    mode: "wait_ui_requests",
+    runtimeGeneration: "generation-2",
+    revision: 1,
+    cursor: 0,
+    maxEvents: 50,
+    maxBytes: 64 * 1024,
+    timeoutMs: 100,
+  });
   assert.equal(timed.outcome, "timeout");
   assert.equal(timed.changed, false);
   assert.equal(timed.requests.length, 1);

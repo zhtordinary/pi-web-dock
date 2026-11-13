@@ -7,6 +7,7 @@ export function normalizeFilePathSlashes(filePath: string): string {
 
 export function encodeFilePathForApi(filePath: string): string {
   const normalized = normalizeFilePathSlashes(filePath);
+  if (normalized === "/") return "%2F";
   const segments = normalized.split("/").filter(Boolean);
   // A literal "//" prefix is normalized away by URL routing before it reaches
   // the catch-all handler, so a UNC root must live inside the first segment:

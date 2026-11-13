@@ -140,6 +140,8 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
     workspaceRef.current = { peer: remotePeer, initialPath, generation: workspaceRef.current.generation + 1 };
   }
   const navigationRequestRef = useRef(0);
+  const backdropPressed = useRef(false);
+  const createBackdropPressed = useRef(false);
 
   useEffect(() => {
     setCreating(false);
@@ -213,8 +215,8 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
   };
 
   const hasUncommittedPath = pathInput.trim() !== currentPath;
-  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !busy;
-  const canCreate = canSelect && !loading;
+  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !busy && !loading;
+  const canCreate = canSelect;
   const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
 
   if (!portalTarget) return null;
@@ -225,8 +227,12 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
       role="dialog"
       aria-modal="true"
       aria-label={t("directoryPicker.selectDirectory")}
+      onPointerDown={(event) => { backdropPressed.current = event.target === event.currentTarget; }}
+      onPointerCancel={() => { backdropPressed.current = false; }}
       onClick={(event) => {
-        if (event.target === event.currentTarget && !busy) onCancel();
+        const shouldClose = backdropPressed.current && event.target === event.currentTarget && !busy;
+        backdropPressed.current = false;
+        if (shouldClose) onCancel();
       }}
       onKeyDown={(event) => {
         if (event.key === "Escape" && !busy) onCancel();
@@ -357,8 +363,12 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
         {createOpen && (
           <div
             style={{ position: "absolute", inset: 0, zIndex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, background: "rgba(0,0,0,0.35)" }}
+            onPointerDown={(event) => { createBackdropPressed.current = event.target === event.currentTarget; }}
+            onPointerCancel={() => { createBackdropPressed.current = false; }}
             onClick={(event) => {
-              if (event.target === event.currentTarget) closeCreateDialog();
+              const shouldClose = createBackdropPressed.current && event.target === event.currentTarget;
+              createBackdropPressed.current = false;
+              if (shouldClose) closeCreateDialog();
             }}
             onKeyDown={(event) => {
               event.stopPropagation();

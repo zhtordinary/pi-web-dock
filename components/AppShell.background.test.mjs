@@ -32,6 +32,8 @@ function harness() {
     canPlaySound: () => true,
     playDoneSound: () => sounds.push("done"), playErrorSound: () => sounds.push("error"),
     shouldShowBrowserNotification: () => true,
+    sessionCompletionTag: ({ deviceId, sessionId, runId }) => deviceId && sessionId && runId
+      ? `pi-session-complete:${deviceId}:${sessionId}:${runId}` : undefined,
     deliverSessionNotification: notification => notifications.push(notification),
     translate: key => key,
   };
@@ -52,7 +54,8 @@ test("background completion uses actual peer/session/run and shares the foregrou
   assert.equal(h.notifications[0].targetSession.id, "session-1");
   assert.equal(h.notifications[0].targetDevice.id, "remote-peer");
   assert.equal(h.notifications[0].title, "Actual completed session");
-  assert.equal(h.notifications[0].tag, "notification:status:done:session-1:run-1");
+  assert.equal(h.notifications[0].tag, "pi-session-complete:remote-peer:session-1:run-1");
+  assert.deepEqual(h.notifications[0].identity, { deviceId: "remote-peer", sessionId: "session-1", runId: "run-1" });
   assert.equal(h.scope.remote.sessionRunning, true, "completion on another peer cannot clear this slot");
   assert.ok(h.refreshed.includes("list"));
   assert.ok(h.refreshed.includes("files"));

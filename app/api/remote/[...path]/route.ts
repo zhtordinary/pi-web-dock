@@ -28,11 +28,11 @@ async function forward(req: Request, path: string[], peerId: string, method: str
     return NextResponse.json({ error: "Invalid request URL" }, { status: 400 });
   }
   url.searchParams.delete("peer");
-  // The peer must enforce its physical allowed roots for the navigation exception.
+  // A navigation exception must not carry a session-specific reference to the peer.
   if (isCrossOriginPdfNavigation(req)) url.searchParams.delete("sessionId");
   const target = `${baseUrl.replace(/\/$/, "")}/api/${path.map(encodeURIComponent).join("/")}${url.search}`;
 
-  const isSse = req.headers.get("accept")?.includes("text/event-stream") || path.at(-1) === "events" || path.at(-1) === "relay";
+  const isSse = req.headers.get("accept")?.includes("text/event-stream") || path.at(-1) === "events";
   const isFileTransfer = path[0] === "files" || path[0] === "html-preview" || path.at(-1) === "image" || path.at(-1) === "tool-result-image";
   // MCP test probes are the one ordinary JSON call allowed a longer upstream
   // deadline. Model discovery and model tests have their own 20 second upstream

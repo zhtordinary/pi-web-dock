@@ -52,6 +52,7 @@ test("the graph renders one search input and only the supported filter buttons",
     open: true, projectRoot: "/project", onClose() {}, onOpenSession() {}, onNewSessionFromNode() {},
   })));
   assert.equal((html.match(/data-testid="worktree-graph-search"/g) ?? []).length, 1);
+  assert.match(html, /<input[^>]*class="worktree-graph-search-input"/);
   assert.equal((source.match(/\{searchControl\}/g) ?? []).length, 1);
   for (const label of ["当前与待处理", "全部", "有未合入提交", "尚无新提交"]) assert.match(html, new RegExp(`>${label} \\(0\\)</button>`));
   assert.doesNotMatch(html, />(?:已合入主线|有未提交修改) \(0\)<\/button>/);

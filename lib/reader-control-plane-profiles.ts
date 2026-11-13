@@ -51,17 +51,18 @@ function prepare(input: ProfileTarget & { operation: string; changes: unknown })
   for (const [field, choices] of [["defaultContext", ["fresh", "fork"]], ["systemPromptMode", ["replace", "append"]], ["acceptanceRole", ["read-only", "writer"]]] as const) {
     if (value[field] !== undefined && !(choices as readonly unknown[]).includes(value[field])) fail("invalid_changes", `Invalid ${field}`);
   }
+  const tools = value.tools as string[];
   const profile: SubagentProfile = {
     name: profileName, scope: target.scope,
     displayName: text(value.displayName ?? profileName, "displayName", 256),
     description: text(value.description ?? profileName, "description", 4096),
-    systemPrompt: text(value.systemPrompt, "systemPrompt", 65536, true), tools: value.tools as string[], toolsExplicit: true,
+    systemPrompt: text(value.systemPrompt, "systemPrompt", 65536, true), tools, toolsExplicit: true,
     enabled: boolean(value.enabled, "enabled"),
     defaultContext: (value.defaultContext ?? "fresh") as "fresh" | "fork",
-    defaultAsync: value.defaultAsync === undefined ? false : boolean(value.defaultAsync, "defaultAsync"),
-    inheritProjectContext: value.inheritProjectContext === undefined ? false : boolean(value.inheritProjectContext, "inheritProjectContext"),
-    inheritGlobalContext: value.inheritGlobalContext === undefined ? false : boolean(value.inheritGlobalContext, "inheritGlobalContext"),
-    inheritSkills: value.inheritSkills === undefined ? false : boolean(value.inheritSkills, "inheritSkills"),
+    defaultAsync: value.defaultAsync === undefined ? true : boolean(value.defaultAsync, "defaultAsync"),
+    inheritProjectContext: value.inheritProjectContext === undefined ? true : boolean(value.inheritProjectContext, "inheritProjectContext"),
+    inheritGlobalContext: value.inheritGlobalContext === undefined ? true : boolean(value.inheritGlobalContext, "inheritGlobalContext"),
+    inheritSkills: value.inheritSkills === undefined ? true : boolean(value.inheritSkills, "inheritSkills"),
     ...(value.model === undefined ? {} : { model: text(value.model, "model", 300) }),
     ...(value.thinking === undefined ? {} : { thinking: value.thinking as string }),
     ...(value.systemPromptMode === undefined ? {} : { systemPromptMode: value.systemPromptMode as "append" | "replace" }),

@@ -107,6 +107,12 @@ export interface SessionStatsInfo {
   cost: number;
   /** Price status for the session-wide calculator. */
   costStatus?: SessionCostStatus;
+  /** Whether Reader pricing has completed for this snapshot. */
+  costState?: "loading" | "ready" | "error";
+  /** Source of the displayed statistics before Reader pricing completes. */
+  statsSource?: "reader-file" | "reader-cost";
+  /** Explicit scope for a lightweight statistics snapshot. */
+  statsScope?: string;
   /** Models whose usage was excluded because no price was available. */
   missingPriceModels?: string[];
   /** Usage records that have not settled and are excluded from the lower-bound amount. */

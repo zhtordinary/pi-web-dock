@@ -21,11 +21,12 @@ import {
 import type { SessionForkResult } from "@/hooks/useAgentSession";
 import type { QuickAskEntry } from "@/lib/quick-ask-storage";
 import type { QuickAskRunSnapshot, QuickAskScope } from "@/lib/quick-ask-log";
+import { isQuickAskRunActive } from "@/lib/quick-ask-status";
 import { localizeQuickAskError, observeQuickAskRun, readQuickAskRun, requestQuickAskFork } from "@/lib/quick-ask-observer";
 import { EMBEDDED_SIDEKICK_DISMISS_EVENT, notifyEmbeddedModalState } from "@/lib/embedded-modal";
 import { SelectorRow } from "./SelectorRow";
 import { useI18n } from "@/hooks/useI18n";
-import { readCollapsedProviderNames, COLLAPSED_PROVIDERS_CHANGED_EVENT } from "@/lib/model-visibility-preference";
+import { useHiddenModelProviders } from "@/hooks/useHiddenModelProviders";
 
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -43,8 +44,10 @@ function compareSidekickModelOptions(
 function filterSidekickModelOptionsByProvider(
   options: { provider: string; modelId: string; name: string }[],
   hiddenProviders: ReadonlySet<string>,
+  selectedModel?: { provider: string; modelId: string } | null,
 ): { provider: string; modelId: string; name: string }[] {
-  return options.filter((option) => !hiddenProviders.has(option.provider));
+  return options.filter((option) => !hiddenProviders.has(option.provider)
+    || (selectedModel?.provider === option.provider && selectedModel.modelId === option.modelId));
 }
 
 function filterSidekickModelOptions(
@@ -337,7 +340,7 @@ export function mergeSidekickThreadLists(
   return next;
 }
 
-interface SidekickLiveReply { question: string; images: SidekickImage[]; answer: string; thinking: string; running: boolean; deleting?: boolean; runId?: string; unconfirmed?: boolean; }
+interface SidekickLiveReply { question: string; images: SidekickImage[]; answer: string; thinking: string; running: boolean; settling?: boolean; activeTools?: string[]; deleting?: boolean; runId?: string; unconfirmed?: boolean; }
 interface SidekickStreamRequest {
   controller: AbortController; running: boolean; deleting?: boolean; runId?: string;
   observing?: boolean; accepted?: boolean; stopRequested?: boolean; retained?: boolean;
@@ -407,6 +410,12 @@ export function SidekickAnswer({ entry }: { entry: QuickAskEntry }) {
   const { t } = useI18n();
   const hasAnswer = Boolean(entry.data.answer?.trim());
   return <>
+    {entry.data.toolCalls?.length ? <details style={{ marginBottom: 8, color: "var(--text-muted)", fontSize: 11 }}>
+      <summary>{t("sidekick.toolCalls", { count: entry.data.toolCalls.length })}</summary>
+      <ul>{entry.data.toolCalls.map((tool, index) => <li key={`${index}:${tool.name}`}>
+        {tool.name} · {t(tool.isError ? "sidekick.toolFailed" : "sidekick.toolFinished")}
+      </li>)}</ul>
+    </details> : null}
     {entry.stopReason === "length" && (
       <p role="status" style={{ color: "var(--text-muted)" }}>{t("sidekick.outputLimitReached")}</p>
     )}
@@ -871,29 +880,7 @@ export function SidekickDrawer({
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [modelFilter, setModelFilter] = useState("");
-  const [hiddenModelProviders, setHiddenModelProviders] = useState<Set<string>>(() => {
-    try {
-      return new Set(readCollapsedProviderNames());
-    } catch {
-      return new Set();
-    }
-  });
-
-  useEffect(() => {
-    const refresh = () => {
-      try {
-        setHiddenModelProviders(new Set(readCollapsedProviderNames()));
-      } catch {
-        // ignore
-      }
-    };
-    window.addEventListener("storage", refresh);
-    window.addEventListener(COLLAPSED_PROVIDERS_CHANGED_EVENT, refresh);
-    return () => {
-      window.removeEventListener("storage", refresh);
-      window.removeEventListener(COLLAPSED_PROVIDERS_CHANGED_EVENT, refresh);
-    };
-  }, []);
+  const hiddenModelProviders = useHiddenModelProviders();
 
   const [modelMenuPos, setModelMenuPos] = useState<{ bottom: number; left: number } | null>(null);
   const [thinkingMenuPos, setThinkingMenuPos] = useState<{ bottom: number; left: number } | null>(null);
@@ -936,8 +923,8 @@ export function SidekickDrawer({
   }, [modelList, modelNames, activeModel?.provider]);
 
   const visibleModelOptions = useMemo(() => {
-    return filterSidekickModelOptionsByProvider(modelOptions, hiddenModelProviders);
-  }, [modelOptions, hiddenModelProviders]);
+    return filterSidekickModelOptionsByProvider(modelOptions, hiddenModelProviders, activeModel);
+  }, [activeModel, hiddenModelProviders, modelOptions]);
 
   const filteredModelOptions = useMemo(() => {
     return filterSidekickModelOptions(visibleModelOptions, modelFilter);
@@ -1468,10 +1455,10 @@ export function SidekickDrawer({
     const key = sidekickViewKey(url, initial.branchId, initial.threadId);
     const existing = streamRequestsRef.current.get(key);
     if (existing?.deleting || ((existing?.running || existing?.retained) && existing.runId && existing.runId !== initial.id)) return;
-    if (existing?.observing && existing.runId === initial.id && initial.status === "running") return;
+    if (existing?.observing && existing.runId === initial.id && isQuickAskRunActive(initial)) return;
     const controller = existing?.runId === initial.id && !existing.controller.signal.aborted ? existing.controller : new AbortController();
     if (existing && existing.controller !== controller) existing.controller.abort();
-    const request = { controller, running: initial.status === "running", runId: initial.id, observing: true, accepted: true, retained: initial.status !== "completed" };
+    const request = { controller, running: isQuickAskRunActive(initial), runId: initial.id, observing: true, accepted: true, retained: initial.status !== "completed" };
     streamRequestsRef.current.set(key, request);
     const current = () => sessionIdentityRef.current === identity && streamRequestsRef.current.get(key)?.controller === controller;
     setThreadLists((previous) => {
@@ -1482,7 +1469,7 @@ export function SidekickDrawer({
     observeQuickAskRun({ url, run: initial, signal: controller.signal, t,
       onRun: (run) => {
         if (!current()) return;
-        request.running = run.status === "running";
+        request.running = isQuickAskRunActive(run);
         request.retained = run.status !== "completed";
         if (run.status === "completed" && run.entry) {
           const entry = run.entry;
@@ -1498,11 +1485,11 @@ export function SidekickDrawer({
             const images = previous[key]?.runId === run.id ? previous[key].images
               : run.images.map((image) => ({ ...image, previewUrl: imageDataUrl(image) }));
             return { ...previous, [key]: { runId: run.id, question: run.question, images,
-              answer: run.answer + (run.status === "running" ? "" : `\n\n[${run.error === undefined ? t("sidekick.stopped") : localizeQuickAskError(run.error, t)}]`),
-              thinking: run.thinking, running: run.status === "running" } };
+              answer: run.answer + (isQuickAskRunActive(run) ? "" : `\n\n[${run.error === undefined ? t("sidekick.stopped") : localizeQuickAskError(run.error, t)}]`),
+              thinking: run.thinking, running: isQuickAskRunActive(run), settling: run.settling, activeTools: run.activeTools } };
           });
         }
-        if (run.status !== "running") { request.observing = false; controller.abort(); }
+        if (!isQuickAskRunActive(run)) { request.observing = false; controller.abort(); }
       },
       onDeleted: () => forgetDeletedRun(key, initial.id, identity, controller),
       onError: (error) => {
@@ -1968,7 +1955,7 @@ export function SidekickDrawer({
         })}
 
         {/* Live streaming bubble */}
-        {(isStreaming || streamingAnswer) && (
+        {(isStreaming || streamingAnswer || reply?.unconfirmed) && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {/* Optimistic Question Bubble */}
             {(streamingQuestion || streamingImages.length > 0) && <SidekickQuestion question={streamingQuestion} images={streamingImages} copied={copiedId === `question:${viewKey}`} onCopy={() => void handleCopy(`question:${viewKey}`, streamingQuestion)} onQuote={onQuoteToComposer ? () => onQuoteToComposer(streamingQuestion) : undefined} />}
@@ -2012,14 +1999,17 @@ export function SidekickDrawer({
                     color: "#10b981",
                   }}
                 >
-                  <span>{t("sidekick.generating")}</span>
+                  <span>{reply?.settling ? t("sidekick.stopping") : reply?.activeTools?.length
+                    ? t("sidekick.executingTools", { tools: reply.activeTools.join(", ") }) : t("sidekick.generating")}</span>
                   <button
+                    disabled={reply?.settling}
                     onClick={handleAbort}
                     style={{
                       background: "none",
                       border: "none",
                       color: "#ef4444",
-                      cursor: "pointer",
+                      cursor: reply?.settling ? "default" : "pointer",
+                      opacity: reply?.settling ? 0.5 : 1,
                       fontSize: 10,
                     }}
                   >

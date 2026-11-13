@@ -7,7 +7,7 @@ import type {
   SessionRunStatus,
 } from "./session-activity-types";
 
-/** The browser-safe shape forwarded by /api/activity/events and /relay. */
+/** The browser-safe shape forwarded by /api/activity/events and /api/reader/events. */
 export interface SessionActivityEventPayload {
   type: "activity";
   device?: string;
@@ -18,6 +18,8 @@ export interface SessionActivityEventPayload {
   sessionId?: string;
   runId?: string;
   status?: SessionRunStatus;
+  /** Run start time lets clients reject delayed events from older runs. */
+  startedAt?: string;
   unattended?: boolean;
   /** True when this event came from an SSE buffer replay rather than live push. */
   replay?: boolean;
@@ -63,7 +65,7 @@ function mergeRun(item: SessionActivityItem, event: SessionActivityEventPayload,
   const existing = item.runs.find((run) => run.runId === event.runId) ?? (
     item.latestRun?.runId === event.runId ? item.latestRun : undefined
   );
-  const startedAt = existing?.startedAt ?? (status === "running" ? at.iso : item.session.modified || at.iso);
+  const startedAt = existing?.startedAt ?? event.startedAt ?? (status === "running" ? at.iso : item.session.modified || at.iso);
   return {
     runId: event.runId!,
     sessionId: event.sessionId!,
@@ -107,28 +109,39 @@ export function applySessionActivityEvent(
   const at = eventTime(event.at);
   const current = item.latestRun;
   const currentTime = parsedTime(current?.updatedAt ?? current?.completedAt ?? current?.startedAt);
-  if (current && current.runId !== event.runId && Number.isFinite(currentTime) && currentTime > at.ms) {
-    return { response, matched: true, changed: false };
+  const existingEventRun = item.runs.find((run) => run.runId === event.runId);
+  const eventStartedAt = parsedTime(event.startedAt ?? existingEventRun?.startedAt);
+  const currentStartedAt = parsedTime(current?.startedAt);
+  if (current && current.runId !== event.runId) {
+    if (Number.isFinite(eventStartedAt) && Number.isFinite(currentStartedAt) && eventStartedAt < currentStartedAt) {
+      return { response, matched: true, changed: false };
+    }
+    // Older peers do not send startedAt. Keep their previous timestamp guard
+    // for known runs and let the snapshot reconcile unknown run identities.
+    if (!Number.isFinite(eventStartedAt) && Number.isFinite(currentTime) && currentTime > at.ms) {
+      return { response, matched: true, changed: false };
+    }
   }
 
   const nextRun = mergeRun(item, event, at);
   const runs = [nextRun, ...item.runs.filter((run) => run.runId !== nextRun.runId)]
     .sort((a, b) => parsedTime(b.startedAt) - parsedTime(a.startedAt))
     .slice(0, 8);
-  const nextStatus = runStatusToActivityStatus(nextRun.status);
+  const latestRun = runs[0] ?? nextRun;
+  const nextStatus = runStatusToActivityStatus(latestRun.status);
   const lastActivityAt = item.session.modified;
   const nextItem: SessionActivityItem = {
     ...item,
     ...(typeof event.unattended === "boolean" ? { unattended: event.unattended } : {}),
     status: nextStatus,
     lastActivityAt,
-    latestRun: nextRun,
+    latestRun,
     runs,
   };
   const changed = item.status !== nextItem.status
-    || item.latestRun?.runId !== nextRun.runId
-    || item.latestRun?.status !== nextRun.status
-    || item.latestRun?.updatedAt !== nextRun.updatedAt;
+    || item.latestRun?.runId !== latestRun.runId
+    || item.latestRun?.status !== latestRun.status
+    || item.latestRun?.updatedAt !== latestRun.updatedAt;
   if (!changed) return { response, matched: true, changed: false };
 
   const sessions = response.sessions.slice();

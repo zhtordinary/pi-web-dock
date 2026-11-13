@@ -15,22 +15,24 @@ const cwd = join(workspace, "project");
 const outside = join(root, "outside");
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousDisable = process.env.PI_WEB_DISABLE_MCP;
+const previousPolicy = process.env.PI_WEB_FILE_PERMISSIONS_FILE;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+process.env.PI_WEB_FILE_PERMISSIONS_FILE = join(root, "file-permissions.json");
 delete process.env.PI_WEB_DISABLE_MCP;
 await mkdir(agentDir, { recursive: true });
 await mkdir(join(cwd, ".pi"), { recursive: true });
 await mkdir(outside, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { GET } = await jiti.import("./route.ts");
-allowFileRoot(cwd);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   if (previousDisable === undefined) delete process.env.PI_WEB_DISABLE_MCP;
   else process.env.PI_WEB_DISABLE_MCP = previousDisable;
+  if (previousPolicy === undefined) delete process.env.PI_WEB_FILE_PERMISSIONS_FILE;
+  else process.env.PI_WEB_FILE_PERMISSIONS_FILE = previousPolicy;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -114,8 +116,8 @@ test("the project's trust is read fresh, exact or inherited", async (t) => {
   assert.equal((await get(forCwd())).body.project.trust.trusted, false);
 });
 
-test("a cwd outside the allowed folders, relative, with .., or not a folder is refused", async () => {
-  assert.deepEqual(await get(forCwd(outside)), { status: 403, body: { error: "Access denied", reason: "cwd-denied" } });
+test("any existing cwd is accepted, but relative, .. and non-directory paths are refused", async () => {
+  assert.equal((await get(forCwd(outside))).status, 200);
   assert.deepEqual(await get(forCwd(`${cwd}/../project`)), { status: 403, body: { error: "Access denied", reason: "cwd-denied" } });
   assert.deepEqual(await get("?cwd=project"), { status: 400, body: { error: "cwd must be an absolute path", reason: "cwd-invalid" } });
   assert.deepEqual(await get("?cwd="), { status: 400, body: { error: "cwd must be an absolute path", reason: "cwd-invalid" } });

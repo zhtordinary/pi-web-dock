@@ -10,7 +10,7 @@ import { readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import { getPiSessionRoots } from "./session-archive";
 import { pruneOrphanedSubprojectAssignments } from "./subproject-state";
-import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext, SessionHistoryInfo, TextContent } from "./types";
+import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext, SessionHistoryInfo, SubagentSessionStatus, TextContent } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 import { getThinkingPreview } from "./message-display";
@@ -18,6 +18,7 @@ import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import { listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
+import { isPiSubagentSessionPath, findPiSubagentSessionPaths } from "./session-child-tree";
 import { listWorktrees, resolveProject, type ProjectInfo } from "./worktree";
 import { draftViewByTarget, latestQuestionAnalysisJobs, toQuestionAnalysisJobView, type QuestionAnalysisJobView, type QuestionDraftView } from "./question-analysis-jobs";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
@@ -32,6 +33,7 @@ const SESSION_RELATION_MAX_BYTES = 256 * 1024;
 const SESSION_RELATION_MAX_LINES = 2;
 const SESSION_RESULT_MAX_BYTES = 256 * 1024;
 const SESSION_TAIL_PROBE_MAX_BYTES = 64 * 1024;
+const TAIL_OVERSIZED_LINE_MAX_BYTES = 4 * 1024 * 1024;
 
 function readBoundedLines(filePath: string, maxBytes: number, maxLines: number): string[] {
   const fd = openSync(filePath, "r");
@@ -62,20 +64,48 @@ function readBoundedLines(filePath: string, maxBytes: number, maxLines: number):
   } finally { closeSync(fd); }
 }
 
+function findPreviousLineStart(fd: number, position: number, maxBytes: number): number | undefined {
+  let cursor = position;
+  let scanned = 0;
+  while (cursor > 0 && scanned < maxBytes) {
+    const length = Math.min(4096, cursor, maxBytes - scanned);
+    cursor -= length;
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = readSync(fd, buffer, 0, length, cursor);
+    if (bytesRead === 0) break;
+    for (let index = bytesRead - 1; index >= 0; index -= 1) {
+      if (buffer[index] === 0x0a) return cursor + index + 1;
+    }
+    scanned += bytesRead;
+  }
+  return cursor === 0 ? 0 : undefined;
+}
+
 function readBoundedTailLines(filePath: string, maxBytes: number): string[] {
   const fd = openSync(filePath, "r");
   try {
     const fileSize = fstatSync(fd).size;
-    const start = Math.max(0, fileSize - maxBytes);
+    const requestedStart = Math.max(0, fileSize - maxBytes);
+    let start = requestedStart;
+    let startsAtLineBoundary = start === 0;
+    if (start > 0) {
+      const previousByte = Buffer.allocUnsafe(1);
+      readSync(fd, previousByte, 0, 1, start - 1);
+      startsAtLineBoundary = previousByte[0] === 0x0a;
+      if (!startsAtLineBoundary) {
+        // Keep the tail bounded while allowing one oversized JSONL record to be parsed.
+        const expandedStart = findPreviousLineStart(fd, start, TAIL_OVERSIZED_LINE_MAX_BYTES);
+        if (expandedStart !== undefined) {
+          start = expandedStart;
+          startsAtLineBoundary = true;
+        }
+      }
+    }
     const buffer = Buffer.allocUnsafe(fileSize - start);
     const bytesRead = readSync(fd, buffer, 0, buffer.length, start);
     if (bytesRead === 0) return [];
     const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
-    if (start > 0) {
-      const previousByte = Buffer.allocUnsafe(1);
-      readSync(fd, previousByte, 0, 1, start - 1);
-      if (previousByte[0] !== 0x0a) lines.shift();
-    }
+    if (!startsAtLineBoundary) lines.shift();
     if (lines.at(-1) === "") lines.pop();
     return lines.map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
   } finally { closeSync(fd); }
@@ -395,6 +425,36 @@ export async function listProjectSessions(
 
 type ScannedSubagent = NonNullable<ReturnType<typeof readSubagentRun>>;
 
+const PI_SUBAGENT_TAIL_PROBE_MAX_BYTES = 64 * 1024;
+
+function inferPiSubagentStatus(filePath: string): SubagentSessionStatus {
+  let lines: string[];
+  try { lines = readBoundedTailLines(filePath, PI_SUBAGENT_TAIL_PROBE_MAX_BYTES); }
+  catch { return "interrupted"; }
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let entry: SessionEntry;
+    try { entry = JSON.parse(lines[index]) as SessionEntry; }
+    catch { continue; }
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    if (entry.message.stopReason === "aborted") return "aborted";
+    if (entry.message.stopReason === "error") return "failed";
+    if (entry.message.stopReason === "toolUse") return "running";
+    return "completed";
+  }
+  return "starting";
+}
+
+function piSubagentRelation(item: ScannedSessionInfo, parentSessionId: string | undefined): SessionInfo["relation"] | undefined {
+  if (!parentSessionId || !item.parentSessionPath || !isPiSubagentSessionPath(item.parentSessionPath, item.path)) return undefined;
+  return {
+    kind: "subagent",
+    parentSessionId,
+    profile: "pi-subagents",
+    description: item.firstMessage || "Subagent",
+    status: inferPiSubagentStatus(item.path),
+  };
+}
+
 function buildScannedSessionList(scanned: ScannedSessionInfo[], archived = false, projectSessionIds?: ReadonlySet<string>): Promise<SessionInfo[]> {
   const pathToId = new Map<string, string>();
   for (const session of scanned) pathToId.set(sessionPathKey(session.path), session.id);
@@ -406,6 +466,7 @@ function buildScannedSessionList(scanned: ScannedSessionInfo[], archived = false
     if (item.parentSessionPath) {
       try { subagent = readSubagentRun(readSessionRelationEntries(item.path), item.id, item.path); } catch { /* Concurrent removal or malformed session. */ }
     }
+    const piSubagent = subagent ? undefined : piSubagentRelation(item, parentSessionId);
     return {
       path: item.path,
       id: item.id,
@@ -418,10 +479,12 @@ function buildScannedSessionList(scanned: ScannedSessionInfo[], archived = false
       parentSessionId,
       ...(item.contextSourceSessionId ? { contextSourceSessionId: item.contextSourceSessionId } : {}),
       ...(subagent
-        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
-        : item.parentSessionPath
-          ? { relation: { kind: "fork" as const, ...(parentSessionId ? { originSessionId: parentSessionId } : {}) } }
-          : {}),
+        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, ...(subagent.model ? { model: subagent.model } : {}), status: subagent.status } }
+        : piSubagent
+          ? { relation: piSubagent }
+          : item.parentSessionPath
+            ? { relation: { kind: "fork" as const, ...(parentSessionId ? { originSessionId: parentSessionId } : {}) } }
+            : {}),
       transient: false,
       ...(archived ? { archived: true as const } : {}),
       ...(item.detailsPending ? { detailsPending: true } : {}),
@@ -869,7 +932,7 @@ async function findSessionPathById(sessionId: string, archived: boolean): Promis
     }
   }
 
-  const inspect = (onlyFilenameMatch: boolean): string | undefined => {
+  const inspectTopLevel = (onlyFilenameMatch: boolean): string | undefined => {
     let match: string | undefined;
     for (const project of projects) {
       const files = onlyFilenameMatch
@@ -891,10 +954,23 @@ async function findSessionPathById(sessionId: string, archived: boolean): Promis
     return match;
   };
 
-  // SessionManager may allocate a filename ID before the SDK writes the
-  // header ID. Keep the normal fast path, then fall back to header identity
-  // when the filename and header IDs differ for a newly created session.
-  return inspect(true) ?? inspect(false) ?? null;
+  let match = inspectTopLevel(true) ?? inspectTopLevel(false);
+  const parentPaths = projects.flatMap((project) => project.files
+    .filter((file) => file.endsWith(".jsonl"))
+    .map((file) => join(project.path, file)));
+  const childPaths = (await Promise.all(parentPaths.map((parentPath) => findPiSubagentSessionPaths(parentPath)))).flat();
+  for (const childPath of childPaths) {
+    const candidate = resolvePathWithinDefaultSessions(childPath, sessionsDir);
+    if (!candidate) continue;
+    try {
+      if (readSessionHeader(candidate)?.id !== sessionId) continue;
+    } catch {
+      continue;
+    }
+    if (match && match !== candidate) throw new SessionPathConflictError(sessionId);
+    match = candidate;
+  }
+  return match ?? null;
 }
 
 function findSessionIdByPath(filePath: string): string | undefined {
@@ -968,6 +1044,8 @@ export async function resolveSessionPath(
  * missing runtime must remain a pure filesystem observation.
  */
 export async function resolveSessionPathReadOnly(sessionId: string): Promise<string | null> {
+  const cached = getCachedSessionPath(sessionId);
+  if (cached) return cached;
   const active = await findSessionPathById(sessionId, false);
   const archived = await findSessionPathById(sessionId, true);
   if (active && archived) throw new SessionPathConflictError(sessionId);

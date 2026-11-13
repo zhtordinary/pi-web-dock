@@ -12,7 +12,7 @@ await installEnglishTestLocale(jiti);
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n.tsx");
-const { McpConfig, McpConfigView } = await jiti.import("./McpConfig.tsx");
+const { McpConfig, McpConfigView, mcpVisibleFocusFallback } = await jiti.import("./McpConfig.tsx");
 const { enLocale } = await jiti.import("@/lib/i18n/messages/en.ts");
 const source = await readFile(new URL("./McpConfig.tsx", import.meta.url), "utf8");
 const helperSource = await readFile(new URL("./mcp-config-helpers.ts", import.meta.url), "utf8");
@@ -437,7 +437,7 @@ test("when trusting removes Trust… under the keyboard, focus goes to the selec
   assert.match(source, /const offeredTrustRef = useRef\(offersTrust\);\n\s*useEffect\(\(\) => \{\n\s*const offeredTrust = offeredTrustRef\.current;\n\s*offeredTrustRef\.current = offersTrust;\n\s*if \(offeredTrust && !offersTrust\) focusIfLost\(document, focusFallback\(\)\);\n\s*\}, \[offersTrust\]\);/);
   // With no row selected (the add pane is open, or the list is empty), the fallback is the Add action,
   // on screen whenever the overview has loaded.
-  assert.match(source, /const focusFallback = \(\) => selectedRowRef\.current \?\? addActionRef\.current;/);
+  assert.match(source, /const focusFallback = \(\) => mcpVisibleFocusFallback\(selectedRowRef\.current \?\? addActionRef\.current\);/);
   assert.match(source, /<ConfigListAction ref=\{addActionRef\} active=\{adding\} onClick=\{onAddOpen\}>/);
   assert.match(settingsUiSource, /export function ConfigListAction\(\{ active = false, children, className, \.\.\.props \}: ButtonHTMLAttributes<HTMLButtonElement> & \{ active\?: boolean; ref\?: Ref<HTMLButtonElement> \}\) \{\n\s*return \(\n\s*<div className="config-list-action">\n\s*<button\n\s*type="button"\n\s*\{\.\.\.props\}/);
   assert.match(source, /import \{ focusAfterChange, focusIfLost \} from "@\/lib\/stacked-dialog";/);
@@ -450,6 +450,29 @@ test("when trusting removes Trust… under the keyboard, focus goes to the selec
   assert.match(settingsUiSource, /export function ConfigSidebarItem\(\{[\s\S]*?\.\.\.props\n\}: ButtonHTMLAttributes<HTMLButtonElement> & \{ active\?: boolean; ref\?: Ref<HTMLButtonElement> \}\) \{\n\s*return \(\n\s*<button\n\s*type="button"\n\s*\{\.\.\.props\}/);
   // A selected row with the ref attached renders as before: the ref is not an attribute.
   assert.match(view({ selected: "codemode" }), /<button type="button" aria-label="Code mode: [^"]+" aria-current="page" class="config-sidebar-item">/);
+});
+
+test("phone MCP focus falls back to Back only while its list is hidden and panel is visible", () => {
+  const back = {};
+  let rowVisible = false;
+  let panelVisible = true;
+  let inPhoneDetail = true;
+  const panel = { getClientRects: () => panelVisible ? [{}] : [] };
+  const dialog = { querySelector: () => back };
+  const row = {
+    getClientRects: () => rowVisible ? [{}] : [],
+    closest: (selector) => selector === ".config-panel-root" ? panel : inPhoneDetail ? dialog : null,
+  };
+  assert.equal(mcpVisibleFocusFallback(null), null);
+  assert.equal(mcpVisibleFocusFallback(row), back);
+  rowVisible = true;
+  assert.equal(mcpVisibleFocusFallback(row), row);
+  rowVisible = false;
+  panelVisible = false;
+  assert.equal(mcpVisibleFocusFallback(row), row);
+  panelVisible = true;
+  inPhoneDetail = false;
+  assert.equal(mcpVisibleFocusFallback(row), row);
 });
 
 test("loading, a failed load and an empty listing each say so", () => {

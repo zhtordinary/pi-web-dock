@@ -1,4 +1,6 @@
 import { isPluginSourceCheckable } from "@/lib/plugin-updates";
+import { invalidateModelRuntimeWithExtensions } from "@/lib/model-runtime";
+import { invalidateModelsCache } from "@/lib/models-cache";
 import { NextResponse } from "next/server";
 import { existsSync, readFileSync, statSync } from "fs";
 import { basename, dirname, extname, join, relative, resolve as resolvePath } from "path";
@@ -10,7 +12,7 @@ import {
   type ResolvedPaths,
   type ResolvedResource,
 } from "@earendil-works/pi-coding-agent";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
@@ -508,9 +510,8 @@ export async function GET(req: Request) {
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
   try {
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    if (!isExistingDirectory(cwd)) {
+      return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
     }
     const viewScope = searchParams.has("scope") ? readScope(searchParams.get("scope")) : "project";
     return NextResponse.json(await readPlugins(cwd, viewScope));
@@ -541,9 +542,12 @@ export async function POST(req: Request) {
     };
     if (!body.cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
     if (!body.action) return NextResponse.json({ error: "action required" }, { status: 400 });
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    // A failed package update can still leave the extension set changed halfway;
+    // make the next read rebuild both the shared registration snapshot and model list.
+    invalidateModelRuntimeWithExtensions();
+    invalidateModelsCache();
+    if (!isExistingDirectory(body.cwd)) {
+      return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
     }
 
     const agentDir = getAgentDir();

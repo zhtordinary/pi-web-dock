@@ -9,8 +9,6 @@ import { THEME_OPTIONS } from "@/lib/theme";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
 import { ReaderFloatingSelect } from "./ReaderFloatingSelect";
 import { ThemeIcon } from "@/components/ThemeIcon";
-import { FilePermissionsConfig } from "./FilePermissionsConfig";
-import type { SettingsPanelController } from "./UnifiedSettingsModal";
 import {
   loadStoredQuoteShortcut,
   setStoredQuoteShortcut,
@@ -60,10 +58,9 @@ export interface GeneralConfigProps {
   quoteSelectionEnabled?: boolean;
   onQuoteSelectionChange?: (enabled: boolean) => void;
   remotePeer?: string;
-  controllerRef?: React.MutableRefObject<SettingsPanelController | null>;
 }
 
-export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionChange, remotePeer, controllerRef }: GeneralConfigProps) {
+export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionChange, remotePeer }: GeneralConfigProps) {
   const { t, locale, setLocale, supportedLocales } = useI18n();
   const { preference, setThemePreference } = useTheme();
   const { width: chatWidth, setWidth: setChatWidth } = useChatAppearance();
@@ -225,7 +222,6 @@ export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionCh
     { id: "general-sec-chat", labelKey: "settings.tocChat" },
     { id: "general-sec-sound", labelKey: "settings.tocSound" },
     { id: "general-sec-push", labelKey: "settings.tocPush" },
-    { id: "general-sec-file-permissions", labelKey: "settings.filePermissionsTitle" },
     { id: "general-sec-language", labelKey: "settings.tocLanguage" },
   ] as const;
 
@@ -699,7 +695,6 @@ export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionCh
         {pushError && <p role="alert" style={{ margin: 0, color: "#dc2626", fontSize: 11 }}>{pushError}</p>}
       </section>
 
-      <FilePermissionsConfig remotePeer={remotePeer} controllerRef={controllerRef} />
 
       {/* 语言 */}
       <section id="general-sec-language" style={{ display: "flex", flexDirection: "column", gap: 12 }}>

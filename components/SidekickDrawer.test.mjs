@@ -77,6 +77,20 @@ test("answers distinguish native truncation, missing body and thinking without g
   assert.match(source, /<SidekickAnswer entry=\{item\} \/>/);
 });
 
+test("saved Side Ask answers show tool names and outcomes without arguments or results", async () => {
+  const { createElement } = await import("react");
+  const { SidekickAnswer } = await jiti.import("./SidekickDrawer.tsx");
+  const html = await renderInEnglish(createElement(SidekickAnswer, { entry: { data: {
+    answer: "done", toolCalls: [{ name: "read", isError: false }, { name: "bash", isError: true }],
+  } } }));
+  assert.match(html, /<details/);
+  assert.ok(html.includes(markupText(en("sidekick.toolCalls", { count: 2 }))));
+  assert.match(html, /read/);
+  assert.match(html, /bash/);
+  assert.ok(html.includes(markupText(en("sidekick.toolFinished"))));
+  assert.ok(html.includes(markupText(en("sidekick.toolFailed"))));
+});
+
 test("streaming and saved questions share the transcript font scale and copy/quote controls", async () => {
   const { createElement } = await import("react");
   const { SidekickQuestion } = await jiti.import("./SidekickDrawer.tsx");
@@ -314,12 +328,13 @@ test("ChatWindow integrates SidekickDrawer with shell-controlled state", async (
 test("offers the shared sidekick view inside the resizable right panel", async () => {
   const sidekickSource = await readFile(new URL("./SidekickDrawer.tsx", import.meta.url), "utf8");
   const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+  const appShellSidekickSource = await readFile(new URL("./app-shell-sidekick.tsx", import.meta.url), "utf8");
   assert.match(sidekickSource, /SIDEKICK_RIGHT_PANEL_TARGET_ID = "reader-right-panel-sidekick"/);
   assert.match(sidekickSource, /placement\?: "sidebar" \| "right-panel"/);
   assert.match(sidekickSource, /if \(isRightPanelPlacement\) \{[\s\S]*document\.getElementById\(rightPanelTargetId\)/);
   assert.match(sidekickSource, /position: "relative",[\s\S]*width: "100%",[\s\S]*height: "100%"/);
   assert.match(appShellSource, /data-right-panel-sidekick-toggle="true"/);
-  assert.match(appShellSource, /const toggleSidekickRightPanel = useCallback/);
+  assert.match(appShellSidekickSource, /const toggleSidekickRightPanel = useCallback/);
   assert.match(appShellSource, /id=\{SIDEKICK_RIGHT_PANEL_TARGET_ID\}/);
   assert.match(appShellSource, /display: isSidekickTabActive \? "none" : "block"/);
   assert.match(appShellSource, /SIDEKICK_TAB_ID/);
@@ -350,18 +365,24 @@ test("routes Sidekick forks through the shell-owned session transition", async (
 
 test("AppShell places sidekick control in the session top bar", async () => {
   const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
-  assert.match(appShellSource, /MessageSquare/);
+  assert.match(appShellSource, /SidekickMessageIcon/);
   assert.match(appShellSource, /onClick=\{toggleSidekick\}/);
-  assert.match(appShellSource, /translate\(\"sidekick\.title\"\)/);
+  // The count-bearing title lives in the Sidekick module; AppShell consumes its label helper.
+  const sidekickModuleSource = await readFile(new URL("./app-shell-sidekick.tsx", import.meta.url), "utf8");
+  assert.match(sidekickModuleSource, /translate\("sidekick\.title"\)/);
+  assert.match(appShellSource, /buildSidekickButtonLabel\(sidekickCount, translate\)/);
 });
 
 test("renders the Sidekick message icon with minimap fill and no center number", async () => {
   const sidekickSource = await readFile(new URL("./SidekickDrawer.tsx", import.meta.url), "utf8");
   const chatWindowSource = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
   const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+  // The icon and its label now live in the Sidekick module; AppShell only consumes them.
+  const sidekickModuleSource = await readFile(new URL("./app-shell-sidekick.tsx", import.meta.url), "utf8");
   const minimapSource = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
-  const iconSource = appShellSource.match(/function SidekickMessageIcon[\s\S]*?\n}\n/)?.[0];
+  const iconSource = sidekickModuleSource.match(/function SidekickMessageIcon[\s\S]*?\n}\n/)?.[0];
   assert.ok(iconSource, "SidekickMessageIcon must exist");
+  assert.doesNotMatch(appShellSource, /function SidekickMessageIcon/, "AppShell must not redefine the icon");
   assert.match(sidekickSource, /onCountChange\?: \(count: number\) => void/);
   assert.match(sidekickSource, /const hasSidekickContent = branchItems\.length > 0/);
   assert.match(sidekickSource, /const sidekickTagCount = hasSidekickContent \? threadList\.length : 0/);
@@ -375,8 +396,9 @@ test("renders the Sidekick message icon with minimap fill and no center number",
   assert.match(iconSource, /color="currentColor"/);
   assert.doesNotMatch(iconSource, /#9ca3af|#2563eb|fontSize|count > 0 &&/);
   assert.match(appShellSource, /<SidekickMessageIcon count=\{sidekickCount\} \/>/);
-  assert.match(appShellSource, /const sidekickButtonLabel = `\$\{translate\("sidekick\.title"\)\}/);
-  assert.match(appShellSource, /sidekickCount > 0/);
+  assert.match(sidekickModuleSource, /export function buildSidekickButtonLabel\(count: number, translate: \(key: string\) => string\): string \{/);
+  assert.ok(sidekickModuleSource.includes('${translate("sidekick.title")}${count > 0 ? ` (${count})` : ""}'), "the count must be appended to the Sidekick title");
+  assert.match(appShellSource, /const sidekickButtonLabel = buildSidekickButtonLabel\(sidekickCount, translate\)/);
 });
 
 test("sends the active branch and parent when asking from Sidekick", async () => {
@@ -411,7 +433,8 @@ test("moves selection actions into session top bar while preserving fallback", a
   assert.match(chatWindowSource, /onSelectionToolbarChange\?: \(actions: SelectionToolbarActions \| null\) => void/);
   assert.match(chatWindowSource, /!onSelectionToolbarChange && selectionTooltip/);
   assert.match(chatWindowSource, /onSelectionToolbarChange\(selectionTooltip \?/);
-  assert.match(appShellSource, /const \[selectionToolbar, setSelectionToolbar\]/);
+  const appShellSidekickSource = await readFile(new URL("./app-shell-sidekick.tsx", import.meta.url), "utf8");
+  assert.match(appShellSidekickSource, /const \[selectionToolbar, setSelectionToolbar\]/);
   assert.match(appShellSource, /onSelectionToolbarChange=\{topBarSessionId \? handleSelectionToolbarChange : undefined\}/);
   const topBarStart = appShellSource.indexOf("const sessionTopBar");
   const topBarEnd = appShellSource.indexOf("const chatWindowContent", topBarStart);

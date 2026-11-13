@@ -1,4 +1,5 @@
 import type { JsonAgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { withoutMessageSignatures } from "./message-signatures.ts";
 
 export interface AgentEventLike {
   type: string;
@@ -178,6 +179,18 @@ export function isSystemMessageEvent(event: AgentEventLike): boolean {
     && event.message.role === "system";
 }
 
+function projectMessageEvent(event: AgentEventLike): AgentEventLike {
+  if (!isObject(event.message)) return event;
+  const message = event.message;
+  if (event.type === "message_start" && message.role !== "assistant" && message.role !== "custom") {
+    return { ...event, message: { role: message.role } };
+  }
+  if (message.role === "assistant") {
+    return { ...event, message: withoutMessageSignatures(message) };
+  }
+  return event;
+}
+
 /** Apply pi-web's event filters plus Pi 0.84's message_update projection. */
 export function toClientAgentEvent(
   event: AgentEventLike,
@@ -211,6 +224,10 @@ export function toClientAgentEvent(
       type: "message_update",
       assistantMessageEvent: metadata ? { ...deltaEvent, ...metadata } : deltaEvent,
     } as ClientMessageUpdateEvent;
+  }
+
+  if (event.type === "message_start" || event.type === "message_end") {
+    return projectMessageEvent(event);
   }
 
   if (event.type === "agent_end") {

@@ -10,7 +10,7 @@ const messageSources = await Promise.all([
   readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8"),
   readFile(new URL("../lib/i18n/messages/zh-TW.ts", import.meta.url), "utf8"),
 ]);
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true, jsx: true });
+const jiti = createJiti(import.meta.url, { fsCache: false, tsconfigPaths: true, jsx: { runtime: "automatic" } });
 const { WORKTREE_GRAPH_GEOMETRY, getWorktreeGraphMarkerLeft } = await jiti.import("./WorktreeGraphOverlay.tsx");
 const { worktreeNeedsAttention } = await jiti.import("../lib/worktree-graph-types.ts");
 

@@ -29,16 +29,22 @@ function harness() {
   const messages = [], commands = [], restored = [], actions = [], notices = [], completions = [];
   let unconfirmed = [];
   const noop = () => {};
+  const streamState = { isStreaming: false };
   const context = {
     session: { id: "session" }, isNew: false, newSessionCwd: null, newSessionModel: null,
     editEntryId: null, composerDraftKey: "draft",
+    historyDraftKey: (sid, peer) => ({ kind: "history", sessionId: sid, peer: peer ?? null }),
+    sessionDraftKey: (sid, peer) => ({ kind: "session", sessionId: sid, peer: peer ?? null }),
+    pendingHistoryEdits: new Map(), cacheKeyForSession: sid => sid, getDraft: () => null, setEdit: noop,
     sessionStatePendingRef: ref(false), agentRunningRef: ref(false), bashRunningRef: ref(false), activeToolIdsRef: ref(new Set()), toolEventRevisionRef: ref(0),
-    isCompacting: false, streamState: { isStreaming: false }, localCompactionPendingRef: ref(false),
+    isCompacting: false, streamState, streamingStore: { getState: () => streamState }, localCompactionPendingRef: ref(false),
     promptRunIdRef: ref(0), stateRunRevisionRef: ref(0), rpcPromptPendingRef: ref(false),
     promptDeliveriesRef: ref(new Map()), promptCompletionDeduperRef: ref({ claim: () => true }),
     setUnconfirmedPrompts: update => { unconfirmed = update(unconfirmed); }, onAgentEnd: () => completions.push("completed"),
     sessionHookMountedRef: ref(true), sessionIdRef: ref("session"), branchScopeRef: ref("local:session"),
+    branchRef: ref({ state: { runtimeLeafId: "old-entry" } }),
     remotePeerRef: ref(null), sdkAgentActiveRef: ref(false), currentAgentRunIdRef: ref(null),
+    executeBashRef: ref(async (command, excluded) => actions.push(["bash", command, excluded])),
     sessionRunningRef: ref(false), sessionSettlementGenerationRef: ref(0),
     pendingScrollToUserRef: ref(false), pendingSessionLoadRef: ref(null),
     queuedDraftProjectionRef: ref({ generation: 0 }),
@@ -54,7 +60,7 @@ function harness() {
     ensureEventsConnected: () => ready.promise,
     sendAgentCommandR: async (_sid, command) => {
       commands.push(command);
-      if (command.type === "prompt" || command.type === "retry_continue") { posting.resolve(); await accepted.promise; }
+      if (command.type === "prompt" || command.type === "edit_history" || command.type === "retry_continue") { posting.resolve(); await accepted.promise; }
     },
     loadAgentState: async () => ({ running: true, state: { isStreaming: false, isPromptRunning: false } }),
     loadSession: async () => {}, loadTools: noop, refreshSessionCost: async () => {},
@@ -216,6 +222,42 @@ test("an ambiguous POST failure leaves local ownership without replaying the pro
   actual("handleAgentEvent", c)({ type: "prompt_done", clientMessageId: "client-message" });
   assert.equal(h.unconfirmed.length, 0);
   assert.equal(h.completions.length, 1);
+});
+
+test("a cancelled historical edit reuses its pending identity instead of running shell", async () => {
+  const h = harness(), c = h.context;
+  c.pendingHistoryEdits.set("session", { entryId: "old-entry", targetLeafId: "old-entry", clientMessageId: "client-message" });
+  c.getDraft = () => ({ historyEdit: { entryId: "old-entry", clientMessageId: "client-message" } });
+  const pending = actual("handleSend", c)("!echo test");
+  h.ready.resolve();
+  h.accepted.resolve();
+  await pending;
+  assert.equal(h.commands[0].type, "edit_history");
+  assert.equal(h.commands[0].targetEntryId, "old-entry");
+});
+
+test("an ambiguous historical edit keeps the identity without replaying", async () => {
+  const h = harness(), c = h.context;
+  c.pendingHistoryEdits.set("session", { entryId: "old-entry", targetLeafId: "old-entry", clientMessageId: "client-message" });
+  c.sendAgentCommandR = async (_sid, command) => { h.commands.push(command); throw new Error("transport lost"); };
+  const pending = actual("handleSend", c)("edited input");
+  h.ready.resolve(); await pending;
+  assert.equal(h.commands.length, 1);
+  assert.equal(h.commands[0].type, "edit_history");
+  assert.equal(h.restored.length, 1);
+  assert.equal(h.unconfirmed.length, 1);
+  assert.equal(c.pendingHistoryEdits.get("session").clientMessageId, "client-message");
+});
+
+test("historical edit aborts when its session or peer scope changes", async () => {
+  const h = harness(), c = h.context;
+  c.pendingHistoryEdits.set("session", { entryId: "old-entry", targetLeafId: "old-entry", clientMessageId: "client-message" });
+  const pending = actual("handleSend", c)("edited input");
+  c.remotePeerRef.current = "other-peer";
+  c.branchScopeRef.current = "other-peer:session";
+  h.ready.resolve(); await pending;
+  assert.equal(h.commands.length, 0);
+  assert.equal(h.completions.length, 0);
 });
 
 test("a definite prompt rejection restores the draft and releases local ownership", async () => {

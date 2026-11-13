@@ -3,7 +3,7 @@ const { dirname, join } = require("node:path");
 const { readFileSync, writeFileSync } = require("node:fs");
 
 const PACKAGE_NAME = "@earendil-works/pi-coding-agent";
-const SUPPORTED_VERSIONS = new Set(["1.2.0", "1.4.0"]);
+const SUPPORTED_VERSIONS = new Set(["1.2.0", "1.4.0", "1.5.0"]);
 const PATCH_MARKER_PREFIX = "pi-web-volume-access:";
 
 // macOS APFS volumes with ownership disabled can return EPERM from access(2)

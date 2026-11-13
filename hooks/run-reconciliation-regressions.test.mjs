@@ -9,7 +9,7 @@ function context() {
  return { useCallback: fn => fn, sessionHookMountedRef: ref(true), sessionIdRef: ref('session'),
   queuedDraftProjectionRef: ref({ generation: 0 }), promptRunIdRef: ref(1), stateRunRevisionRef: ref(1), currentAgentRunIdRef: ref('run-A'),
   branchScopeRef: ref('scope'), remotePeerRef: ref(null), agentRunningRef: ref(true), bashRunningRef: ref(false), activeToolIdsRef: ref(new Set()), toolEventRevisionRef: ref(0),
-  isCompacting: false, streamState: { isStreaming: false }, localCompactionPendingRef: ref(false), setIsCompacting: () => {},
+  isCompacting: false, streamState: { isStreaming: false }, streamingStore: { getState() { return this.state; }, state: { isStreaming: false } }, localCompactionPendingRef: ref(false), setIsCompacting: () => {},
   rpcPromptPendingRef: ref(true), sdkAgentActiveRef: ref(true), optimisticUserMessageKeyRef: ref('draft'), optimisticUserMessageRef: ref({ text: 'draft' }),
   AbortController, window: { setTimeout, clearTimeout }, apiPath: x => x, loadSession: async () => {}, refreshSessionCost: async () => {}, syncQueuedDrafts: () => {}, syncQueuedDraftResponse: () => {},
   notifyPromptStage: () => {}, scheduleEventStreamClose: () => {}, settleUiStage: () => { throw Error('stale UI settled'); } };

@@ -13,6 +13,8 @@ import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security"
 import type { ReaderControlReceipt } from "@/lib/reader-control-receipts";
 import { validateSessionToolSelection } from "@/lib/session-tool-selection";
 import { readerCreateFailureDiagnostic } from "@/lib/reader-create-diagnostics";
+import { appendWorktreeBinding, type WorktreeBindingDraft } from "@/lib/worktree-bindings";
+import { listWorktrees, resolveProject } from "@/lib/worktree";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -29,6 +31,27 @@ function parseFastMode(value: unknown): FastModeSelection | undefined {
   const parsed = parseFastModeSelection(value);
   if (parsed) return parsed;
   throw new Error(`Invalid Fast mode: ${String(value)}`);
+}
+
+async function parseWorktreeBinding(value: unknown, cwd: string): Promise<WorktreeBindingDraft | undefined> {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid worktree binding");
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.projectRoot !== "string" || typeof candidate.worktreePath !== "string") {
+    throw new Error("Invalid worktree binding paths");
+  }
+  const relation = candidate.relation === undefined ? "task-root" : candidate.relation;
+  if (relation !== "creator" && relation !== "task-root") throw new Error("Invalid worktree binding relation");
+  const project = await resolveProject(cwd);
+  const worktrees = await listWorktrees(cwd);
+  const normalize = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+  const projectRoot = normalize(project.projectRoot);
+  const requestedRoot = normalize(candidate.projectRoot);
+  const requestedPath = normalize(candidate.worktreePath);
+  if (projectRoot !== requestedRoot || !worktrees.some((worktree) => normalize(worktree.path) === requestedPath)) {
+    throw new Error("Worktree binding does not belong to the session project");
+  }
+  return { projectRoot, worktreePath: requestedPath, relation };
 }
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
 // Spawns a brand-new pi session. Most calls immediately send the first command;
@@ -71,7 +94,7 @@ async function createSession(
   let promptAccepted = false;
   let failureStage: "request_revalidation" | "runtime_start" | "binding_persistence" | "runtime_setup" | "runtime_state_read" | "initial_command" = "request_revalidation";
   try {
-    const { cwd, contextSourceSessionId: rawContextSourceSessionId, ...command } = body;
+    const { cwd, contextSourceSessionId: rawContextSourceSessionId, worktreeBinding: rawWorktreeBinding, ...command } = body;
     commandType = typeof command.type === "string" ? command.type : undefined;
 
     if (!cwd || typeof cwd !== "string") {
@@ -90,6 +113,7 @@ async function createSession(
           : {}),
       }, { status: 400 });
     }
+    const worktreeBinding = await parseWorktreeBinding(rawWorktreeBinding, cwd);
 
     const contextSourceSessionId = typeof rawContextSourceSessionId === "string"
       ? rawContextSourceSessionId.trim()
@@ -135,6 +159,7 @@ async function createSession(
     failureStage = "runtime_start";
     const tempKey = `__new__${randomUUID()}`;
     const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, runtimeOptions);
+    if (worktreeBinding) appendWorktreeBinding(session.inner.sessionManager, worktreeBinding);
 
     // Persist the real identity before any later get_state/configuration RPC.
     // Failure after this point remains unknown and cannot create a replacement.

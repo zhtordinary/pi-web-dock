@@ -30,7 +30,8 @@ The server does not add authentication of its own; it calls the same HTTP API as
 
 ## Capabilities
 
-- Tools: `reader_list_sessions`, `reader_get_session_metadata`, `reader_read_tail`, `reader_read_live_events`, `reader_session_control`, `reader_read_control_plane`, `reader_write_control_plane`, `reader_get_control_plane_receipt`, and `reader_get_session_control_receipt`.
+- Tools: `reader_list_sessions`, `reader_get_session_metadata`, `reader_read_tail`, `reader_read_live_events`, `reader_get_stream_diagnostics`, `reader_session_control`, `reader_read_control_plane`, `reader_write_control_plane`, `reader_get_control_plane_receipt`, and `reader_get_session_control_receipt`.
+- `reader_get_stream_diagnostics` is read-only and returns only in-process connection counters for an exact device. It excludes IP, User-Agent, request metadata, and event content, and uses Reader's `/api/remote` proxy for remote devices.
 - Resources: `reader://ui-requests/{deviceId}/{sessionId}` exposes pending extension UI requests; subscribed clients receive `notifications/resources/updated`. Tool-only clients can use `reader_read_live_events` with `wait_ui_requests` for a bounded wait.
 - Every result carries `schemaVersion`, `observedAt`, and explicit coverage and freshness fields.
 - Control is dry-run by default. A real write needs `confirm`, a `confirmationReason`, and an `idempotencyKey`, and Pi Web Dock still applies its own authorization checks. The server never retries a write whose outcome is unknown.

@@ -51,12 +51,11 @@ test("a historical error alone cannot invent an unattended countdown", () => {
   try { assert.notEqual(f.flush().continueUi.kind,"running"); assert.equal(f.intervals.size,0); }
   finally {f.dispose();}
 });
-test("opening a historical context overflow cannot start compaction before explicit recovery", () => {
+test("a context overflow automatically compacts before continuation", () => {
   const f=fixture([{role:"assistant",stopReason:"error",errorMessage:"maximum context length exceeded",content:[]}]);
   let compact=0, submitted=0;
   try {
     f.change({onCompact(){compact++;},onRetryContinue(){submitted++;},onSendContinue(){submitted++;}});
-    assert.equal(compact,0); assert.equal(submitted,0); assert.equal(f.intervals.size,0);
-    f.flush().triggerContinue(); assert.equal(submitted,1);
+    assert.equal(compact,1); assert.equal(submitted,0); assert.equal(f.intervals.size,0);
   } finally {f.dispose();}
 });

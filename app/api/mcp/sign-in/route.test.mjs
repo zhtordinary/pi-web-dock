@@ -17,19 +17,19 @@ const agentDir = join(root, "agent");
 const cwd = join(root, "project");
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousDisable = process.env.PI_WEB_DISABLE_MCP;
+const previousPolicy = process.env.PI_WEB_FILE_PERMISSIONS_FILE;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+process.env.PI_WEB_FILE_PERMISSIONS_FILE = join(root, "file-permissions.json");
 delete process.env.PI_WEB_DISABLE_MCP;
 await mkdir(agentDir, { recursive: true });
 await mkdir(join(cwd, ".pi"), { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 const { clearMcpStatuses } = await jiti.import("../../../../lib/mcp-status.ts");
 const { cancelMcpSignIn, clearMcpSignIns, mcpSignInKey } = await jiti.import("../../../../lib/mcp-sign-in.ts");
 const { POST: START } = await jiti.import("./route.ts");
 const flowRoute = await jiti.import("./[flowId]/route.ts");
 const mcpRoute = await jiti.import("../route.ts");
-allowFileRoot(cwd);
 
 const fake = await startFakeOAuthServer();
 
@@ -40,6 +40,8 @@ after(async () => {
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   if (previousDisable === undefined) delete process.env.PI_WEB_DISABLE_MCP;
   else process.env.PI_WEB_DISABLE_MCP = previousDisable;
+  if (previousPolicy === undefined) delete process.env.PI_WEB_FILE_PERMISSIONS_FILE;
+  else process.env.PI_WEB_FILE_PERMISSIONS_FILE = previousPolicy;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -228,8 +230,8 @@ test("an untrusted project's server is never contacted; a trusted one's is", asy
   });
   store.set(cwd, false);
   assert.equal((await start({ scope: "project", name: "repo", cwd })).status, 403);
-  // A folder outside the allowed roots is refused like any cwd.
-  assert.equal((await start({ scope: "project", name: "repo", cwd: join(root, "elsewhere") })).body.reason, "cwd-denied");
+  // A nonexistent project is refused before any server is contacted.
+  assert.equal((await start({ scope: "project", name: "repo", cwd: join(root, "elsewhere") })).body.reason, "cwd-not-directory");
   assert.equal(existsSync(marker), false, "the project's !command header never ran");
 
   store.set(cwd, true);

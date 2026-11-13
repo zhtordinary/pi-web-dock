@@ -62,6 +62,13 @@ test("uses a single unified adaptive scrollable body with justified typography",
   assert.match(cssSource, /\.extension-dialog-surface \[data-extension-option\] \.markdown-body ol[\s\S]*?list-style: none/);
 });
 
+test("identifies Side Ask-owned permission dialogs and custom panels", () => {
+  assert.equal((dialogSource.match(/request\.sideAskRunId/g) ?? []).length, 3);
+  assert.match(dialogSource, /aria-label=\{`\$\{request\.sideAskRunId/);
+  assert.match(dialogSource, /request\.sideAskLabel/);
+  assert.match(customSource, /request\.sideAskRunId[\s\S]*?request\.sideAskLabel/);
+});
+
 test("resets collapse state when a new extension request arrives", () => {
   assert.match(source, /<ExtensionDialog\s+key=\{extensionDialog\.id\}/);
   assert.match(source, /<ExtensionCustomPanel\s+key=\{extensionCustomUi\.id\}/);

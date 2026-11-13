@@ -29,7 +29,7 @@ function sanitizeExternalUrl(target: string | undefined): string | null {
     return null;
   }
 }
-import { useState, useEffect, useCallback, useId, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useRef, type DragEvent, type HTMLAttributes } from "react";
 import { Bot, Eye, EyeOff, GitFork, ImagePlus, Minimize2, X, ExternalLink } from "lucide-react";
 import { ModelRoutingConfig } from "./ModelRoutingConfig";
 import { PluginModelConfig } from "./PluginModelConfig";
@@ -40,10 +40,11 @@ import { useI18n } from "@/hooks/useI18n";
 import { ImageGenSections } from "./ImageGenConfig";
 import { EnabledModelsProviderSwitch, EnabledModelsProviderSwitchNote, EnabledModelsSection, useEnabledModels, type EnabledModelsController } from "./EnabledModelsSection";
 import { OAuthPastePanel } from "./OAuthPastePanel";
-import { ConfigButton, ConfigDetailHeader, ConfigDetailHeaderInfo, ConfigDetailActions } from "./SettingsUi";
+import { activateConfigRowOnKeyDown, ConfigButton, ConfigDetailHeader, ConfigDetailHeaderInfo, ConfigDetailActions, useSettingsDetailNavigation } from "./SettingsUi";
 import { ProviderIcon } from "./ProviderIcon";
 import { ProviderUsageSummary } from "./ProviderUsageSummary";
 import { notifyEmbeddedModalState } from "@/lib/embedded-modal";
+import { listenForStackedDialogEscape } from "@/lib/stacked-dialog";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
 import {
   COLLAPSED_PROVIDERS_CHANGED_EVENT,
@@ -57,7 +58,12 @@ import {
 import { isFastModeDefault, isFastModeSupported, setFastModeDefault } from "@/lib/fast-mode";
 import { discoveredModelToConfig, modelDiscoveryKey, type DiscoveredModel, type ModelCost } from "@/lib/model-discovery";
 import {
+  copyModelEntry,
+  moveModelEntry,
+  moveProviderEntry,
+  modelDropIndex,
   renameProviderEntry,
+  sortModelEntries,
   hasOwnCompat,
   readApiJson,
   resolveSystemPromptRole,
@@ -66,6 +72,7 @@ import {
   setSystemPromptRole,
   updateHeaderRow,
   type HeaderRow,
+  type ModelOrderChange,
   type SystemPromptRoleSelection,
 } from "./models-config-helpers";
 import { normalizeHiddenModelReferences, toggleHiddenModelReference } from "@/lib/model-visibility";
@@ -1491,9 +1498,9 @@ function OAuthDetail({ provider, peer, onRefresh, enabledModels, contextSettings
     };
     es.onerror = () => {
       es.close();
-      setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: "Connection lost" });
+      setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: t("models.connectionLost") });
     };
-  }, [peer, provider.id, onRefresh]);
+  }, [peer, provider.id, onRefresh, t]);
 
   const handleLogout = useCallback(async () => {
     await fetch(apiFor(peer, `auth/logout/${encodeURIComponent(provider.id)}`), { method: "POST" });
@@ -1503,7 +1510,7 @@ function OAuthDetail({ provider, peer, onRefresh, enabledModels, contextSettings
 
   const submitCode = useCallback(async (token: string, code: string) => {
     if (!code.trim()) return;
-    setLoginState({ phase: "progress", message: "Verifying…" });
+    setLoginState({ phase: "progress", message: t("models.verifying") });
     try {
       const res = await fetch(apiFor(peer, `auth/login/${encodeURIComponent(provider.id)}`), {
         method: "POST",
@@ -1512,18 +1519,18 @@ function OAuthDetail({ provider, peer, onRefresh, enabledModels, contextSettings
       });
       if (!res.ok) {
         const d = await readApiJson<{ error?: string }>(res).catch(() => null);
-        setLoginState({ phase: "error", message: d?.error ?? `Server error ${res.status}` });
+        setLoginState({ phase: "error", message: d?.error ?? t("models.serverError", { status: res.status }) });
         return;
       }
       setInputValue("");
       // Success path: SSE stream will emit "success" and update state
     } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
+      setLoginState({ phase: "error", message: e instanceof Error ? e.message : t("i18n.networkError") });
     }
-  }, [peer, provider.id]);
+  }, [peer, provider.id, t]);
 
   const submitSelection = useCallback(async (token: string, value: string) => {
-    setLoginState({ phase: "progress", message: "Continuing…" });
+    setLoginState({ phase: "progress", message: t("i18n.continuing") });
     try {
       const res = await fetch(apiFor(peer, `auth/login/${encodeURIComponent(provider.id)}`), {
         method: "POST",
@@ -1532,35 +1539,68 @@ function OAuthDetail({ provider, peer, onRefresh, enabledModels, contextSettings
       });
       if (!res.ok) {
         const d = await readApiJson<{ error?: string }>(res).catch(() => null);
-        setLoginState({ phase: "error", message: d?.error ?? `Server error ${res.status}` });
+        setLoginState({ phase: "error", message: d?.error ?? t("models.serverError", { status: res.status }) });
       }
     } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : "Network error" });
+      setLoginState({ phase: "error", message: e instanceof Error ? e.message : t("i18n.networkError") });
     }
-  }, [peer, provider.id]);
+  }, [peer, provider.id, t]);
 
   const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
     loginState.phase === "auth" || loginState.phase === "device_code" ||
     loginState.phase === "prompt" || loginState.phase === "select";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-           <SectionTitle>{t("i18n.subscription")}</SectionTitle>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.loggedIn ? "#4ade80" : "var(--border)", display: "inline-block" }} />
-          <span style={{ fontSize: 11, color: provider.loggedIn ? "#4ade80" : "var(--text-dim)" }}>
-             {provider.loggedIn ? t("i18n.connected") : t("i18n.notConnected")}
-          </span>
-        </div>
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", gap: provider.loggedIn && loginState.phase === "idle" ? 0 : 16 }}>
+      <ConfigDetailHeader>
+        <ConfigDetailHeaderInfo>
+          <SectionTitle>{t("i18n.subscription")}</SectionTitle>
+        </ConfigDetailHeaderInfo>
+        <ConfigDetailActions>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.loggedIn ? "#4ade80" : "var(--border)", display: "inline-block" }} />
+            <span style={{ fontSize: 11, color: provider.loggedIn ? "#4ade80" : "var(--text-dim)" }}>
+              {provider.loggedIn ? t("i18n.connected") : t("i18n.notConnected")}
+            </span>
+          </div>
+          {isWorking ? (
+            <ConfigButton
+              size="small"
+              onClick={() => { eventSourceRef.current?.close(); setLoginState({ phase: "idle" }); }}
+            >
+              {t("i18n.cancel")}
+            </ConfigButton>
+          ) : (
+            <>
+              <ConfigButton
+                variant="primary"
+                size="small"
+                onClick={handleLogin}
+              >
+                {provider.loggedIn ? t("i18n.relogin") : t("i18n.login")}
+              </ConfigButton>
+              {provider.loggedIn && (
+                <ConfigButton
+                  variant="danger"
+                  size="small"
+                  onClick={handleLogout}
+                >
+                  {t("i18n.disconnect")}
+                </ConfigButton>
+              )}
+            </>
+          )}
+        </ConfigDetailActions>
+      </ConfigDetailHeader>
 
       {/* Status */}
-      <div style={{ minHeight: 48 }}>
+      <div style={{ minHeight: provider.loggedIn && loginState.phase === "idle" ? 0 : 48 }}>
         {loginState.phase === "idle" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-             {provider.loggedIn ? "Already connected. You can re-login or disconnect." : `Connect your ${provider.name} account.`}
-          </p>
+          !provider.loggedIn && (
+            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+              Connect your {provider.name} account.
+            </p>
+          )
         )}
         {loginState.phase === "connecting" && (
             <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>{t("i18n.openingBrowser")}</p>
@@ -1617,7 +1657,7 @@ function OAuthDetail({ provider, peer, onRefresh, enabledModels, contextSettings
               <a href={loginState.verificationUri} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
                 {loginState.verificationUri}
               </a>
-              {loginState.expiresInSeconds ? ` Expires in ${Math.ceil(loginState.expiresInSeconds / 60)} minutes.` : ""}
+              {loginState.expiresInSeconds ? ` ${t("models.deviceCodeExpires", { minutes: Math.ceil(loginState.expiresInSeconds / 60) })}` : ""}
             </p>
           </div>
         )}
@@ -1634,31 +1674,6 @@ function OAuthDetail({ provider, peer, onRefresh, enabledModels, contextSettings
 
       <ProviderUsageSummary providerId={provider.id} enabled={provider.loggedIn} peer={peer} />
 
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 8 }}>
-        {isWorking ? (
-          <ConfigButton size="small"
-            onClick={() => { eventSourceRef.current?.close(); setLoginState({ phase: "idle" }); }}
-          >
-             {t("i18n.cancel")}
-          </ConfigButton>
-        ) : (
-          <>
-            <ConfigButton variant="primary" size="small"
-              onClick={handleLogin}
-            >
-               {provider.loggedIn ? t("i18n.relogin") : t("i18n.login")}
-            </ConfigButton>
-            {provider.loggedIn && (
-              <ConfigButton variant="danger" size="small"
-                onClick={handleLogout}
-              >
-                 {t("i18n.disconnect")}
-              </ConfigButton>
-            )}
-          </>
-        )}
-      </div>
       {provider.loggedIn && (
         <EnabledModelsSection providerId={provider.id} controller={enabledModels} peer={peer} contextSettings={contextSettings} />
       )}
@@ -1786,7 +1801,7 @@ function ApiKeyDetail({ provider, peer, onRefresh, enabledModels, contextSetting
             value={apiKey}
             onChange={setApiKey}
             onKeyDown={(e) => { if (e.key === "Enter" && apiKey.trim()) handleSave(); }}
-            placeholder={provider.configured ? "Enter new key to replace…" : "sk-…"}
+            placeholder={provider.configured ? t("models.replaceApiKey") : "sk-…"}
             style={{ flex: 1 }}
             autoComplete="off"
             spellCheck={false}
@@ -1855,6 +1870,7 @@ function AddProviderPicker({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setTimeout(() => inputRef.current?.focus(), 30); }, []);
+  useEffect(() => listenForStackedDialogEscape(document, onClose), [onClose]);
 
   const q = search.trim().toLowerCase();
 
@@ -1882,6 +1898,9 @@ function AddProviderPicker({
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("i18n.addProvider")}
       style={{ position: "fixed", inset: 0, zIndex: 1100, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
@@ -1895,7 +1914,6 @@ function AddProviderPicker({
             ref={inputRef}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
              placeholder={t("i18n.searchProviders")}
             style={{ flex: 1, background: "none", border: "none", outline: "none", color: "var(--text)", fontSize: 13, boxSizing: "border-box" }}
           />
@@ -1978,6 +1996,7 @@ type ModelConfigTab = "main" | "gen" | "routing" | "plugins";
 export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded = false, onOpenFile, controllerRef }: { onClose: () => void; sessionFile?: string; cwd?: string; remotePeer?: string; embedded?: boolean; onOpenFile?: (filePath: string) => void; controllerRef?: React.MutableRefObject<SettingsPanelController | null> }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
+  const navigation = useSettingsDetailNavigation();
   const remotePeerRef = useRef(remotePeer);
   remotePeerRef.current = remotePeer;
   const api = (path: string) => apiFor(remotePeerRef.current, path);
@@ -2004,10 +2023,16 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
   const enabledModels = useEnabledModels(cwd ?? null, remotePeer);
   const { refresh: refreshEnabledModels } = enabledModels;
   const savedProvidersRef = useRef<Record<string, ProviderEntry> | null>(null);
+  const draggedProviderRef = useRef<string | null>(null);
+  const draggedModelRef = useRef<{ providerName: string; index: number } | null>(null);
+  const [providerDrop, setProviderDrop] = useState<{ name: string; after: boolean } | null>(null);
+  const [modelDrop, setModelDrop] = useState<{ providerName: string; index: number; after: boolean } | null>(null);
+  const [modelContextMenu, setModelContextMenu] = useState<{ providerName: string; index: number; x: number; y: number } | null>(null);
   const [providerNameDraft, setProviderNameDraft] = useState<{ provider: string; name: string } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
   const [thinkingLevels, setThinkingLevels] = useState<Record<string, string[]>>({});
+  const [availableModels, setAvailableModels] = useState<NonNullable<ModelsDiscoveryResponse["modelList"]>>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -2018,6 +2043,30 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
   const [collapsedProvidersReady, setCollapsedProvidersReady] = useState(false);
   const [showHiddenModels, setShowHiddenModels] = useState(false);
   const [showHiddenProviders, setShowHiddenProviders] = useState(false);
+
+  useEffect(() => {
+    if (!modelContextMenu) return;
+    const close = (event?: Event) => {
+      if (event?.target instanceof Element && event.target.closest("[data-model-context-menu]")) return;
+      setModelContextMenu(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setModelContextMenu(null);
+    };
+    document.addEventListener("pointerdown", close, true);
+    document.addEventListener("contextmenu", close, true);
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", close);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      document.removeEventListener("contextmenu", close, true);
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", close);
+    };
+  }, [modelContextMenu]);
+
   // 单模型隐藏和完整模型配置共用同一状态，避免“保存”覆盖隐藏清单。
   const hiddenModels = config.hiddenModels ?? [];
   const hiddenModelsRef = useRef<string[]>([]);
@@ -2147,19 +2196,23 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
   }, [loadAuthProviders, refreshEnabledModels]);
 
   useEffect(() => {
+    if (!visitedModelTabs.has("routing")) return;
     let cancelled = false;
+    setAvailableModels([]);
     fetch(apiFor(remotePeer, "models"))
       .then((response) => readApiJson<ModelsDiscoveryResponse>(response))
       .then((data) => {
         if (cancelled) return;
         setThinkingLevels(data.thinkingLevels ?? {});
+        setAvailableModels(data.modelList ?? []);
       })
       .catch(() => {
         if (cancelled) return;
         setThinkingLevels({});
+        setAvailableModels([]);
       });
     return () => { cancelled = true; };
-  }, [remotePeer]);
+  }, [remotePeer, visitedModelTabs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2192,9 +2245,9 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    refreshAuthProviders();
+    void loadAuthProviders();
     return () => { cancelled = true; };
-  }, [refreshAuthProviders, remotePeer]);
+  }, [loadAuthProviders, remotePeer]);
 
   // An overrides-only entry belongs to its managed provider, not a duplicate custom provider.
   useEffect(() => {
@@ -2290,7 +2343,8 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
       setSelection(remaining.length > 0 ? { type: "provider", name: remaining[0] } : null);
       return prev;
     });
-  }, []);
+    navigation?.closeDetail();
+  }, [navigation]);
 
   const addModel = useCallback((providerName: string) => {
     setConfig((prev) => {
@@ -2351,6 +2405,141 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
     });
   }, []);
 
+  const applyModelOrder = useCallback((change: ModelOrderChange<ModelsJson> | null) => {
+    if (!change) return;
+    setConfig(change.config);
+    setSavedOk(false);
+    setSaveError(null);
+    setSelection((current) => current?.type === "model" && current.providerName === change.providerName
+      ? { ...current, index: change.order.indexOf(current.index) }
+      : current);
+  }, []);
+
+  const moveProvider = useCallback((fromName: string, targetName: string, after: boolean) => {
+    if (saving || loadError) return;
+    const change = moveProviderEntry(config, fromName, targetName, after);
+    if (!change) return;
+    setConfig(change.config);
+    setSavedOk(false);
+    setSaveError(null);
+  }, [config, loadError, saving]);
+
+  const providerDragProps = (name: string): HTMLAttributes<HTMLDivElement> => {
+    const target = (event: DragEvent<HTMLDivElement>) => {
+      const dragged = draggedProviderRef.current;
+      if (!dragged || dragged === name) return null;
+      const rect = event.currentTarget.getBoundingClientRect();
+      return { after: event.clientY >= rect.top + rect.height / 2 };
+    };
+    const endDrag = () => {
+      draggedProviderRef.current = null;
+      setProviderDrop(null);
+    };
+    return {
+      draggable: !saving && !loadError,
+      onDragStart: (event) => {
+        draggedProviderRef.current = name;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", name);
+      },
+      onDragOver: (event) => {
+        const drop = target(event);
+        if (!drop) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        setProviderDrop((previous) => previous?.name === name && previous.after === drop.after ? previous : { name, ...drop });
+      },
+      onDragLeave: (event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        setProviderDrop((previous) => previous?.name === name ? null : previous);
+      },
+      onDrop: (event) => {
+        const drop = target(event);
+        const dragged = draggedProviderRef.current;
+        if (!drop || !dragged) return;
+        event.preventDefault();
+        moveProvider(dragged, name, drop.after);
+        endDrag();
+      },
+      onDragEnd: endDrag,
+    };
+  };
+
+  const moveModel = useCallback((providerName: string, from: number, to: number) => {
+    if (saving || loadError) return;
+    applyModelOrder(moveModelEntry(config, providerName, from, to));
+  }, [applyModelOrder, config, loadError, saving]);
+
+  const copyModelToProvider = useCallback((sourceProviderName: string, sourceIndex: number) => {
+    if (saving || loadError) return;
+    const change = copyModelEntry(config, sourceProviderName, sourceIndex, sourceProviderName);
+    if (!change) return;
+    const copied = change.config.providers?.[change.targetProviderName]?.models?.[change.targetIndex];
+    setConfig(change.config);
+    setSavedOk(false);
+    setSaveError(null);
+    setModelContextMenu(null);
+    setSelection({ type: "model", providerName: change.targetProviderName, index: change.targetIndex });
+    if (copied) navigation?.openDetail(copied.name?.trim() || copied.id || t("i18n.newModel"));
+  }, [config, loadError, navigation, saving, t]);
+
+  const openModelContextMenu = (providerName: string, index: number, x: number, y: number) => {
+    setModelContextMenu({ providerName, index, x, y });
+  };
+
+  const modelDragProps = (providerName: string, index: number): HTMLAttributes<HTMLDivElement> => {
+    const target = (event: DragEvent<HTMLDivElement>) => {
+      const dragged = draggedModelRef.current;
+      if (!dragged || dragged.providerName !== providerName) return null;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const after = event.clientY >= rect.top + rect.height / 2;
+      return { from: dragged.index, to: modelDropIndex(dragged.index, index, after), after };
+    };
+    const endDrag = () => {
+      draggedModelRef.current = null;
+      setModelDrop(null);
+    };
+    return {
+      draggable: !saving && !loadError,
+      onDragStart: (event) => {
+        draggedModelRef.current = { providerName, index };
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", String(index));
+      },
+      onDragOver: (event) => {
+        const drop = target(event);
+        if (!drop) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        const next = drop.to === drop.from ? null : { providerName, index, after: drop.after };
+        setModelDrop((previous) => {
+          const unchanged = previous !== null && next !== null
+            && previous.providerName === next.providerName
+            && previous.index === next.index
+            && previous.after === next.after;
+          return unchanged ? previous : next;
+        });
+      },
+      onDragLeave: (event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        setModelDrop((previous) => previous?.providerName === providerName && previous.index === index ? null : previous);
+      },
+      onDrop: (event) => {
+        const drop = target(event);
+        if (!drop) return;
+        event.preventDefault();
+        moveModel(providerName, drop.from, drop.to);
+        endDrag();
+      },
+      onDragEnd: endDrag,
+    };
+  };
+
+  const sortModels = useCallback((providerName: string) => {
+    if (saving || loadError) return;
+    applyModelOrder(sortModelEntries(config, providerName));
+  }, [applyModelOrder, config, loadError, saving]);
+
   const removeModel = useCallback((providerName: string, index: number) => {
     setConfig((prev) => {
       const provider = prev.providers?.[providerName] ?? {};
@@ -2359,7 +2548,8 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
       return { ...prev, providers: { ...(prev.providers ?? {}), [providerName]: { ...provider, models: models.length ? models : undefined } } };
     });
     setSelection({ type: "provider", name: providerName });
-  }, []);
+    navigation?.closeDetail();
+  }, [navigation]);
 
   const handleSave = useCallback(async (): Promise<boolean> => {
     if (loading || loadError) {
@@ -2574,6 +2764,57 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
     );
   })();
 
+  const contextModel = modelContextMenu
+    ? config.providers?.[modelContextMenu.providerName]?.models?.[modelContextMenu.index]
+    : undefined;
+  const modelContextMenuElement = modelContextMenu && contextModel ? (
+    <div
+      role="menu"
+      aria-label={t("models.modelActions")}
+      data-model-context-menu="true"
+      onContextMenu={(event) => event.preventDefault()}
+      style={{
+        position: "fixed",
+        left: Math.max(8, Math.min(modelContextMenu.x, window.innerWidth - 240)),
+        top: Math.max(8, Math.min(modelContextMenu.y, window.innerHeight - 52)),
+        minWidth: 232,
+        padding: 4,
+        border: "1px solid var(--border)",
+        borderRadius: 5,
+        background: "var(--bg-panel)",
+        boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+        zIndex: 10001,
+      }}
+    >
+      <button
+        type="button"
+        role="menuitem"
+        disabled={saving || loadError !== null}
+        onClick={() => copyModelToProvider(modelContextMenu.providerName, modelContextMenu.index)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          width: "100%",
+          minHeight: 30,
+          padding: "0 8px",
+          border: 0,
+          borderRadius: 4,
+          background: "transparent",
+          color: "var(--text)",
+          font: "inherit",
+          fontSize: 12,
+          textAlign: "left",
+          cursor: saving || loadError !== null ? "not-allowed" : "pointer",
+          opacity: saving || loadError !== null ? 0.5 : 1,
+        }}
+        onMouseEnter={(event) => { if (!event.currentTarget.disabled) event.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
+      >
+        {t("models.copyModelToProvider")}
+      </button>
+    </div>
+  ) : null;
+
   const modalContent = (
       <div style={{ width: isMobile ? "calc(100vw - 16px)" : (embedded ? "100%" : 860), maxWidth: embedded ? "100%" : "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : (embedded ? "100%" : "78vh"), maxHeight: embedded ? "100%" : "calc(100dvh - 16px)", background: "var(--bg)", border: embedded ? "none" : "1px solid var(--border)", borderRadius: embedded ? 0 : 10, display: "flex", flexDirection: "column", boxShadow: embedded ? "none" : "0 8px 32px rgba(0,0,0,0.18)", overflow: "hidden", flex: embedded ? 1 : undefined }}>
 
@@ -2600,6 +2841,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
                 key={tab.key}
                 type="button"
                 onClick={() => {
+                  if (tab.key !== modelTab) navigation?.closeDetail();
                   setModelTab(tab.key);
                   setVisitedModelTabs((visited) => visited.has(tab.key) ? visited : new Set([...visited, tab.key]));
                 }}
@@ -2659,10 +2901,10 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
 
         {/* Body */}
         {visitedModelTabs.has("main") ? (
-        <div style={{ flex: 1, display: modelTab === "main" ? "flex" : "none", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
+        <div className="settings-phone-split" style={{ flex: 1, display: modelTab === "main" ? "flex" : "none", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
 
           {/* Left: tree */}
-          <div style={{
+          <div className="settings-phone-list" style={{
             width: isMobile ? "100%" : 210,
             maxHeight: isMobile ? "40vh" : undefined,
             borderRight: isMobile ? "none" : "1px solid var(--border)",
@@ -2677,7 +2919,10 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
                 return (
                   <div
                     key={p.id}
-                    onClick={() => setSelection({ type: "oauth", providerId: p.id })}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={activateConfigRowOnKeyDown}
+                    onClick={() => { setSelection({ type: "oauth", providerId: p.id }); navigation?.openDetail(p.name); }}
                     style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", borderRadius: 5, cursor: "pointer", background: isSelected ? "var(--bg-selected)" : "none" }}
                     onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
                     onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "none"; }}
@@ -2705,7 +2950,10 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
                 return (
                   <div
                     key={p.id}
-                    onClick={() => setSelection({ type: "apikey", providerId: p.id })}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={activateConfigRowOnKeyDown}
+                    onClick={() => { setSelection({ type: "apikey", providerId: p.id }); navigation?.openDetail(p.displayName); }}
                     style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", borderRadius: 5, cursor: "pointer", background: isSelected ? "var(--bg-selected)" : "none" }}
                     onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
                     onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "none"; }}
@@ -2737,6 +2985,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
               ) : visibleCustomProviders.map(([pName, pData]) => {
                 const isProviderSelected = selection?.type === "provider" && selection.name === pName;
                 const isProviderCollapsed = collapsedProviders.has(pName);
+                const providerDropTarget = providerDrop?.name === pName ? providerDrop : null;
                 const models = pData.models ?? [];
                 const visibleModels = models
                   .map((model, index) => ({ model, index }))
@@ -2745,8 +2994,12 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
                   <div key={pName} style={{ marginBottom: 2 }}>
                     {/* Provider row */}
                     <div
-                      onClick={() => setSelection({ type: "provider", name: pName })}
-                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 5, cursor: "pointer", background: isProviderSelected ? "var(--bg-selected)" : "none" }}
+                      role="button"
+                      tabIndex={0}
+                      {...providerDragProps(pName)}
+                      onKeyDown={activateConfigRowOnKeyDown}
+                      onClick={() => { setSelection({ type: "provider", name: pName }); navigation?.openDetail(pName); }}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 5, cursor: "pointer", background: isProviderSelected ? "var(--bg-selected)" : "none", boxShadow: providerDropTarget ? `inset 0 ${providerDropTarget.after ? "-2px" : "2px"} 0 var(--accent)` : undefined }}
                       onMouseEnter={(e) => { if (!isProviderSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
                       onMouseLeave={(e) => { if (!isProviderSelected) e.currentTarget.style.background = "none"; }}
                     >
@@ -2774,13 +3027,39 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
 
                     {!isProviderCollapsed && <>
                     {/* Model rows */}
-                    {visibleModels.map(({ model: m, index: i }) => {
+                    {visibleModels.map(({ model: m, index: i }, visibleIndex) => {
                       const isModelSelected = selection?.type === "model" && selection.providerName === pName && selection.index === i;
+                      const drop = modelDrop?.providerName === pName && modelDrop.index === i ? modelDrop : null;
                       return (
                         <div
                           key={i}
-                          onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
-                          style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 8px 5px 26px", borderRadius: 5, cursor: "pointer", background: isModelSelected ? "var(--bg-selected)" : "none" }}
+                          role="button"
+                          tabIndex={0}
+                          aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown ContextMenu"
+                          {...modelDragProps(pName, i)}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            openModelContextMenu(pName, i, event.clientX, event.clientY);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                              event.preventDefault();
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              openModelContextMenu(pName, i, rect.left, rect.bottom);
+                              return;
+                            }
+                            if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+                              const target = visibleModels[visibleIndex + (event.key === "ArrowUp" ? -1 : 1)]?.index;
+                              if (target === undefined) return;
+                              event.preventDefault();
+                              moveModel(pName, i, target);
+                              return;
+                            }
+                            activateConfigRowOnKeyDown(event);
+                          }}
+                          onClick={() => { setSelection({ type: "model", providerName: pName, index: i }); navigation?.openDetail(m.name?.trim() || m.id || t("i18n.newModel")); }}
+                          style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 8px 5px 26px", borderRadius: 5, cursor: "pointer", background: isModelSelected ? "var(--bg-selected)" : "none", boxShadow: drop ? `inset 0 ${drop.after ? "-2px" : "2px"} 0 var(--accent)` : undefined }}
                           onMouseEnter={(e) => { if (!isModelSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
                           onMouseLeave={(e) => { if (!isModelSelected) e.currentTarget.style.background = "none"; }}
                         >
@@ -2795,6 +3074,8 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
                             return (
                               <button
                                 type="button"
+                                draggable={false}
+                                onDragStart={(event) => event.stopPropagation()}
                                 aria-label={t(hidden ? "models.showModel" : "models.hideModel")}
                                 aria-pressed={hidden}
                                 title={t(hidden ? "models.showModel" : "models.hideModel")}
@@ -2809,14 +3090,29 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
                       );
                     })}
 
-                    {/* Add model button */}
-                    <div
-                      onClick={(e) => { e.stopPropagation(); addModel(pName); }}
-                      style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px 4px 26px", borderRadius: 5, cursor: "pointer", color: "var(--text-dim)" }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-                    >
-                       <span style={{ fontSize: 11 }}>+ {t("i18n.model")}</span>
+                    {/* Add model button and A–Z sort */}
+                    <div className="models-sidebar-model-footer">
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={activateConfigRowOnKeyDown}
+                        onClick={(e) => { e.stopPropagation(); addModel(pName); navigation?.openDetail(t("i18n.newModel")); }}
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px 4px 26px", borderRadius: 5, cursor: "pointer", color: "var(--text-dim)", flex: 1, minWidth: 0 }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+                      >
+                        <span style={{ fontSize: 11 }}>+ {t("i18n.model")}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="models-sidebar-sort-button"
+                        aria-label={t("models.sortByName")}
+                        title={t("models.sortByName")}
+                        disabled={saving || loadError !== null || models.length < 2}
+                        onClick={() => sortModels(pName)}
+                      >
+                        A–Z
+                      </button>
                     </div>
                     </>}
                   </div>
@@ -2840,7 +3136,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
           </div>
 
           {/* Right: detail */}
-          <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+          <div className="settings-phone-detail" style={{ flex: 1, overflowY: "auto", padding: 20 }}>
             {loading ? null : detailContent ?? (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
                  {t("i18n.selectProviderModel")}
@@ -2910,6 +3206,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
             <ModelRoutingConfig
               remotePeer={remotePeer}
               providers={config.providers ?? {}}
+              availableModels={availableModels}
               onClose={onClose}
               onSaved={() => {
                 setSavedToast(true);
@@ -2921,7 +3218,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
         )}
         {visitedModelTabs.has("plugins") && (
           <div style={{ display: modelTab === "plugins" ? "flex" : "none", flex: 1, minHeight: 0, flexDirection: "column", background: "var(--bg)", overflow: "hidden" }}>
-            <PluginModelConfig key={remotePeer ?? "local"} remotePeer={remotePeer} onClose={onClose} controllerRef={pluginModelControllerRef} />
+            <PluginModelConfig key={remotePeer ?? "local"} cwd={cwd} remotePeer={remotePeer} onClose={onClose} controllerRef={pluginModelControllerRef} />
           </div>
         )}
         {visitedModelTabs.has("gen") && (
@@ -2942,6 +3239,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
           {modalContent}
         </div>
       )}
+      {modelContextMenuElement}
       {savedToast && (
       <div style={{ position: "fixed", bottom: 28, left: "50%", transform: "translateX(-50%)", zIndex: 1200, background: "#16a34a", color: "#fff", padding: "8px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 16px rgba(0,0,0,0.25)", animation: "saved-pop 0.3s ease" }}>
         ✓ {t("i18n.saved")}
@@ -2951,9 +3249,9 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
       <AddProviderPicker
         oauthProviders={oauthProviders}
         apiKeyProviders={apiKeyProviders}
-        onSelectOAuth={(id) => setSelection({ type: "oauth", providerId: id })}
-        onSelectApiKey={(id) => setSelection({ type: "apikey", providerId: id })}
-        onAddCustom={addCustomProvider}
+        onSelectOAuth={(id) => { setSelection({ type: "oauth", providerId: id }); navigation?.openDetail(oauthProviders.find((provider) => provider.id === id)?.name ?? id); }}
+        onSelectApiKey={(id) => { setSelection({ type: "apikey", providerId: id }); navigation?.openDetail(apiKeyProviders.find((provider) => provider.id === id)?.displayName ?? id); }}
+        onAddCustom={() => { addCustomProvider(); navigation?.openDetail(t("i18n.addProvider")); }}
         onClose={() => setPickerOpen(false)}
       />
     )}

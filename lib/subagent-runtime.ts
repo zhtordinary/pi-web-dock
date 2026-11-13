@@ -1,14 +1,15 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   createAgentSessionFromServices,
-  createAgentSessionServices,
   getAgentDir,
   initTheme,
   SessionManager,
   SettingsManager,
+  type InlineExtension,
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { createPiWebBuiltinExtensions } from "./builtin-extensions";
+import { createReaderAgentSessionServices } from "./model-runtime";
 import { createCompactionModelExtension } from "./compaction-model-extension";
 import { acquireSessionRuntimeOwnership, type SessionRuntimeOwnership } from "./session-runtime-ownership";
 import type { McpHost } from "./mcp-host";
@@ -46,6 +47,8 @@ import { appendSubagentInputFiles, loadSubagentInputFiles, subagentInputLimits }
 import { projectTrustReloadOptions } from "./project-trust";
 import { getProjectTrustStatus } from "./project-trust";
 import { createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
+import { createSideAskControlGuard } from "./session-control";
+import { SIDE_ASK_PEER_OWNERSHIP, preferSideAskSessionControl, type SideAskPeerOwnership } from "./side-ask-ownership";
 import { resolveShellTools } from "./powershell-settings";
 import {
   filterRuntimeSkills,
@@ -55,7 +58,7 @@ import {
   type RuntimeSkillPolicyContext,
 } from "./skill-runtime-policy";
 import { getSkillInvocationModes } from "./skill-policy";
-import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
+import { getSubagentSettingsPath, isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
 import { SubagentQueue } from "./subagent-queue";
 import { addWorktree, removeWorktree } from "./worktree";
 import { randomUUID } from "node:crypto";
@@ -70,7 +73,14 @@ import {
   type RemoteClaudeHostBinding,
 } from "./remote-claude-host";
 
-interface HostSession {
+export interface HostSession {
+  readonly agentDir?: string;
+  readonly protectedSessionId?: string;
+  readonly sideAskUiContext?: unknown;
+  readonly sideAskGuard?: InlineExtension;
+  readonly sideAskControl?: InlineExtension;
+  readonly sideAskPeerOwnership?: SideAskPeerOwnership;
+  recordSideAskChild?(sessionId: string, sessionPath: string): void;
   readonly inner: AgentSessionLike;
   readonly sessionFile: string;
   readonly cwd: string;
@@ -86,6 +96,7 @@ import { readerRuntimeProjectRoot } from './reader-execution-cwd';
 
 export interface SubagentRuntimeDependencies {
   getSession(sessionId: string): HostSession | undefined;
+  getSessionAgentDir?(sessionId: string): string | undefined;
   registerSession(
     inner: AgentSessionLike,
     options?: {
@@ -94,13 +105,20 @@ export interface SubagentRuntimeDependencies {
       remoteHost?: RemoteClaudeHostBinding;
       mcpHost?: McpHost;
       skillRuntimeContext?: RuntimeSkillPolicyContext;
+      projectTrusted?: boolean;
       runtimeOwnership?: SessionRuntimeOwnership;
+      sideAskUiContext?: unknown;
+      protectedSessionId?: string;
+      sideAskGuard?: InlineExtension;
+      sideAskControl?: InlineExtension;
+      sideAskPeerOwnership?: SideAskPeerOwnership;
+      agentDir?: string;
     },
   ): HostSession | void;
   reopenSession(sessionId: string, sessionFile: string, parentSessionId?: string): Promise<HostSession>;
   resolveSessionPath(sessionId: string): Promise<string | null>;
   invalidateSessionList(): void;
-  isBuiltInSubagentsEnabled?(): boolean;
+  isBuiltInSubagentsEnabled?(agentDir?: string): boolean;
 }
 
 export interface SubagentController {
@@ -497,12 +515,15 @@ export function createSubagentController(
   dependencies: SubagentRuntimeDependencies,
 ): SubagentController {
   async function start(request: StartSubagentRequest): Promise<SubagentExecution> {
-    const enabled = dependencies.isBuiltInSubagentsEnabled ?? isBuiltInSubagentsEnabled;
-    if (!enabled()) throw new Error("Pi Web built-in sub-agents are disabled");
     const parentSessionId = request.parentContext.sessionManager.getSessionId();
+    const parentAgentDir = dependencies.getSessionAgentDir?.(parentSessionId);
+    const enabled = dependencies.isBuiltInSubagentsEnabled ?? ((agentDir?: string) =>
+      isBuiltInSubagentsEnabled(getSubagentSettingsPath(agentDir)));
+    if (!enabled(parentAgentDir)) throw new Error("Pi Web built-in sub-agents are disabled");
     const parent = dependencies.getSession(parentSessionId);
     if (!parent?.isAlive()) throw new Error("Parent session is no longer available");
     if (!parent.sessionFile) throw new Error("Parent session must be persisted before starting a subagent");
+    if (parent.protectedSessionId && !parent.sideAskPeerOwnership) throw new Error("Side Ask child ownership is unavailable");
 
     let isolatedWorktree: { path: string; branch: string } | undefined;
     let childRemoteHost: RemoteClaudeHostBinding | undefined;
@@ -514,7 +535,7 @@ export function createSubagentController(
       if (parentUsesRemoteClaude && !parentRemoteHost) {
         throw new Error("capability-unavailable: remote Claude parent host binding is unavailable");
       }
-      const profile = resolveSubagentProfile(parent.cwd, request.profile);
+      const profile = resolveSubagentProfile(parent.cwd, request.profile, parent.agentDir ?? parentAgentDir);
       if (!profile) throw new Error(`Unknown or disabled subagent profile: ${request.profile}`);
 
       const runInBackground = request.runInBackground ?? profile.runInBackground;
@@ -567,7 +588,7 @@ export function createSubagentController(
       const childCwd = isolatedWorktree?.path ?? parent.cwd;
       const childProjectRoot = await readerRuntimeProjectRoot(childCwd);
 
-      const agentDir = getAgentDir();
+      const agentDir = parent.agentDir ?? parentAgentDir ?? getAgentDir();
       const childProjectTrust = getProjectTrustStatus(childCwd, agentDir);
       const settingsManager = SettingsManager.create(childCwd, agentDir, {
         projectTrusted: childProjectTrust.trusted,
@@ -638,6 +659,9 @@ export function createSubagentController(
       if (!chatOnly) initTheme();
       const childExtensionFactories = [
         createCompactionModelExtension(settingsManager),
+        ...(parent.protectedSessionId ? [createSideAskControlGuard(parent.protectedSessionId)] : []),
+        ...(parent.sideAskGuard ? [parent.sideAskGuard] : []),
+        ...(profile.loadExtensions && parent.sideAskControl ? [parent.sideAskControl] : []),
         ...childBuiltinFactories,
         ...(subagentSkillsBinding.loaderOptions.extensionFactories ?? []),
         ...(parentRemoteHost ? [createRemoteClaudeHostGuardExtension()] : []),
@@ -646,13 +670,17 @@ export function createSubagentController(
           ...(mcpScope.allExtensionTools ? { allExtensionTools: true } : {}),
         }))] : []),
       ];
-      const services = await createAgentSessionServices({
+      const childExtensionOptions = subagentExtensionLoaderOptions({ ...profile, mcp: mcpEnabled, codemode: codemodeEnabled });
+      const services = await createReaderAgentSessionServices({
         cwd: childCwd,
         agentDir,
         modelRuntime: parentModelRuntime,
         settingsManager,
         resourceLoaderOptions: {
-          ...subagentExtensionLoaderOptions({ ...profile, mcp: mcpEnabled, codemode: codemodeEnabled }),
+          ...childExtensionOptions,
+          ...(profile.loadExtensions && parent.sideAskControl ? { extensionsOverride: (base) => {
+            return preferSideAskSessionControl(childExtensionOptions.extensionsOverride?.(base) ?? base);
+          } } : {}),
           ...childSkillLoaderOptions,
           noPromptTemplates: true,
           noThemes: true,
@@ -706,6 +734,7 @@ export function createSubagentController(
         parentToolCallId: request.parentToolCallId,
         profile: profile.name,
         description: request.description.trim() || profile.displayName,
+        ...(selectedModelName ? { model: selectedModelName } : {}),
         task: request.task,
         runInBackground,
         createdAt,
@@ -726,6 +755,7 @@ export function createSubagentController(
         ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
       };
       sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, metadata);
+      if (parent.sideAskPeerOwnership) sessionManager.appendCustomEntry(SIDE_ASK_PEER_OWNERSHIP, parent.sideAskPeerOwnership);
       sessionManager.appendSessionInfo(metadata.description);
 
       const parentModel = parent.inner.model as ReturnType<ModelRuntime["getModel"]>;
@@ -769,6 +799,8 @@ export function createSubagentController(
         })) ?? undefined;
         if (!childRemoteHost) throw new Error("capability-unavailable: Reader host scope could not be installed for child session");
       }
+      persistChildSession(sessionManager);
+      parent.recordSideAskChild?.(inner.sessionId, inner.sessionFile ?? sessionManager.getSessionFile() ?? "");
       const childOwnership = runtimeOwnership;
       // Registration owns cleanup even if wrapper setup fails after it starts extension teardown.
       runtimeOwnership = undefined;
@@ -781,10 +813,16 @@ export function createSubagentController(
         ...(childRemoteHost ? { remoteHost: childRemoteHost } : {}),
         ...(builtinResources?.mcpHost ? { mcpHost: builtinResources.mcpHost } : {}),
         skillRuntimeContext: childSkillRuntimeContext,
+        projectTrusted: childProjectTrust.trusted,
         runtimeOwnership: childOwnership,
+        ...(parent.sideAskUiContext ? { sideAskUiContext: parent.sideAskUiContext } : {}),
+        ...(parent.protectedSessionId ? { protectedSessionId: parent.protectedSessionId } : {}),
+        ...(parent.sideAskGuard ? { sideAskGuard: parent.sideAskGuard } : {}),
+        ...(parent.sideAskControl ? { sideAskControl: parent.sideAskControl } : {}),
+        ...(parent.sideAskPeerOwnership ? { sideAskPeerOwnership: parent.sideAskPeerOwnership } : {}),
+        agentDir,
       });
       if (!childSession) runtimeOwnership = childOwnership;
-      persistChildSession(sessionManager);
       const initialRun: SubagentRunInfo = {
         sessionId: inner.sessionId,
         sessionPath: inner.sessionFile ?? sessionManager.getSessionFile() ?? "",
@@ -792,6 +830,7 @@ export function createSubagentController(
         parentToolCallId: request.parentToolCallId,
         profile: profile.name,
         description: metadata.description,
+        ...(metadata.model ? { model: metadata.model } : {}),
         task: request.task,
         runInBackground,
         status: "queued",
@@ -900,7 +939,7 @@ export function createSubagentController(
       };
       const queued = getSubagentQueue().enqueue(
         parentSessionId,
-        readSubagentSettings().maxConcurrent,
+        readSubagentSettings(getSubagentSettingsPath(agentDir)).maxConcurrent,
         execute,
         (state) => {
           if (state === "queued") {
@@ -936,10 +975,13 @@ export function createSubagentController(
   }
 
   async function resume(request: ResumeSubagentRequest): Promise<SubagentExecution> {
-    const enabled = dependencies.isBuiltInSubagentsEnabled ?? isBuiltInSubagentsEnabled;
-    if (!enabled()) throw new Error("Pi Web built-in sub-agents are disabled");
     const parentSessionId = request.parentContext.sessionManager.getSessionId();
+    const parentAgentDir = dependencies.getSessionAgentDir?.(parentSessionId);
+    const enabled = dependencies.isBuiltInSubagentsEnabled ?? ((agentDir?: string) =>
+      isBuiltInSubagentsEnabled(getSubagentSettingsPath(agentDir)));
+    if (!enabled(parentAgentDir)) throw new Error("Pi Web built-in sub-agents are disabled");
     const parent = dependencies.getSession(parentSessionId);
+    const agentDir = parent?.agentDir ?? parentAgentDir ?? getAgentDir();
     const parentUsesRemoteClaude = parent?.inner.model?.provider === REMOTE_CLAUDE_PROVIDER_ID;
     const parentRemoteHost = parentUsesRemoteClaude ? resolveRemoteClaudeHost(parentSessionId) : undefined;
     if (parentUsesRemoteClaude && !parentRemoteHost) {
@@ -980,7 +1022,7 @@ export function createSubagentController(
             sessionManager: wrapper.inner.sessionManager,
             sessionId: request.sessionId,
             cwd: wrapper.cwd,
-            agentDir: getAgentDir(),
+            agentDir,
             activeTools: wrapper.inner.getActiveToolNames(),
             modelRuntime: (parent.inner as unknown as { modelRuntime: ModelRuntime }).modelRuntime,
             builtInEnabled: true,
@@ -1115,7 +1157,7 @@ export function createSubagentController(
       revokeRemoteClaudeHost(resolveRemoteClaudeHost(request.sessionId) ?? resumedRemoteHost);
       dependencies.invalidateSessionList();
     };
-    const queued = getSubagentQueue().enqueue(parentSessionId, readSubagentSettings().maxConcurrent, execute, (state) => {
+    const queued = getSubagentQueue().enqueue(parentSessionId, readSubagentSettings(getSubagentSettingsPath(agentDir)).maxConcurrent, execute, (state) => {
       if (state === "queued") manager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "queued" });
       stored.run = { ...stored.run, status: state };
       request.onUpdate?.(stored.run);

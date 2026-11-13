@@ -40,7 +40,7 @@ const openMenuItemStyle: CSSProperties = {
   fontSize: 11,
   whiteSpace: "nowrap",
 };
-import { parsePdfPageFragment, resolveLocalFileHref } from "@/lib/file-links";
+import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import {
   markdownPreviewRehypePlugins,
   markdownPreviewRemarkPlugins,
@@ -72,7 +72,9 @@ interface Props {
   remotePeer?: string;
   sourceSessionId?: string | null;
   initialPage?: number;
-  onOpenFile?: (filePath: string, page?: number) => void;
+  initialAnchor?: string;
+  onAnchorApplied?: () => void;
+  onOpenFile?: (filePath: string, page?: number, anchor?: string) => void;
   onMentionLines?: (filePath: string, startLine: number, endLine: number) => void;
   /** Insert this file's source path into the chat input (@ mention). */
   onAtMention?: (filePath: string, isDir: boolean) => void;
@@ -1268,7 +1270,7 @@ function DocumentViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPag
   );
 }
 
-export function FileViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPage, onOpenFile, onMentionLines, onAtMention, gitRefreshKey, panelOpen = true, initialDisplayMode, initialState, onStateChange, onDirtyChange, watchEnabled = true, onOpenInReaderView, onClose }: Props) {
+export function FileViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPage, initialAnchor, onAnchorApplied, onOpenFile, onMentionLines, onAtMention, gitRefreshKey, panelOpen = true, initialDisplayMode, initialState, onStateChange, onDirtyChange, watchEnabled = true, onOpenInReaderView, onClose }: Props) {
   if (isImagePath(filePath)) {
     return <ImageViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
   }
@@ -1287,6 +1289,8 @@ export function FileViewer({ filePath, cwd, remotePeer, sourceSessionId, initial
       cwd={cwd}
       remotePeer={remotePeer}
       sourceSessionId={sourceSessionId}
+      initialAnchor={initialAnchor}
+      onAnchorApplied={onAnchorApplied}
       onOpenFile={onOpenFile}
       onMentionLines={onMentionLines}
       onAtMention={onAtMention}
@@ -1308,6 +1312,8 @@ function TextFileViewer({
   cwd,
   remotePeer,
   sourceSessionId,
+  initialAnchor,
+  onAnchorApplied,
   onOpenFile,
   onMentionLines,
   onAtMention,
@@ -1522,6 +1528,7 @@ function TextFileViewer({
     initialState === undefined && initialDisplayMode === undefined,
   );
   const scrollRestorePendingRef = useRef(true);
+  const appliedAnchorRef = useRef<string | null>(null);
   const viewerStateRef = useRef<FileViewerState>({
     displayMode: requestedInitialDisplayMode,
     wrapLines: initialWrapLines,
@@ -1532,6 +1539,14 @@ function TextFileViewer({
   const [selectedLineRange, setSelectedLineRange] = useState<SelectedLineRange | null>(null);
 
   onStateChangeRef.current = onStateChange;
+
+  const openMarkdownFile = useCallback((target: string, page?: number, anchor?: string) => {
+    if (contentRef.current) {
+      viewerStateRef.current.scrollTop = contentRef.current.scrollTop;
+      viewerStateRef.current.scrollLeft = contentRef.current.scrollLeft;
+    }
+    onOpenFile?.(target, page, anchor);
+  }, [onOpenFile]);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -2007,6 +2022,15 @@ function TextFileViewer({
     loading,
     requestedInitialDisplayMode,
   ]);
+
+  useEffect(() => {
+    if (!initialAnchor || loading || !isMarkdown || effectiveDisplayMode !== "preview") return;
+    const target = `${filePath}\0${initialAnchor}`;
+    if (appliedAnchorRef.current !== target && scrollToMarkdownAnchor(contentRef.current, initialAnchor)) {
+      appliedAnchorRef.current = target;
+      onAnchorApplied?.();
+    }
+  }, [data?.content, effectiveDisplayMode, filePath, initialAnchor, isMarkdown, loading, onAnchorApplied]);
 
   if (loading || (requestedInitialDisplayMode === "diff" && gitDiffLoading && !data)) {
     return (
@@ -2606,10 +2630,9 @@ function TextFileViewer({
             content={markdownPreview || content}
             frontmatterData={frontmatter?.data ?? null}
             markdownDirectory={markdownDirectory}
-            cwd={cwd}
             sourceSessionId={sourceSessionId}
             remotePeer={remotePeer}
-            onOpenFile={onOpenFile}
+            onOpenFile={onOpenFile ? openMarkdownFile : undefined}
             scrollRef={contentRef}
             onScroll={(event) => {
               viewerStateRef.current.scrollTop = event.currentTarget.scrollTop;
@@ -2668,7 +2691,6 @@ function MarkdownPreviewWithToc({
   content,
   frontmatterData,
   markdownDirectory,
-  cwd,
   sourceSessionId,
   remotePeer,
   onOpenFile,
@@ -2679,10 +2701,9 @@ function MarkdownPreviewWithToc({
   content: string;
   frontmatterData: Record<string, unknown> | null;
   markdownDirectory: string;
-  cwd?: string;
   sourceSessionId?: string | null;
   remotePeer?: string;
-  onOpenFile?: (filePath: string, page?: number) => void;
+  onOpenFile?: (filePath: string, page?: number, anchor?: string) => void;
   scrollRef: RefObject<HTMLDivElement | null>;
   onScroll: UIEventHandler<HTMLDivElement>;
   tocOpen: boolean;
@@ -2716,22 +2737,21 @@ function MarkdownPreviewWithToc({
       delete props.node;
       if (href?.startsWith("#")) {
         return <a href={href} {...props} onClick={(event) => {
-          if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          if (!shouldOpenLocalFileInApp(event)) return;
           event.preventDefault();
           scrollToMarkdownAnchor(scrollRef.current, href);
         }}>{children}</a>;
       }
-      const linkedFile = onOpenFile
-        ? resolveLocalFileHref(href, markdownDirectory, cwd ?? markdownDirectory)
-        : null;
+      const linkedFile = onOpenFile ? resolveLocalFileHref(href, markdownDirectory) : null;
       if (!linkedFile || !onOpenFile) {
         return <a href={href} {...props}>{children}</a>;
       }
       const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
-        if (event.defaultPrevented || event.button !== 0) return;
-        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        if (!shouldOpenLocalFileInApp(event)) return;
         event.preventDefault();
-        onOpenFile(linkedFile, parsePdfPageFragment(href) ?? undefined);
+        const isPdf = getFileExt(linkedFile) === "pdf";
+        const hash = href?.indexOf("#") ?? -1;
+        onOpenFile(linkedFile, isPdf ? parsePdfPageFragment(href) ?? undefined : undefined, !isPdf && hash >= 0 ? href?.slice(hash) : undefined);
       };
       return <a href={href} {...props} onClick={handleClick}>{children}</a>;
     },
@@ -2741,9 +2761,7 @@ function MarkdownPreviewWithToc({
         // eslint-disable-next-line @next/next/no-img-element
         return <img src={source} alt={alt ?? ""} style={{ maxWidth: "100%", height: "auto" }} {...props} />;
       }
-      const filePath =
-        resolveLocalFileHref(source, markdownDirectory, cwd ?? markdownDirectory)
-        ?? resolveLocalFileHref(source, markdownDirectory, markdownDirectory);
+      const filePath = resolveLocalFileHref(source, markdownDirectory);
       const resolved = filePath
         ? getFileApiUrl(filePath, "read", sourceSessionId, {}, remotePeer)
         : source;
@@ -2753,7 +2771,7 @@ function MarkdownPreviewWithToc({
     table({ children }) {
       return <MarkdownTable>{children}</MarkdownTable>;
     },
-  }), [cwd, markdownDirectory, onOpenFile, remotePeer, scrollRef, sourceSessionId]);
+  }), [markdownDirectory, onOpenFile, remotePeer, scrollRef, sourceSessionId]);
 
   return (
     <div style={{ display: "flex", height: "100%", minHeight: 0, width: "100%" }}>

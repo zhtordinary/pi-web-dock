@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const panelSource = await readFile(new URL("./SessionActivityPanel.tsx", import.meta.url), "utf8");
 const shellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const worktreeShell = await readFile(new URL("./app-shell-worktree.tsx", import.meta.url), "utf8");
 
 function section(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -56,11 +57,11 @@ test("activity rows put card actions behind More controls while hover previews k
 });
 
 test("AppShell preserves remote device, project scope, focus session, and source-info semantics", () => {
-  assert.match(shellSource, /handleOpenTalkMapForSession\(item\.session\.projectRoot \?\? item\.session\.cwd, item\.device, item\.session\.id\)/);
-  assert.match(shellSource, /handleTalkMapInjectContext\(item\.session, item\.device\)/);
+  assert.match(worktreeShell, /handleOpenTalkMapForSession\(item\.session\.projectRoot \?\? item\.session\.cwd, item\.device, item\.session\.id\)/);
+  assert.match(worktreeShell, /handleTalkMapInjectContext\(item\.session, item\.device\)/);
   assert.doesNotMatch(shellSource, /lastRecap/);
   assert.match(shellSource, /sourceDevice: item\.device\.name/);
-  assert.match(shellSource, /const deviceLabel = device\?\.name \?\? localDeviceName \?\? "本机"/);
+  assert.match(worktreeShell, /const deviceLabel = device\?\.name \?\? localDeviceName \?\? "本机"/);
   assert.doesNotMatch(shellSource, /sourceDevice: `\$\{item\.device\.name\} \(\$\{item\.device\.id\}\)`/);
   assert.match(shellSource, /sourceSessionId: item\.session\.id/);
   assert.match(shellSource, /sourcePath: item\.session\.path/);

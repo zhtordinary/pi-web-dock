@@ -29,9 +29,6 @@ await writeFile(join(escapedSkillTarget, "SKILL.md"), escapedSkillContent);
 await symlink(escapedSkillTarget, join(skillsDir, "escaped"), "dir");
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
-allowFileRoot(process.cwd());
-allowFileRoot(agentDir);
 const { GET } = await jiti.import("./route.ts");
 
 after(async () => {
@@ -47,6 +44,7 @@ function getContent(filePath, options = {}) {
   url.searchParams.set("cwd", options.cwd ?? process.cwd());
   url.searchParams.set("filePath", filePath);
   url.searchParams.set("scope", options.scope ?? "global");
+  if (options.document !== undefined) url.searchParams.set("document", options.document);
   if (options.sessionId) url.searchParams.set("sessionId", options.sessionId);
   if (options.revision !== undefined) url.searchParams.set("revision", String(options.revision));
   if (options.trustKey) url.searchParams.set("trustKey", options.trustKey);
@@ -72,10 +70,18 @@ test("allows viewing a loaded skill whose invocation is disabled", async () => {
   assert.deepEqual(await response.json(), { content: disabledSkillContent });
 });
 
-test("rejects a loaded symlink whose physical target escapes skill resource roots", async () => {
+test("reads a loaded Skill through a symlink outside the resource directory", async () => {
   const response = await getContent(escapedSkillPath);
-  assert.equal(response.status, 403);
-  assert.deepEqual(await response.json(), { error: "Access denied" });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { content: escapedSkillContent });
+});
+
+test("opens a Markdown document outside the Skill directory", async () => {
+  const document = join(root, "outside-reference.md");
+  await writeFile(document, "# External reference\n");
+  const response = await getContent(skillPath, { document });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { content: "# External reference\n" });
 });
 
 test("refuses a Markdown file that is not a loaded skill", async () => {
@@ -131,6 +137,6 @@ test("keeps route-level regular-file and one-MiB checks explicit", async () => {
   assert.match(source, /readRegularFileText\(loadedPath, SKILL_CONTENT_MAX_BYTES\)/);
   assert.match(source, /not a regular file/);
   assert.match(source, /larger than \\d\+ bytes/);
-  assert.match(source, /isExistingFilePathAllowed\(requestedFilePath, resourceRoots\)/);
+  assert.match(source, /findLoadedSkillPath\(/);
   assert.match(source, /loadSkillsWithInstallInfo\(cwd, scope\)/);
 });

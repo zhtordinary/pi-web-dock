@@ -1,6 +1,10 @@
-/** The published npm package and its source repository; package.json declares the same identity. */
+/** The installed Reader package and its source repository; package.json declares the same identity. */
 export const APP_PACKAGE_NAME = "@zhtordinary/pi-web-dock";
 export const APP_REPOSITORY_URL = "https://github.com/zhtordinary/pi-web-dock";
+
+/** The upstream Pi Web package and repository used by the release check. */
+export const APP_UPDATE_PACKAGE_NAME = "@agegr/pi-web";
+export const APP_UPDATE_REPOSITORY_URL = "https://github.com/agegr/pi-web";
 
 const STABLE_VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;
 
@@ -28,5 +32,5 @@ export function isNewerStableVersion(candidate: string, current: string): boolea
 
 export function getPiWebReleaseUrl(version: string): string | null {
   if (!parseStableVersion(version)) return null;
-  return `${APP_REPOSITORY_URL}/releases/tag/v${version}`;
+  return `${APP_UPDATE_REPOSITORY_URL}/releases/tag/v${version}`;
 }

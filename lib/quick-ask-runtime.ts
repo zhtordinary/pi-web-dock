@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { zhCNLocale } from "./i18n/messages/zh-CN.ts";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { buildSessionProjection, type ModelRuntime, type SessionEntry, type SessionManager } from "@earendil-works/pi-coding-agent";
+import { buildSessionProjection, SessionManager, type AgentSession, type ModelRuntime, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, Model, SystemMessage } from "@earendil-works/pi-ai";
 import { createModelRuntimeWithExtensions, disposeModelRuntime } from "./model-runtime";
 import { registerSessionLivenessProvider } from "./session-liveness";
@@ -23,15 +23,32 @@ import {
 } from "./quick-ask-storage";
 import type { Base64ImageAttachment } from "./image-attachments";
 
+export interface QuickAskAgentSession {
+  session: AgentSession;
+  prepare?(): Promise<void>;
+  waitForOwnedWork?(): Promise<void>;
+  associateProvider?(sessionId: string, model: Model<Api>): { dispose(): void } | undefined;
+  dispose(): Promise<void>;
+}
+export interface QuickAskAgentInput {
+  memory: SessionManager;
+  model: { provider: string; id: string };
+  thinkingLevel?: ThinkingLevel;
+  signal: AbortSignal;
+  runId: string;
+  label: string;
+}
 export interface QuickAskHost {
   sessionId: string;
   sessionFile: string;
   manager: SessionManager;
   assertWritable(): void;
+  assertTailWritable?(): void;
   isMainRunning(): boolean;
   currentModel(): { provider: string; id: string } | undefined;
   sourceSystem(): SystemMessage | undefined;
   transformContext(messages: AgentMessage[]): Promise<AgentMessage[]>;
+  createAgentSession?(input: QuickAskAgentInput): Promise<QuickAskAgentSession>;
   append(customType: string, data: unknown): SessionEntry;
   associateProvider?(sessionId: string, model: Model<Api>): { dispose(): void } | undefined;
   materialized?(result: QuickAskForkResult): Promise<{ subprojectAssignmentFailed?: boolean }>;
@@ -56,6 +73,8 @@ interface Run {
   branch: QuickAskBranch;
   memory: SessionManager;
   controller: AbortController;
+  agentBacked: boolean;
+  agentSession?: AgentSession;
   ready: Promise<void>;
   readyResolve(): void;
   readyReject(error: unknown): void;
@@ -72,9 +91,17 @@ interface Run {
   outcomeRecorded?: boolean;
 }
 
+type ClosingQuickAsk = { sessionFile: string; runtime: QuickAskRuntime };
+declare global { var __piClosingQuickAsks: Map<string, ClosingQuickAsk> | undefined; }
+
+/** Keep read-only observation available while a closed session's tools still own their tail. */
+export function getClosingQuickAsk(sessionId: string): ClosingQuickAsk | undefined {
+  return globalThis.__piClosingQuickAsks?.get(sessionId);
+}
+
 /** Run records leave attachments to the admitted user message; copying them again per state change only grows the file. */
 function runRecord(view: QuickAskRunSnapshot): Omit<QuickAskRunSnapshot, "images"> {
-  const { images: _images, ...record } = view;
+  const { images: _images, settling: _settling, activeTools: _activeTools, ...record } = view;
   return record;
 }
 
@@ -109,7 +136,7 @@ export class QuickAskRuntime {
     private readonly createRuntime: () => Promise<ModelRuntime> = createModelRuntimeWithExtensions,
     private readonly disposeRuntime: (runtime: ModelRuntime) => void = disposeModelRuntime,
   ) {
-    this.host = { ...host, append: (customType, data) => { this.assertWritable(); return host.append(customType, data); } };
+    this.host = { ...host, append: (customType, data) => { this.assertTailWritable(); return host.append(customType, data); } };
     this.releaseLiveness = registerSessionLivenessProvider({ name: "reader-side-asks", sessionId: host.sessionId,
       sessionFile: host.sessionFile, isActive: () => this.active.size > 0 || this.conversions.size > 0 || this.pendingOutcomes.size > 0 });
   }
@@ -194,8 +221,12 @@ export class QuickAskRuntime {
     const settled = new Promise<void>((resolve) => { settle = resolve; });
     let resolveOutcome = () => {};
     const outcomeReady = new Promise<void>((resolve) => { resolveOutcome = resolve; });
-    const run: Run = { view, input: { ...input, model: selectedModel }, branch, memory,
-      controller: new AbortController(), ready, readyResolve, readyReject, settled, settle,
+    const agentBacked = Boolean(this.host.createAgentSession);
+    const executionMemory = agentBacked
+      ? SessionManager.inMemory(memory.getCwd(), undefined, [memory.getHeader()!, ...memory.getEntries().slice(0, -1)])
+      : memory;
+    const run: Run = { view, input: { ...input, model: selectedModel }, branch, memory: executionMemory,
+      controller: new AbortController(), agentBacked, ready, readyResolve, readyReject, settled, settle,
       resolveOutcome, outcomePending: false,
       requestDigest: digest, usageEvent: createQuickAskOriginUsageEvent() };
     if (!recordedBranch || rebased) this.host.append(QUICK_ASK_BRANCH, branch);
@@ -231,7 +262,8 @@ export class QuickAskRuntime {
     this.assertWritable();
     const run = this.runs.get(id);
     if (!run || run.view.status !== "running") return this.snapshot(id);
-    run.view = { ...run.view, status: "cancelled", error: reason, errorStatus: 499, revision: run.view.revision + 1 };
+    run.view = { ...run.view, status: "cancelled", error: reason, errorStatus: 499,
+      ...(run.agentBacked ? { settling: true } : {}), revision: run.view.revision + 1 };
     let saved = false;
     try { this.host.append(QUICK_ASK_RUN, runRecord(this.view(run))); saved = true; }
     finally {
@@ -240,8 +272,10 @@ export class QuickAskRuntime {
       run.controller.abort(reason);
       run.closeIterator?.();
       run.readyReject(new QuickAskError(run.view.error ?? reason, run.view.errorStatus ?? 499));
-      this.finish(run);
-      this.emit(id, { type: "error", run: this.view(run), error: run.view.error ?? reason });
+      if (!run.agentBacked) {
+        this.finish(run);
+        this.emit(id, { type: "error", run: this.view(run), error: run.view.error ?? reason });
+      } else this.emit(id, { type: "snapshot", run: this.view(run) });
     }
     return this.view(run);
   }
@@ -305,7 +339,8 @@ export class QuickAskRuntime {
         const data = structuredClone(item.data);
         for (const native of data.nativeEntries ?? []) {
           if (native.type === "message" && native.message.role === "assistant") {
-            Object.assign(native.message, { usageEvent });
+            const original = (native.message as AssistantMessage & { usageEvent?: QuickAskUsageEvent }).usageEvent ?? item.usageEvent;
+            Object.assign(native.message, { usageEvent: createQuickAskDerivativeUsageEvent(this.host.sessionId, item.id, original, "replace") });
           }
         }
         this.host.append("quick_ask", { ...data, runId: undefined, ...destination, contextAnchorId: source.contextAnchorId,
@@ -339,39 +374,70 @@ export class QuickAskRuntime {
       for (const run of [...this.active.values()]) {
         try {
           if (run.view.status === "completed" && run.view.entry) {
-            this.finish(run);
+            if (!run.agentBacked) this.finish(run);
             this.emit(run.view.id, { type: "done", run: this.view(run), entry: run.view.entry });
           } else {
             this.host.assertWritable();
             if (run.view.status === "running") this.stop(run.view.id, zhCNLocale.messages["sidekick.hostSessionClosed"]);
             else {
               run.controller.abort();
-              this.finish(run);
+              if (!run.agentBacked) this.finish(run);
               this.emit(run.view.id, { type: "error", run: this.view(run), error: run.view.error ?? zhCNLocale.messages["sidekick.hostSessionClosed"] });
             }
           }
         } catch (error) {
           if (!this.runs.has(run.view.id)) continue;
-          run.view = { ...run.view, status: "interrupted", error: quickAskErrorText(error), revision: run.view.revision + 1 };
+          run.view = { ...run.view, status: "interrupted", error: quickAskErrorText(error),
+            ...(run.agentBacked ? { settling: true } : {}), revision: run.view.revision + 1 };
           run.controller.abort();
           run.readyReject(error);
-          this.finish(run);
-          this.emit(run.view.id, { type: "error", run: this.view(run), error: run.view.error! });
+          if (!run.agentBacked) {
+            this.finish(run);
+            this.emit(run.view.id, { type: "error", run: this.view(run), error: run.view.error! });
+          } else this.emit(run.view.id, { type: "snapshot", run: this.view(run) });
         }
       }
     } finally {
       this.closed = true;
-      this.releaseLiveness();
-      this.listeners.clear();
+      const pending = [...this.active.values()].map((run) => run.settled);
+      if (pending.length) {
+        const closing = globalThis.__piClosingQuickAsks ??= new Map<string, ClosingQuickAsk>();
+        const binding = { sessionFile: this.host.sessionFile, runtime: this };
+        closing.set(this.host.sessionId, binding);
+        void Promise.allSettled(pending).then(() => {
+          if (closing.get(this.host.sessionId) === binding) closing.delete(this.host.sessionId);
+          this.listeners.clear();
+          this.releaseLiveness();
+        });
+      } else {
+        this.listeners.clear();
+        this.releaseLiveness();
+      }
     }
   }
 
-  private assertWritable(): void {
-    if (this.closed) throw new QuickAskError("Side Ask runtime is closed", 409);
-    this.host.assertWritable();
+  async whenIdle(): Promise<void> {
+    await Promise.allSettled([
+      ...[...this.active.values()].map((run) => run.settled),
+      ...[...this.pendingOutcomes.values()].flatMap((outcomes) => [...outcomes]),
+      ...this.conversions.values(),
+    ]);
+  }
+
+  private assertIdentity(): void {
     if (this.host.manager.getSessionId() !== this.host.sessionId || this.host.manager.getSessionFile() !== this.host.sessionFile) {
       throw new QuickAskError("Side Ask source runtime identity changed; reload the source session", 409);
     }
+  }
+  private assertWritable(): void {
+    if (this.closed) throw new QuickAskError("Side Ask runtime is closed", 409);
+    this.host.assertWritable();
+    this.assertIdentity();
+  }
+  private assertTailWritable(): void {
+    if (this.closed && this.active.size === 0) throw new QuickAskError("Side Ask runtime is closed", 409);
+    (this.host.assertTailWritable ?? this.host.assertWritable)();
+    this.assertIdentity();
   }
   private view(run: Run): QuickAskRunSnapshot { return { ...run.view, images: [...run.view.images] }; }
   private emit(id: string, event: QuickAskLiveEvent): void {
@@ -395,6 +461,10 @@ export class QuickAskRuntime {
     try { if (runtime) this.disposeRuntime(runtime); }
     catch (error) { console.error("[pi-web] Side Ask runtime cleanup failed:", quickAskErrorText(error)); }
     if (this.active.get(quickAskScopeKey(run.input)) === run) this.active.delete(quickAskScopeKey(run.input));
+    if (run.view.settling) {
+      run.view = { ...run.view, settling: false, revision: run.view.revision + 1 };
+      this.emit(run.view.id, { type: "error", run: this.view(run), error: run.view.error ?? "Side Ask stopped" });
+    }
     this.runs.delete(run.view.id);
     run.settle();
   }
@@ -417,7 +487,170 @@ export class QuickAskRuntime {
     }
   }
 
+  private async executeAgent(run: Run, createAgent: NonNullable<QuickAskHost["createAgentSession"]>): Promise<void> {
+    const baseline = run.memory.getEntryCount();
+    let recorded = baseline;
+    let promptedUserId: string | undefined;
+    let omitPromptedUser = false;
+    const keepNative = (entry: SessionEntry) => !omitPromptedUser || entry.id !== promptedUserId;
+    const nativeSinceAdmission = () => run.memory.getEntries().slice(baseline).filter(keepNative);
+    let owned: QuickAskAgentSession | undefined;
+    let detachEvents = () => {};
+    let detachAgent = () => {};
+    let detachAbort = () => {};
+    const persistOutcome = () => {
+      if (run.outcomeRecorded) return;
+      const nativeEntries = nativeSinceAdmission();
+      if (!nativeEntries.length) return;
+      try {
+        this.assertTailWritable();
+        const final = run.final;
+        this.host.append("quick_ask_outcome", { version: 1, runId: run.view.id,
+          threadId: run.input.threadId, branchId: run.input.branchId, status: run.view.status, nativeEntries,
+          ...(final ? { model: final.model, provider: final.provider, usage: normalizeSessionUsage(final.usage), usageEvent: run.usageEvent } : {}) });
+        run.outcomeRecorded = true;
+      } catch (error) {
+        console.warn("[pi-web] Side Ask native outcome could not be saved:", quickAskErrorText(error));
+      }
+    };
+    try {
+      const selected = run.input.model;
+      if (!selected) throw new QuickAskError("Side Ask model is unavailable", 400);
+      owned = await createAgent({ memory: run.memory, model: selected, thinkingLevel: run.input.thinkingLevel,
+        signal: run.controller.signal, runId: run.view.id,
+        label: (run.input.threadTitle?.trim() || run.input.question.replace(/\s+/g, " ").trim() || run.input.threadId).slice(0, 100) });
+      const session = owned.session;
+      // Side Ask is a long-lived topic: keep the SDK's automatic compaction and recovery policy.
+      run.agentSession = session;
+      if (run.view.status !== "running") return;
+      this.assertWritable();
+      const model = session.model;
+      if (!model || model.provider !== selected.provider || model.id !== selected.id) {
+        throw new QuickAskError("Model not found for this Side Ask", 404);
+      }
+      const providerSessionId = createQuickAskProviderSessionId({ parentSessionId: this.host.sessionId,
+        threadId: run.input.threadId, branchId: run.branch.id, provider: model.provider, model: model.id });
+      session.agent.sessionId = providerSessionId;
+      const stream = session.agent.streamFunction;
+      let requestError: unknown;
+      session.agent.streamFunction = (requestModel, context, options) => {
+        try {
+          const result = stream(requestModel, context, {
+            ...options, maxTokens: resolveQuickAskOutputBudget(requestModel, context, options?.reasoning),
+          });
+          run.readyResolve();
+          return result;
+        } catch (error) {
+          requestError = error;
+          run.readyReject(error);
+          throw error;
+        }
+      };
+      const onPayload = session.agent.onPayload;
+      session.agent.onPayload = async (payload, requestModel) => {
+        const transformed = await onPayload?.(payload, requestModel);
+        return withQuickAskCacheAffinity(transformed ?? payload, this.host.sessionId, providerSessionId, requestModel) ?? transformed;
+      };
+      detachEvents = session.subscribe((event) => {
+        if (event.type !== "message_update") return;
+        if (event.assistantMessageEvent.type === "text_delta") this.delta(run, "chunk", event.assistantMessageEvent.delta);
+        else if (event.assistantMessageEvent.type === "thinking_delta") this.delta(run, "thinking", event.assistantMessageEvent.delta);
+      });
+      const activeTools = new Map<string, string>();
+      detachAgent = session.agent.subscribe((event) => {
+        if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+          if (run.view.status !== "running") return;
+          if (event.type === "tool_execution_start") activeTools.set(event.toolCallId, event.toolName);
+          else activeTools.delete(event.toolCallId);
+          run.view = { ...run.view, activeTools: [...activeTools.values()], revision: run.view.revision + 1 };
+          this.emit(run.view.id, { type: "snapshot", run: this.view(run) });
+          return;
+        }
+        if (event.type !== "message_end") return;
+        const message = event.message;
+        if (message.role === "assistant") {
+          run.usageEvent = createQuickAskOriginUsageEvent();
+          Object.assign(message, { usageEvent: run.usageEvent });
+          run.final = message;
+        }
+        const entries = run.memory.getEntries();
+        if (message.role === "user" && !promptedUserId) {
+          promptedUserId = entries.findLast((entry) => entry.type === "message" && entry.message === message)?.id;
+          omitPromptedUser = JSON.stringify(message.content) === JSON.stringify(createQuickAskUserMessage(run.input.question, run.input.images).content);
+        }
+        const nativeEntries = entries.slice(recorded).filter(keepNative);
+        recorded = entries.length;
+        if (!nativeEntries.length) return;
+        this.host.append("quick_ask_step", { version: 1, runId: run.view.id,
+          threadId: run.input.threadId, branchId: run.input.branchId, nativeEntries,
+          ...(message.role === "assistant" ? { model: message.model, provider: message.provider,
+            usage: normalizeSessionUsage(message.usage), usageEvent: run.usageEvent } : {}) });
+      });
+      const abort = () => { void session.abort().catch(() => undefined); };
+      run.controller.signal.addEventListener("abort", abort, { once: true });
+      detachAbort = () => run.controller.signal.removeEventListener("abort", abort);
+      if (run.controller.signal.aborted) abort();
+      await owned.prepare?.();
+      if (run.view.status !== "running") return;
+      run.providerLease = owned.associateProvider?.(providerSessionId, model);
+      if (model.provider === "claude-remote" && !run.providerLease) {
+        throw new QuickAskError("Remote Claude Side Ask host scope is unavailable", 503);
+      }
+      run.outcomePending = true;
+      await session.prompt(run.input.question, { expandPromptTemplates: false,
+        images: run.input.images.map((image) => ({ type: "image" as const, ...image })) });
+      await owned.waitForOwnedWork?.();
+      if (run.view.status !== "running") return;
+      this.assertWritable();
+      const final = run.final;
+      if (!final || final.role !== "assistant" || !Array.isArray(final.content) || !final.api || !final.provider || !final.model) {
+        throw new QuickAskError("Side Ask provider returned an invalid native assistant message");
+      }
+      if (final.stopReason === "error" || final.stopReason === "aborted") {
+        throw requestError ?? new Error(final.errorMessage ?? "Side Ask did not finish");
+      }
+      if (final.provider !== selected.provider || final.model !== selected.id) run.memory.appendModelChange(selected.provider, selected.id);
+      const stored = this.host.append("quick_ask", { version: 2, runId: run.view.id, revision: run.view.revision + 1,
+        threadId: run.input.threadId, threadTitle: run.input.threadTitle, branchId: run.input.branchId,
+        contextAnchorId: run.branch.contextAnchorId, nativeEntries: nativeSinceAdmission(),
+        model: final.model, provider: final.provider, usage: normalizeSessionUsage(final.usage), usageEvent: run.usageEvent,
+        createdAt: run.view.createdAt });
+      run.outcomeRecorded = true;
+      const entry = projectSessionQuickAsks(this.host.manager.getEntries()).find((item) => item.id === stored.id);
+      if (!entry) throw new Error("Committed Side Ask could not be projected");
+      run.view = { ...run.view, status: "completed", answer: entry.data.answer, thinking: entry.data.thinking ?? "", entry,
+        revision: run.view.revision + 1 };
+      this.emit(run.view.id, { type: "done", run: this.view(run), entry });
+    } catch (error) {
+      run.controller.abort(error);
+      if (run.view.status === "running") {
+        run.view = { ...run.view, status: "failed", error: quickAskErrorText(error),
+          errorStatus: error instanceof QuickAskError ? error.status : 500, revision: run.view.revision + 1 };
+        persistOutcome();
+        try { this.host.append(QUICK_ASK_RUN, runRecord(this.view(run))); }
+        catch (writeError) { run.view.error += zhCNLocale.messages["sidekick.hostSaveFailurePrefix"] + quickAskErrorText(writeError); }
+        this.emit(run.view.id, { type: "error", run: this.view(run), error: run.view.error ?? "Side Ask failed" });
+      }
+      run.readyReject(error);
+    } finally {
+      if (run.view.status !== "completed") persistOutcome();
+      detachAbort();
+      detachEvents();
+      detachAgent();
+      try { run.providerLease?.dispose(); }
+      catch (error) { console.error("[pi-web] Side Ask provider cleanup failed:", quickAskErrorText(error)); }
+      run.providerLease = undefined;
+      try { await owned?.dispose(); }
+      catch (error) { console.error("[pi-web] Side Ask agent cleanup failed:", quickAskErrorText(error)); }
+      run.agentSession = undefined;
+      run.outcomePending = false;
+      run.resolveOutcome();
+      this.finish(run);
+    }
+  }
+
   private async execute(run: Run): Promise<void> {
+    if (this.host.createAgentSession) return this.executeAgent(run, this.host.createAgentSession);
     try {
       const runtime = await this.createRuntime();
       run.runtime = runtime;

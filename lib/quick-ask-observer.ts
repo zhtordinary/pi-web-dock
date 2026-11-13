@@ -1,5 +1,6 @@
 import type { QuickAskForkResult, QuickAskRunSnapshot } from "./quick-ask-log";
 import type { QuickAskLiveEvent } from "./quick-ask-runtime";
+import { isQuickAskRunActive } from "./quick-ask-status.ts";
 import { zhCNLocale } from "./i18n/messages/zh-CN.ts";
 
 type EventSourceLike = Pick<EventSource, "onmessage" | "onerror" | "close">;
@@ -83,7 +84,7 @@ export function observeQuickAskRun(options: QuickAskObserverOptions): () => void
     }
     // A process restart may leave only the durable admission. Its interrupted
     // terminal state is authoritative even when live-only deltas had higher revisions.
-    if (next.revision < current.revision && next.status === "running") return;
+    if (next.revision < current.revision && isQuickAskRunActive(next)) return;
     const entry = next.entry ? { ...next.entry, data: { ...next.entry.data, question: current.question } } : undefined;
     if (entry) {
       if (current.images.length) entry.data.images = current.images;
@@ -91,7 +92,7 @@ export function observeQuickAskRun(options: QuickAskObserverOptions): () => void
     }
     current = { ...next, question: current.question, images: current.images, ...(entry ? { entry } : {}) };
     options.onRun(current);
-    if (current.status !== "running") detach();
+    if (!isQuickAskRunActive(current)) detach();
   };
   if (options.signal.aborted) return detach;
   options.signal.addEventListener("abort", detach, { once: true });
@@ -190,7 +191,7 @@ export async function requestQuickAskFork(options: {
       try {
         if (options.signal.aborted) { abort(); return; }
         detach = observeQuickAskRun({ url: options.url, run: value.run!, signal: options.signal, t: options.t, eventSource: options.eventSource, fetcher: options.fetcher,
-          onRun: (run) => { if (run.status !== "running") complete(); },
+          onRun: (run) => { if (!isQuickAskRunActive(run)) complete(); },
           onDeleted: () => { options.signal.removeEventListener("abort", abort); reject(new Error(options.t("sidekick.forkDeleted"))); },
           onError: (error) => { options.signal.removeEventListener("abort", abort); reject(error); },
         });

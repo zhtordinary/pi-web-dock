@@ -122,7 +122,7 @@ test("invalid image resize limits are rejected without changing the config", asy
   }
 });
 
-test("model URLs and adaptive overrides round-trip through Pi SDK 1.4", async () => {
+test("model URLs and adaptive overrides round-trip through Pi SDK 1.5", async () => {
   const body = { providers: { relay: {
     api: "anthropic-messages", baseUrl: "https://provider.example.test", apiKey: "TEST_ONLY_KEY",
     compat: { forceAdaptiveThinking: true },

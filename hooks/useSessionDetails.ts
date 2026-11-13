@@ -4,6 +4,8 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import {
   emptySessionDetailsSnapshot,
   ensureSessionCost,
+  releaseSessionCost,
+  retainSessionCost,
   ensureSessionPreview,
   ensureSessionUserQuestions,
   readSessionDetails,
@@ -38,8 +40,10 @@ export function useSessionDetails({ sessionId, version = "", costView, peer, dev
 
   useEffect(() => {
     if (!request || !loadCost) return;
+    retainSessionCost(request);
     void ensureSessionCost(request);
-  }, [loadCost, request, snapshot.cost]);
+    return () => releaseSessionCost(request);
+  }, [loadCost, request]);
   useEffect(() => {
     if (!request || !loadPreview) return;
     void ensureSessionPreview(request);

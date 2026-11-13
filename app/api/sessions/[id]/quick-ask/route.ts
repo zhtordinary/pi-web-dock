@@ -6,6 +6,7 @@ import { resolveSessionPath } from "@/lib/session-reader";
 import { forkQuickAskSession, getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { parseQuickAskImages, QuickAskError, quickAskErrorText } from "@/lib/quick-ask-context";
 import { createQuickAskEventStream } from "@/lib/quick-ask-event-stream";
+import { getClosingQuickAsk } from "@/lib/quick-ask-runtime";
 import {
   quickAskDeletedRuns,
   quickAskListEntry,
@@ -45,7 +46,7 @@ function failure(error: unknown): NextResponse {
   return NextResponse.json({ error: quickAskErrorText(error) }, { status: error instanceof QuickAskError ? error.status : 500 });
 }
 async function sourceFile(id: string): Promise<string> {
-  const file = getRpcSession(id)?.sessionFile || await resolveSessionPath(id);
+  const file = getRpcSession(id)?.sessionFile || getClosingQuickAsk(id)?.sessionFile || await resolveSessionPath(id);
   if (!file) throw new QuickAskError("Session not found", 404);
   return file;
 }
@@ -68,7 +69,7 @@ export async function GET(req: Request, { params }: RouteParams) {
     const { id } = await params;
     const file = await sourceFile(id);
     const owner = getRpcSession(id);
-    const live = owner?.isAlive() ? owner.peekQuickAskRuntime() : undefined;
+    const live = owner?.isAlive() ? owner.peekQuickAskRuntime() : getClosingQuickAsk(id)?.runtime;
     const records = owner?.isAlive() ? owner.inner.sessionManager.getEntries()
       : existsSync(file) ? await readQuickAskRecords(file) : [];
     const url = new URL(req.url);

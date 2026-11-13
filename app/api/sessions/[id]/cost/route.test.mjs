@@ -38,11 +38,67 @@ async function fetchCost(view = "full", id = sessionId) {
   const body = await response.json();
   if (view === "full") {
     const summary = await fetchCost("summary", id);
-    const { contextUsage, compactionContexts, ...billing } = body;
-    assert.deepEqual(summary, billing, "summary preserves every billing field without transcript context");
+    const { contextUsage, compactionContexts, messageCosts, imageGenerationCosts, compactionCosts, ...billing } = body;
+    assert.deepEqual(summary, billing, "summary preserves aggregate billing fields without transcript detail");
+    assert.equal("messageCosts" in summary, false);
+    assert.equal("imageGenerationCosts" in summary, false);
+    assert.equal("compactionCosts" in summary, false);
   }
   return body;
 }
+
+test("unknown cost sessions are rejected without a billing response", async () => {
+  const id = `missing-cost-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const response = await GET(new Request(`http://localhost/api/sessions/${id}/cost`), { params: Promise.resolve({ id }) });
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "Session not found" });
+});
+
+test("unsafe cost session identifiers cannot escape the session resolver", async () => {
+  for (const id of ["../outside", "/absolute", "nested/escape"]) {
+    const response = await GET(new Request("http://localhost/api/sessions/invalid/cost"), { params: Promise.resolve({ id }) });
+    assert.equal(response.status, 404, id);
+    assert.deepEqual(await response.json(), { error: "Session not found" });
+  }
+});
+
+test("same revision summary and full requests share one in-flight pricing run", async () => {
+  const id = `${sessionId}-in-flight`;
+  const file = join(sessionDir, "in-flight.jsonl");
+  const script = join(sessionDir, "in-flight-pricing.py");
+  const marker = join(sessionDir, "in-flight-starts.log");
+  const previousScript = process.env.PI_CONVERSATION_COST_SCRIPT;
+  try {
+    await writeFile(script, [
+      "import json, time",
+      `open(${JSON.stringify(marker)}, "a", encoding="utf-8").write("start\\n")`,
+      "time.sleep(0.1)",
+      "def price_usages(items):",
+      "    return [{'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'total': 0.5}, 'rates': {'currency': 'USD'}} for _ in items]",
+    ].join("\n"), "utf8");
+    await writeFile(file, [
+      { type: "session", version: 3, id },
+      message("gpt-5.5", "openai", "in-flight-assistant"),
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n", "utf8");
+    cacheSessionPath(id, file);
+    process.env.PI_CONVERSATION_COST_SCRIPT = script;
+    const [fullResponse, summaryResponse] = await Promise.all([
+      GET(new Request(`http://localhost/api/sessions/${id}/cost`), { params: Promise.resolve({ id }) }),
+      GET(new Request(`http://localhost/api/sessions/${id}/cost?view=summary`), { params: Promise.resolve({ id }) }),
+    ]);
+    assert.equal(fullResponse.status, 200);
+    assert.equal(summaryResponse.status, 200);
+    const full = await fullResponse.json();
+    const summary = await summaryResponse.json();
+    assert.equal((await readFile(marker, "utf8")).trim().split("\n").length, 1);
+    assert.equal(summary.totalCost.amount, full.totalCost.amount);
+    assert.equal("messageCosts" in summary, false);
+    assert.equal("messageCosts" in full, true);
+  } finally {
+    if (previousScript === undefined) delete process.env.PI_CONVERSATION_COST_SCRIPT;
+    else process.env.PI_CONVERSATION_COST_SCRIPT = previousScript;
+  }
+});
 
 test("cost route reports read-only context usage", async () => {
   await writeSession(
@@ -266,6 +322,11 @@ test("aggregates persisted subagent costs and invalidates when child content gro
   assert.ok(Math.abs(partial.totalCost.amount - 0.0016) < 1e-12);
   assert.ok(Math.abs(partial.amount - 0.0016) < 1e-12);
   assert.deepEqual(partial.missingPriceModels, ["openai/unknown-model"]);
+
+  await rm(join(sessionDir, "session"), { recursive: true, force: true });
+  const removed = await fetchCost();
+  assert.equal(removed.childCost.sessionCount, 0, "deleting persisted children invalidates the child aggregate");
+  assert.equal(removed.totalCost.amount, removed.parentCost.amount);
 });
 
 test("cost route returns live RPC context usage when session is active", async () => {
@@ -339,7 +400,7 @@ test("image reconciliation preserves known message prices and publishes the fina
   assert.equal(settled.imageGenerationCosts.length, 1);
   assert.equal(settled.imageGenerationCosts[0].amount, 0.015);
   assert.deepEqual(settled.imageGenerationCosts[0].outputs, [output]);
-  assert.deepEqual((await fetchCost("summary", imageSessionId)).imageGenerationCosts[0].outputs, [output]);
+  assert.equal("imageGenerationCosts" in (await fetchCost("summary", imageSessionId)), false);
 });
 
 test("cost cache observes late extension journal settlement without a session file change", async () => {

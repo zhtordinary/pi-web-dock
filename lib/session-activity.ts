@@ -203,7 +203,7 @@ export function recordSessionRunStart(sessionId: string, cwd: string): SessionRu
   state.records.push(record);
   state.activeBySession.set(sessionId, record.runId);
   persist(state);
-  emitActivityEvent({ sessionId, runId: record.runId, status: record.status });
+  emitActivityEvent({ sessionId, runId: record.runId, status: record.status, startedAt: record.startedAt });
   return { ...record };
   });
 }
@@ -237,7 +237,7 @@ export function recordSessionRunSettled(sessionId: string, runId?: string | null
   record.status = "completed";
   if (state.activeBySession.get(sessionId) === record.runId) state.activeBySession.delete(sessionId);
   persist(state);
-  emitActivityEvent({ sessionId, runId: record.runId, status: record.status });
+  emitActivityEvent({ sessionId, runId: record.runId, status: record.status, startedAt: record.startedAt });
   });
 }
 
@@ -263,6 +263,7 @@ function updateActive(sessionId: string, status: SessionRunStatus, error?: strin
     sessionId,
     runId: record.runId,
     status: record.status,
+    startedAt: record.startedAt,
     ...(typeof unattended === "boolean" ? { unattended } : {}),
   });
   });

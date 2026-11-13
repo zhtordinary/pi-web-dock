@@ -13,8 +13,10 @@ function compile(source, dependencies) {
   return mod.exports;
 }
 const security = compile(await readFile(new URL("../../../lib/request-security.ts", import.meta.url), "utf8"), { "node:net": await import("node:net") });
+const pathModule = await import("node:path");
+const fsModule = await import("node:fs");
 const { sessionMutationRequest } = compile(await readFile(new URL("../../../lib/session-mutation-command.ts", import.meta.url), "utf8"), {});
-function fixture({ background = [], busy = false, sideAsk = false, queued = 0, siblingError, siblingHadRuntime = false, recent = false, conflict = false, closingOwner = false, already = false } = {}) {
+function fixture({ background = [], busy = false, sideAsk = false, queued = 0, siblingError, siblingHadRuntime = false, recent = false, conflict = false, closingOwner = false, already = false, child = false } = {}) {
   const calls = [], rpc = {
     sessionFile: "/active/session.jsonl", isAlive: () => true, isRunning: () => busy, hasActiveSideAsk: () => sideAsk,
     getExecutionState: () => ({ active: busy, queuedCount: queued }),
@@ -23,14 +25,21 @@ function fixture({ background = [], busy = false, sideAsk = false, queued = 0, s
   };
   const dependencies = {
     "next/server": { NextResponse: { json: (body, init) => Response.json(body, init) } },
+    path: pathModule,
+    "node:fs": fsModule,
     "@/lib/request-security": { ...security, isApiRequestAllowed: req => security.isApiRequestAllowed(req, ["reader.test"]) },
     "@/lib/rpc-manager": { getRpcSession: () => recent ? undefined : rpc, getRpcSessionTree: () => [] },
     "@/lib/session-reader": {
       resolveSessionPathReadOnly: async () => "/active/session.jsonl",
-      resolveSessionPath: async (_id, options) => { calls.push(["resolve", options.archived]); return already ? options.archived ? "/archive/session.jsonl" : null : "/active/session.jsonl"; },
+      resolveSessionIdByPath: async () => "fixture",
+      resolveSessionPath: async (_id, options) => {
+        calls.push(["resolve", options.archived]);
+        return already ? options.archived ? "/archive/session.jsonl" : null : options.archived ? "/archive/session.jsonl" : "/active/session.jsonl";
+      },
       SessionPathConflictError: class extends Error {}, updateSessionListCachesForMove: () => calls.push("cache"),
     },
-    "@/lib/session-archive": { isSessionFileRecentlyChanged: () => recent,
+    "@/lib/session-child-tree": { resolvePiSubagentBundleRoot: path => child ? "/active/parent.jsonl" : path },
+    "@/lib/session-archive": { getPiSessionRoots: () => ({ sessionsDir: "/active", archivedSessionsDir: "/archive" }), isSessionFileRecentlyChanged: () => recent,
       sessionArchiveFiles: path => [path],
       movePiSessionFile: () => { calls.push("move"); return "/archive/session.jsonl"; }, verifySessionMove: () => calls.push("verify"),
       SessionArchiveConflictError: class extends Error {}, setTokenMonitorArchivedFlag: () => calls.push("monitor"),
@@ -61,6 +70,15 @@ for (const origin of ["http://localhost:30141", "http://127.0.0.1:30142", "http:
     });
   }
 }
+test("archive rejects child lifecycle mutations before effects", async () => {
+  const f = fixture({ child: true });
+  const response = await f.archive();
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "session_child_lifecycle_requires_parent");
+  assert.deepEqual(f.calls.slice(0, 1), [["resolve", false]]);
+  assert.ok(!f.calls.includes("shutdown") && !f.calls.includes("move"));
+});
+
 test("archive rejects missing Host, untrusted hosts, cross-origin requests and non-JSON before effects", async () => {
   for (const overrides of [{ host: undefined }, { host: "evil.invalid" }, { origin: "https://evil.invalid" }, { "sec-fetch-site": "cross-site" }, { "content-type": "text/plain" }]) {
     const headers = new Headers({ host: "localhost", "content-type": "application/json" });

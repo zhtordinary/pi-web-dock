@@ -40,6 +40,7 @@ test("SessionContextMenu places moveToSubproject first and includes categories i
   const toDiscussPos = sessionContextMenu.indexOf('t("sessionActivity.toDiscuss")');
   const toRevisePos = sessionContextMenu.indexOf('t("sessionActivity.toRevise")');
   const completedPos = sessionContextMenu.indexOf('t("sessionActivity.completed")');
+  const subagentsPos = sessionContextMenu.indexOf('t("sidebar.showSubagents")');
   const hidePos = sessionContextMenu.indexOf('t("sessionActivity.hideSession")');
 
   assert.ok(subprojectPos > 0, "moveToSubproject exists in context menu");
@@ -47,6 +48,8 @@ test("SessionContextMenu places moveToSubproject first and includes categories i
   assert.ok(toDiscussPos > favoritePos, "toDiscuss comes after favorite");
   assert.ok(toRevisePos > toDiscussPos, "toRevise comes after toDiscuss");
   assert.ok(completedPos > toRevisePos, "completed comes after toRevise");
+  assert.ok(subagentsPos > completedPos, "subagent visibility comes after categories");
+  assert.ok(subagentsPos < hidePos, "subagent visibility sits next to hide");
   assert.ok(hidePos > completedPos, "hide comes after categories");
 });
 

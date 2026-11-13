@@ -24,6 +24,7 @@ function watchFixture({ aborted = false, abortDuringWatch = false, failWatch = f
     constructor(underlying) {
       this.underlying = underlying;
       underlying.start({
+        desiredSize: 256 * 1024,
         enqueue(chunk) {
           if (failEnqueue) throw new Error("disconnected");
           state.events.push(new TextDecoder().decode(chunk));
@@ -52,6 +53,25 @@ function watchFixture({ aborted = false, abortDuringWatch = false, failWatch = f
       statSync() { state.statCalls += 1; throw new Error("missing"); },
     },
     ReadableStream: FakeReadableStream, Response: FakeResponse,
+    createReaderStreamWriter(controller, diagnostic, onOverflow, onEnqueueError) {
+      let startup = true;
+      const frames = [];
+      const enqueue = (text) => {
+        if ((controller.desiredSize ?? 0) <= 0) { diagnostic.droppedEvents += 1; onOverflow(); return false; }
+        try {
+          controller.enqueue(new TextEncoder().encode(text));
+          diagnostic.connectedAt ??= Date.now();
+          diagnostic.lastWriteAt = Date.now();
+          diagnostic.queuedBytes = Math.max(0, 256 * 1024 - (controller.desiredSize ?? 256 * 1024));
+          return true;
+        } catch { onEnqueueError(); return false; }
+      };
+      return {
+        write(text) { if (startup) { frames.push(text); return true; } return enqueue(text); },
+        flush() { startup = false; const text = frames.splice(0).join(""); return !text || enqueue(text); },
+      };
+    },
+    registerReaderStreamCloser: () => () => {},
   };
   vm.runInNewContext(stripTypeScriptTypes(`function run() { ${watchBlock} }\nglobalThis.run = run;`), context);
   const response = context.run();
@@ -110,9 +130,9 @@ test("file watching survives same-path replacement", () => {
   assert.match(watchBlock, /lastExists/);
 });
 
-test("a missing target can be watched after its parent is authorized", () => {
+test("a missing target can be watched for creation in its parent directory", () => {
   assert.match(source, /if \(type !== "watch"\)[\s\S]*error: "Not found"/);
-  assert.match(source, /const existingAuthorizationPath = stat \? filePath : path\.dirname\(filePath\)/);
+  assert.doesNotMatch(source, /existingAuthorizationPath/);
   assert.match(watchBlock, /lastExists = stat !== undefined/);
 });
 

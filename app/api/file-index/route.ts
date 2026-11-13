@@ -3,12 +3,8 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
-import {
-  getAllowedFileRoots,
-  isExistingFilePathAllowed,
-  isFilePathAllowed,
-  isWindowsAbsolutePath,
-} from "@/lib/file-access";
+import { isWindowsAbsolutePath } from "@/lib/paths";
+import { hasParentDirectorySegment } from "@/lib/path-security";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
 import { isAlwaysHiddenPath, isHiddenOutsideGit } from "@/lib/file-tree-visibility";
 
@@ -19,6 +15,8 @@ const MAX_FILES = 5000;
 /** Hard caps on the full in-memory listing that ?q= searches against */
 const GIT_HARD_CAP = 200_000;
 const WALK_HARD_CAP = 50_000;
+const MAX_WALK_DIRECTORIES = 2_000;
+const MAX_WALK_MS = 1_500;
 const MAX_WALK_DEPTH = 8;
 const MAX_QUERY_LENGTH = 500;
 const CACHE_TTL_MS = 10_000;
@@ -69,12 +67,16 @@ async function listWithGit(cwd: string, hideGitIgnored: boolean): Promise<FileLi
   }
 }
 
-function listWithWalk(cwd: string): FileListing {
+async function listWithWalk(cwd: string): Promise<FileListing> {
   const files: string[] = [];
+  const started = Date.now();
+  let truncated = false;
   // BFS so shallow files win when the cap truncates the listing.
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
-  while (queue.length > 0) {
-    const { abs, rel, depth } = queue.shift()!;
+  for (let index = 0; index < queue.length; index++) {
+    if (Date.now() - started > MAX_WALK_MS) return { files, hardTruncated: true };
+    if (index > 0 && index % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    const { abs, rel, depth } = queue[index];
     let dirents: fs.Dirent[];
     try {
       dirents = fs.readdirSync(abs, { withFileTypes: true });
@@ -88,7 +90,8 @@ function listWithWalk(cwd: string): FileListing {
       if (isHiddenOutsideGit(d.name, childRel)) continue;
       if (d.isDirectory()) {
         if (depth + 1 <= MAX_WALK_DEPTH) {
-          queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
+          if (queue.length >= MAX_WALK_DIRECTORIES) truncated = true;
+          else queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
         }
       } else if (d.isFile()) {
         if (files.length >= WALK_HARD_CAP) {
@@ -98,7 +101,7 @@ function listWithWalk(cwd: string): FileListing {
       }
     }
   }
-  return { files, hardTruncated: false };
+  return { files, hardTruncated: truncated };
 }
 
 // GET /api/file-index?cwd=/abs/path[&q=query][&hideGitIgnored=1]
@@ -107,21 +110,15 @@ function listWithWalk(cwd: string): FileListing {
 // With q: { matches: { path, isDir }[] } — ranked against the FULL listing so
 // repos larger than MAX_FILES still find deep files (cap applied after
 // matching, like the TUI passing the query to fd).
-// Guarded by the same allow-list as /api/files.
 export async function GET(req: NextRequest) {
   try {
     const cwd = req.nextUrl.searchParams.get("cwd")?.trim() ?? "";
-    if (!cwd || (!cwd.startsWith("/") && !isWindowsAbsolutePath(cwd))) {
+    if (!cwd || (!cwd.startsWith("/") && !isWindowsAbsolutePath(cwd)) || hasParentDirectorySegment(cwd)) {
       return NextResponse.json({ error: "cwd must be an absolute path" }, { status: 400 });
     }
     const query = req.nextUrl.searchParams.get("q")?.slice(0, MAX_QUERY_LENGTH) ?? "";
     const limitParam = Number.parseInt(req.nextUrl.searchParams.get("limit") ?? "", 10);
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 200) : undefined;
-
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
 
     let stat: fs.Stats;
     try {
@@ -132,17 +129,13 @@ export async function GET(req: NextRequest) {
     if (!stat.isDirectory()) {
       return NextResponse.json({ error: "Not a directory" }, { status: 400 });
     }
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
     const hideGitIgnored = req.nextUrl.searchParams.get("hideGitIgnored") === "1";
     const cacheKey = `${cwd}\0${hideGitIgnored ? "hide-ignored" : "show-ignored"}`;
     const cache = getIndexCache();
     const now = Date.now();
     let cached = cache.get(cacheKey);
     if (!cached || cached.expiresAt <= now) {
-      const listing = (await listWithGit(cwd, hideGitIgnored)) ?? listWithWalk(cwd);
+      const listing = (await listWithGit(cwd, hideGitIgnored)) ?? await listWithWalk(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
       }

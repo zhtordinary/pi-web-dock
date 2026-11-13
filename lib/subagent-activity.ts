@@ -16,6 +16,7 @@ export interface SubagentSessionActivity {
 
 interface RawSubagentStatus {
   sessionId?: unknown;
+  sessionFile?: unknown;
   state?: unknown;
   status?: unknown;
   activityState?: unknown;
@@ -142,6 +143,14 @@ function activityForStatus(status: RawSubagentStatus): SubagentSessionActivity |
   return { active };
 }
 
+function childSessionFiles(status: RawSubagentStatus): string[] {
+  const values = [
+    status.sessionFile,
+    ...statusSteps(status).map((step) => step.sessionFile),
+  ];
+  return values.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+}
+
 function* sessionSubagentActivities(sessions: readonly SubagentSessionIdentity[]) {
   if (!sessions.length) return;
   const root = asyncRunRoot();
@@ -159,9 +168,19 @@ function* sessionSubagentActivities(sessions: readonly SubagentSessionIdentity[]
     const status = readStatus(path);
     if (!status || typeof status.sessionId !== "string") continue;
     const owner = sessionForOwner(status.sessionId, sessions);
-    if (!owner) continue;
+    const childTargets = childSessionFiles(status)
+      .map((sessionFile) => sessionForOwner(sessionFile, sessions))
+      .filter((session): session is SubagentSessionIdentity => Boolean(session));
+    if (!owner && childTargets.length === 0) continue;
     const activity = activityForStatus(status);
-    if (activity) yield { owner, activity, runId: entry.name };
+    if (!activity) continue;
+    const targets = new Map<string, SubagentSessionIdentity>();
+    if (owner) targets.set(owner.id, owner);
+    // Detached runners record the parent as status.sessionId and the child
+    // transcript in steps[].sessionFile. Project the same live observation onto
+    // both rows so the child list does not wait for a transcript tail update.
+    for (const child of childTargets) targets.set(child.id, child);
+    for (const target of targets.values()) yield { owner: target, activity, runId: entry.name };
   }
 }
 

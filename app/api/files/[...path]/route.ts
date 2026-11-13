@@ -1,16 +1,6 @@
-import { homedir } from "os";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
-import {
-  allowFileRoot,
-  getAllowedFileRoots,
-  isExistingFilePathAllowed,
-  isFilePathAllowed,
-  isFileWriteAllowed,
-  isFilePermissionsTarget,
-} from "@/lib/file-access";
-import { checkLinkedDirectoryApproval, withOutsideLinkTargets } from "@/lib/linked-directory";
 import {
   DOCX_PREVIEW_MAX_BYTES,
   IMAGE_PREVIEW_MAX_BYTES,
@@ -24,7 +14,7 @@ import {
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { compareExplorerEntries } from "@/lib/explorer-filter";
 import { moveToSystemTrash } from "@/lib/file-trash";
-import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { isApiRequestAllowed } from "@/lib/request-security";
 import { getFileTreeVisibility } from "@/lib/file-tree-visibility";
 import {
   inspectUploadTargets,
@@ -44,9 +34,15 @@ import {
   TEXT_EDIT_MAX_BYTES,
   writeTextFileAtomicSync,
 } from "@/lib/file-edit";
-import { filePathFromApiSegments, isWindowsAbsolutePath, samePath, toSlashPath as normalizeSlashes } from "@/lib/paths";
+import { filePathFromApiSegments, samePath } from "@/lib/paths";
+import { linkedWorktreeForTrash, unregisterTrashedWorktree } from "@/lib/worktree";
 import { renamePathNoClobberSync } from "@/lib/file-rename";
 import { isBinaryTextFile, readTextPreviewChunk } from "@/lib/text-preview";
+import {
+  createReaderStreamWriter,
+  registerReaderStreamCloser,
+  type ReaderStreamDiagnostic,
+} from "@/lib/reader-event-stream";
 
 import { hasParentDirectorySegment } from "@/lib/path-security";
 
@@ -96,28 +92,6 @@ function getLanguage(filePath: string): string {
   return EXT_TO_LANGUAGE[ext] ?? "text";
 }
 
-function filePathFromSegments(segments: string[]): string {
-  const joined = segments.join("/");
-  if (joined.startsWith("~")) {
-    return path.join(homedir(), joined.slice(1).replace(/^[/\\]+/, ""));
-  }
-  const slashJoined = normalizeSlashes(joined);
-  if (isWindowsAbsolutePath(slashJoined)) return slashJoined;
-  return "/" + joined.replace(/^\/+/, "");
-}
-
-function isAllowedRootPath(filePath: string, allowedRoots: Set<string>): boolean {
-  for (const root of allowedRoots) {
-    const useWindowsRules = isWindowsAbsolutePath(filePath) || isWindowsAbsolutePath(root);
-    const resolver = useWindowsRules ? path.win32 : path;
-    const normalizedFilePath = resolver.resolve(filePath);
-    const normalizedRoot = resolver.resolve(root);
-    const comparableFilePath = useWindowsRules ? normalizedFilePath.toLowerCase() : normalizedFilePath;
-    const comparableRoot = useWindowsRules ? normalizedRoot.toLowerCase() : normalizedRoot;
-    if (comparableFilePath === comparableRoot) return true;
-  }
-  return false;
-}
 function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
@@ -138,15 +112,13 @@ function sameDirectoryIdentity(left: DirectoryIdentity, right: DirectoryIdentity
 function isCreateDirectoryStillBound(
   directory: string,
   identity: DirectoryIdentity,
-  allowedRoots: Set<string>,
 ): boolean {
   try {
     const currentRealDirectory = fs.realpathSync(directory);
     const currentStat = fs.statSync(directory);
     return samePath(currentRealDirectory, directory)
       && currentStat.isDirectory()
-      && sameDirectoryIdentity(directoryIdentity(currentStat), identity)
-      && isExistingFilePathAllowed(directory, allowedRoots);
+      && sameDirectoryIdentity(directoryIdentity(currentStat), identity);
   } catch {
     return false;
   }
@@ -156,9 +128,8 @@ async function getUploadDirectory(segments: string[]): Promise<
   { directory: string; identity: DirectoryIdentity } | { response: NextResponse }
 > {
   const directory = filePathFromApiSegments(segments);
-  const allowedRoots = await getAllowedFileRoots("write");
-  if (!isFilePathAllowed(directory, allowedRoots)) {
-    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  if (hasParentDirectorySegment(directory)) {
+    return { response: NextResponse.json({ error: "Invalid path" }, { status: 400 }) };
   }
 
   let stat: fs.Stats;
@@ -171,20 +142,7 @@ async function getUploadDirectory(segments: string[]): Promise<
     return { response: NextResponse.json({ error: "Upload target is not a directory" }, { status: 400 }) };
   }
 
-  // A browsable directory can be a symlink. Resolve both sides before writes
-  // so a symlink inside an allowed root cannot redirect uploads outside it.
   const realDirectory = fs.realpathSync(directory);
-  const realRoots = new Set<string>();
-  for (const root of allowedRoots) {
-    try {
-      realRoots.add(fs.realpathSync(root));
-    } catch {
-      // Ignore stale session roots that no longer exist.
-    }
-  }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
-    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
-  }
   let realDirectoryStat: fs.Stats;
   try {
     realDirectoryStat = fs.statSync(realDirectory);
@@ -193,39 +151,6 @@ async function getUploadDirectory(segments: string[]): Promise<
   }
 
   return { directory: realDirectory, identity: directoryIdentity(realDirectoryStat) };
-}
-
-// A directory link outside the read roots is browsable only after an explicit
-// read-only grant, persisted in the device's file-permissions configuration.
-async function allowLinkedDirectory(
-  request: NextRequest,
-  segments: string[],
-): Promise<NextResponse> {
-  if (!hasJsonContentType(request)) {
-    return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
-  }
-  let body: { target?: unknown } | null;
-  try {
-    body = await readJsonWithinLimit(request, MAX_RENAME_REQUEST_BYTES) as { target?: unknown } | null;
-  } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) {
-      return NextResponse.json({ error: "Link approval request is too large" }, { status: 413 });
-    }
-    body = null;
-  }
-  if (typeof body?.target !== "string" || !body.target) {
-    return NextResponse.json({ error: "target must be the link target shown in the listing" }, { status: 400 });
-  }
-  const approval = checkLinkedDirectoryApproval(
-    filePathFromApiSegments(segments),
-    body.target,
-    await getAllowedFileRoots(),
-  );
-  if (!approval.ok) {
-    return NextResponse.json({ error: approval.error }, { status: approval.status });
-  }
-  if (!approval.alreadyAllowed) allowFileRoot(approval.target, "read");
-  return NextResponse.json({ path: approval.target });
 }
 
 function parseUploadFileNames(value: unknown): string[] | null {
@@ -301,7 +226,7 @@ export async function POST(
   try {
     const { path: segments } = await params;
     const type = request.nextUrl.searchParams.get("type") ?? "upload";
-    if (type === "allow-link") return allowLinkedDirectory(request, segments);
+    if (type === "allow-link") return NextResponse.json({ error: "Directory links no longer require approval" }, { status: 410 });
 
     const uploadDirectory = await getUploadDirectory(segments);
     if ("response" in uploadDirectory) return uploadDirectory.response;
@@ -326,14 +251,10 @@ export async function POST(
         return NextResponse.json({ error: validationError }, { status: 400 });
       }
 
-      const allowedRoots = await getAllowedFileRoots("write");
-      if (!isCreateDirectoryStillBound(directory, directoryIdentityAtStart, allowedRoots)) {
-        return NextResponse.json({ error: "Upload directory changed during create" }, { status: 403 });
+      if (!isCreateDirectoryStillBound(directory, directoryIdentityAtStart)) {
+        return NextResponse.json({ error: "Upload directory changed during create" }, { status: 409 });
       }
       const targetPath = path.join(directory, parsed.name);
-      if (!isFileWriteAllowed(targetPath, allowedRoots)) {
-        return NextResponse.json({ error: "Access denied" }, { status: 403 });
-      }
       try {
         fs.lstatSync(targetPath);
         return NextResponse.json({ error: "A file or folder with that name already exists" }, { status: 409 });
@@ -405,9 +326,8 @@ export async function POST(
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    let allowedRoots = await getAllowedFileRoots("write");
-    if (!isCreateDirectoryStillBound(directory, directoryIdentityAtStart, allowedRoots)) {
-      return NextResponse.json({ error: "Upload directory changed during upload" }, { status: 403 });
+    if (!isCreateDirectoryStillBound(directory, directoryIdentityAtStart)) {
+      return NextResponse.json({ error: "Upload directory changed during upload" }, { status: 409 });
     }
 
     const inspection = inspectUploadTargets(directory, fileNames);
@@ -427,11 +347,6 @@ export async function POST(
 
     for (const file of files) {
       const destination = path.join(directory, file.name);
-      allowedRoots = await getAllowedFileRoots("write");
-      if (!isFileWriteAllowed(destination, allowedRoots)) {
-        errors.push({ name: file.name, error: "Access denied" });
-        continue;
-      }
       if (conflictSet.has(file.name) && strategy === "skip") {
         skipped.push(file.name);
         continue;
@@ -441,7 +356,7 @@ export async function POST(
         continue;
       }
 
-      if (!isCreateDirectoryStillBound(directory, directoryIdentityAtStart, allowedRoots)) {
+      if (!isCreateDirectoryStillBound(directory, directoryIdentityAtStart)) {
         errors.push({ name: file.name, error: "Upload directory changed during upload" });
         continue;
       }
@@ -454,8 +369,7 @@ export async function POST(
         continue;
       }
 
-      allowedRoots = await getAllowedFileRoots("write");
-      if (!isFileWriteAllowed(destination, allowedRoots) || !isCreateDirectoryStillBound(directory, directoryIdentityAtStart, allowedRoots)) {
+      if (!isCreateDirectoryStillBound(directory, directoryIdentityAtStart)) {
         errors.push({ name: file.name, error: "Upload directory changed during upload" });
         continue;
       }
@@ -489,30 +403,8 @@ export async function PATCH(
 
   try {
     const { path: segments } = await params;
-    const filePath = filePathFromSegments(segments);
-    let allowedRoots = await getAllowedFileRoots("write");
-    if (!isFileWriteAllowed(filePath, allowedRoots) || isFilePermissionsTarget(filePath, true)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-    if (isAllowedRootPath(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "The project root cannot be renamed" }, { status: 400 });
-    }
-
-    let stat: fs.Stats;
-    try {
-      stat = fs.lstatSync(filePath);
-    } catch {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
-    }
-    if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-    if (stat.isSymbolicLink()) {
-      return NextResponse.json({ error: "Symbolic links cannot be renamed" }, { status: 400 });
-    }
-    if (!stat.isFile() && !stat.isDirectory()) {
-      return NextResponse.json({ error: "Only files and folders can be renamed" }, { status: 400 });
-    }
+    const filePath = filePathFromApiSegments(segments);
+    if (hasParentDirectorySegment(filePath)) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
 
     let renameBody: unknown;
     try {
@@ -532,19 +424,17 @@ export async function PATCH(
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    allowedRoots = await getAllowedFileRoots("write");
-    if (!isFileWriteAllowed(filePath, allowedRoots) || !isExistingFilePathAllowed(filePath, allowedRoots)
-      || isFilePermissionsTarget(filePath, true)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(filePath);
+    } catch {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (!stat.isFile() && !stat.isDirectory() && !stat.isSymbolicLink()) {
+      return NextResponse.json({ error: "Only files, folders, and symbolic links can be renamed" }, { status: 400 });
     }
     const parentPath = path.dirname(filePath);
-    if (!isExistingFilePathAllowed(parentPath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
     const targetPath = path.join(parentPath, parsed.name);
-    if (!isFileWriteAllowed(targetPath, allowedRoots) || isFilePermissionsTarget(targetPath, true)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
     if (samePath(filePath, targetPath)) {
       return NextResponse.json({ renamed: false, oldPath: filePath, path: filePath });
     }
@@ -580,12 +470,8 @@ export async function PUT(
 
   try {
     const { path: segments } = await params;
-    const filePath = filePathFromSegments(segments);
-    let allowedRoots = await getAllowedFileRoots("write");
-
-    if (!isFileWriteAllowed(filePath, allowedRoots) || !isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "File editing is not allowed" }, { status: 403 });
-    }
+    const filePath = filePathFromApiSegments(segments);
+    if (hasParentDirectorySegment(filePath)) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
 
     let stat: fs.Stats;
     try {
@@ -617,10 +503,6 @@ export async function PUT(
       return NextResponse.json({ error: "Edited file must be 2MB or smaller" }, { status: 413 });
     }
 
-    allowedRoots = await getAllowedFileRoots("write");
-    if (!isFileWriteAllowed(filePath, allowedRoots) || !isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "File editing is not allowed" }, { status: 403 });
-    }
     try {
       stat = fs.statSync(filePath);
     } catch {
@@ -854,14 +736,8 @@ export async function DELETE(
 
   try {
     const { path: segments } = await params;
-    const filePath = filePathFromSegments(segments);
-    const allowedRoots = await getAllowedFileRoots("write");
-    if (!isFileWriteAllowed(filePath, allowedRoots) || isFilePermissionsTarget(filePath, true)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-    if (isAllowedRootPath(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "The project root cannot be moved to trash" }, { status: 400 });
-    }
+    const filePath = filePathFromApiSegments(segments);
+    if (hasParentDirectorySegment(filePath)) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
 
     let stat: fs.Stats;
     try {
@@ -869,14 +745,15 @@ export async function DELETE(
     } catch {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-    if (stat.isSymbolicLink()) {
-      return NextResponse.json({ error: "Symbolic links cannot be moved to trash" }, { status: 400 });
-    }
-
+    const worktree = stat.isDirectory() ? await linkedWorktreeForTrash(filePath) : null;
     await moveToSystemTrash(filePath);
+    if (worktree) {
+      try { await unregisterTrashedWorktree(worktree); }
+      catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return NextResponse.json({ trashed: true, path: filePath, error: `Moved to trash, but the Git worktree registration was not removed: ${detail}` }, { status: 409 });
+      }
+    }
     return NextResponse.json({ trashed: true, path: filePath });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
@@ -890,24 +767,14 @@ export async function GET(
   try {
     const { path: segments } = await params;
     const filePath = filePathFromApiSegments(segments);
-    // Authorization collapses `..` lexically, but the filesystem applies it
-    // after following links, so `link/../x` names a file beside the link's
-    // target, outside the roots. URL parsing already drops real `..` segments;
-    // only an encoded slash inside a segment still carries one here. The
-    // existing-path check refuses them too.
     if (hasParentDirectorySegment(filePath)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      return NextResponse.json({ error: "Invalid path" }, { status: 400 });
     }
     const rawType = request.nextUrl.searchParams.get("type") ?? "list";
     const type = parseFileRequestType(rawType);
     if (!type) {
       return NextResponse.json({ error: "Invalid file request type" }, { status: 400 });
     }
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
     let stat: fs.Stats | undefined;
     try {
       stat = fs.statSync(filePath);
@@ -915,11 +782,6 @@ export async function GET(
       if (type !== "watch") {
         return NextResponse.json({ error: "Not found" }, { status: 404 });
       }
-    }
-
-    const existingAuthorizationPath = stat ? filePath : path.dirname(filePath);
-    if (!isExistingFilePathAllowed(existingAuthorizationPath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
     if (type === "read") {
@@ -955,7 +817,6 @@ export async function GET(
       }
       const chunk = readTextPreviewChunk(filePath, stat.size, offset);
       const language = getLanguage(filePath);
-      const writableRoots = await getAllowedFileRoots("write");
       return NextResponse.json({
         ...chunk,
         language,
@@ -963,9 +824,7 @@ export async function GET(
         version: fileVersion(stat),
         // A binary file has no text round-trip: editing it would write the
         // decoded replacement characters back over the user's bytes.
-        editable: !chunk.binary && isFileWriteAllowed(filePath, writableRoots)
-          && isExistingFilePathAllowed(filePath, writableRoots)
-          && (offset === 0 || !isBinaryTextFile(filePath)),
+        editable: !chunk.binary && (offset === 0 || !isBinaryTextFile(filePath)),
       });
     }
 
@@ -1028,6 +887,7 @@ export async function GET(
       if (stat && !stat.isFile()) {
         return NextResponse.json({ error: "Not a file" }, { status: 400 });
       }
+      const fileWatchHighWaterMarkBytes = 256 * 1024;
       let watcher: fs.FSWatcher | null = null;
       let lastMtimeMs = stat?.mtimeMs ?? 0;
       let lastCtimeMs = stat?.ctimeMs ?? 0;
@@ -1035,22 +895,43 @@ export async function GET(
       let lastSize = stat?.size ?? 0;
       let lastExists = stat !== undefined;
       let stopWatch: (closeController: boolean) => void = () => {};
-      const stream = new ReadableStream({
+      const stream = new ReadableStream<Uint8Array>({
         start(controller) {
+          const diagnostic: ReaderStreamDiagnostic = {
+            kind: "file-watch",
+            sessionId: null,
+            holder: null,
+            openedAt: Date.now(),
+            connectedAt: null,
+            lastWriteAt: null,
+            droppedEvents: 0,
+            queuedBytes: 0,
+          };
+          let unregister = () => {};
           let closed = false;
+          let writer: ReturnType<typeof createReaderStreamWriter>;
           const onAbort = () => cleanup(true);
-          const cleanup = (closeController: boolean) => {
+          const cleanup = (closeController: boolean | "error" = true) => {
             if (closed) return;
             closed = true;
             request.signal.removeEventListener("abort", onAbort);
             const current = watcher;
             watcher = null;
             try { current?.close(); } catch { /* already closed */ }
-            if (closeController) {
-              try { controller.close(); } catch { /* already closed */ }
-            }
+            try {
+              if (closeController === "error") controller.error(new Error("Reader file watch stream shutting down"));
+              else if (closeController) controller.close();
+            } catch { /* already closed */ }
+            finally { unregister(); }
           };
+          writer = createReaderStreamWriter(
+            controller,
+            diagnostic,
+            () => cleanup("error"),
+            () => cleanup(true),
+          );
           stopWatch = cleanup;
+          unregister = registerReaderStreamCloser(cleanup, diagnostic);
           if (request.signal.aborted) {
             cleanup(true);
             return;
@@ -1059,11 +940,7 @@ export async function GET(
           const send = (eventName: string, data: Record<string, unknown>) => {
             if (closed) return;
             const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
-            try {
-              controller.enqueue(new TextEncoder().encode(payload));
-            } catch {
-              cleanup(true);
-            }
+            try { writer.write(payload); } catch { cleanup(false); }
           };
           try {
             const watchedDirectory = path.dirname(filePath);
@@ -1105,14 +982,19 @@ export async function GET(
             // The client snapshots only after this event, so emit it after the
             // watcher exists to avoid dropping changes between those steps.
             send("connected", { filePath });
+            if (!writer.flush() || closed) return;
           } catch {
             send("error", { message: "Failed to watch file" });
-            cleanup(true);
+            if (!closed) writer.flush();
+            if (!closed) cleanup(true);
           }
         },
         cancel() {
           stopWatch(false);
         },
+      }, {
+        highWaterMark: fileWatchHighWaterMarkBytes,
+        size: (chunk) => chunk.byteLength,
       });
       return new Response(stream, {
         headers: {
@@ -1145,7 +1027,7 @@ export async function GET(
     const sortOrder: ExplorerFilterSettings["sortOrder"] =
       sp.get("sortOrder") === "desc" ? "desc" : "asc";
     const dirents = fs.readdirSync(filePath, { withFileTypes: true });
-    const isVisible = await getFileTreeVisibility(filePath, dirents.map((d) => d.name), userFilter?.hideGitIgnored === true);
+    const isVisible = await getFileTreeVisibility(filePath, dirents.map((d) => d.name), userFilter?.hideGitIgnored === true, applyUserFilter);
     const entries = dirents
       .filter((d) => isVisible(d.name))
       .flatMap((d) => {
@@ -1159,12 +1041,12 @@ export async function GET(
           sortBy === "modified"
             ? (() => { try { return fs.statSync(full).mtime.toISOString(); } catch { return ""; } })()
             : "";
-        return [{ name: d.name, isDir, size: 0, modified }];
+        return [{ name: d.name, isDir, size: 0, modified, ...(d.isSymbolicLink() ? { isSymlink: true } : {}) }];
       })
       .sort((a, b) => compareExplorerEntries(a, b, sortBy, sortOrder));
 
     return NextResponse.json({
-      entries: withOutsideLinkTargets(filePath, entries, dirents, allowedRoots),
+      entries,
       path: filePath,
     });
   } catch (error) {

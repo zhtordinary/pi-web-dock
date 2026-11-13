@@ -15,7 +15,9 @@ const fresh = join(root, "fresh");
 const outside = join(root, "outside");
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousHostKey = process.env.HOST_API_KEY;
+const previousPolicy = process.env.PI_WEB_FILE_PERMISSIONS_FILE;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+process.env.PI_WEB_FILE_PERMISSIONS_FILE = join(root, "file-permissions.json");
 // A host variable the project's entry references: its name is listed, never its value.
 process.env.HOST_API_KEY = "host-variable-secret";
 await mkdir(agentDir, { recursive: true });
@@ -24,17 +26,16 @@ await mkdir(fresh, { recursive: true });
 await mkdir(outside, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { SECRET_MASK } = await jiti.import("../../../lib/mcp-secrets.ts");
 const { GET, POST } = await jiti.import("./route.ts");
-allowFileRoot(cwd);
-allowFileRoot(fresh);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   if (previousHostKey === undefined) delete process.env.HOST_API_KEY;
   else process.env.HOST_API_KEY = previousHostKey;
+  if (previousPolicy === undefined) delete process.env.PI_WEB_FILE_PERMISSIONS_FILE;
+  else process.env.PI_WEB_FILE_PERMISSIONS_FILE = previousPolicy;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -150,26 +151,25 @@ test("a folder without a project file lists no servers and says the file does no
   });
 });
 
-test("a cwd that is missing, not a folder, or outside the allowed folders is refused with a reason", async () => {
-  // As /api/mcp checks it (validateMcpProject()): absolute, inside the allowed roots as given, then a directory.
+test("trust requires an absolute existing directory but no file permission list", async () => {
+  // As /api/mcp checks it (validateMcpProject()): absolute, no parent segments, then a directory.
   assert.deepEqual(await get(), { status: 400, body: { error: "cwd must be an absolute path", reason: "cwd-invalid" } });
   // A relative path is not resolved against the server process's own folder.
   assert.deepEqual(await get("."), { status: 400, body: { error: "cwd must be an absolute path", reason: "cwd-invalid" } });
   assert.deepEqual(await get(projectPath), { status: 400, body: { error: "cwd must be a directory", reason: "cwd-not-directory" } });
-  assert.deepEqual(await get(outside), { status: 403, body: { error: "Access denied", reason: "cwd-denied" } });
-  // A folder that does not exist gets the same answer as one outside the roots, wherever it would be.
-  assert.deepEqual(await get(join(root, "missing")), { status: 403, body: { error: "Access denied", reason: "cwd-denied" } });
-  assert.deepEqual(await get(join(cwd, "missing")), { status: 403, body: { error: "Access denied", reason: "cwd-denied" } });
+  assert.equal((await get(outside)).status, 200);
+  assert.deepEqual(await get(join(root, "missing")), { status: 400, body: { error: "cwd must be a directory", reason: "cwd-not-directory" } });
+  assert.deepEqual(await get(join(cwd, "missing")), { status: 400, body: { error: "cwd must be a directory", reason: "cwd-not-directory" } });
   // A `..` is refused, not collapsed into an allowed folder.
   assert.deepEqual(await get(`${cwd}/../project`), { status: 403, body: { error: "Access denied", reason: "cwd-denied" } });
 
   const response = await POST(new Request("http://localhost/api/project-trust", {
     method: "POST",
     headers: { "Content-Type": "application/json", host: "localhost" },
-    body: JSON.stringify({ cwd: outside }),
+    body: JSON.stringify({ cwd: join(outside, "missing") }),
   }));
-  assert.equal(response.status, 403);
-  assert.deepEqual(await response.json(), { error: "Access denied", reason: "cwd-denied" });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "cwd must be a directory", reason: "cwd-not-directory" });
 });
 
 test("a trust store that cannot be read fails the status with a reason, and the servers are still listed", async (t) => {

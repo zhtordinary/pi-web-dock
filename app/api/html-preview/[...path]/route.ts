@@ -2,13 +2,7 @@ import { homedir } from "os";
 import fs from "fs";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
-import {
-  getAllowedFileRoots,
-  isExistingFilePathAllowed,
-  isFilePathAllowed,
-  isWindowsAbsolutePath,
-  normalizeSlashes,
-} from "@/lib/file-access";
+import { isWindowsAbsolutePath, toSlashPath as normalizeSlashes } from "@/lib/paths";
 import { getImageMime, getFileExt } from "@/lib/file-types";
 
 const MAX_RESOURCE_BYTES = 10 * 1024 * 1024;
@@ -104,11 +98,6 @@ export async function GET(
 
     const [, ...fileSegments] = segments;
     const filePath = filePathFromSegments(fileSegments);
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
     let stat: fs.Stats;
     try {
       stat = fs.statSync(filePath);
@@ -118,10 +107,6 @@ export async function GET(
     if (!stat.isFile()) {
       return NextResponse.json({ error: "Not a file" }, { status: 400 });
     }
-    if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
     const contentType = resourceMime(filePath);
     if (!contentType) {
       return NextResponse.json({ error: "Preview resource type not supported" }, { status: 415 });

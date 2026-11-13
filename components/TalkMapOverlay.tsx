@@ -1637,7 +1637,7 @@ export function TalkMapOverlay({ open, projectRoot, deviceName, focusSessionId, 
   }, [actionKey, onForkSession]);
 
   const archiveCardSession = useCallback(async (session: SessionInfo) => {
-    if (!onArchiveSession || actionKey || session.transient) return;
+    if (!onArchiveSession || actionKey || session.transient || session.relation?.kind === "subagent") return;
     setActionKey(`archive:${session.id}`);
     setError(null);
     try {
@@ -1650,7 +1650,7 @@ export function TalkMapOverlay({ open, projectRoot, deviceName, focusSessionId, 
   }, [actionKey, onArchiveSession]);
 
   const deleteCardSession = useCallback(async (session: SessionInfo) => {
-    if (!onDeleteSession || actionKey || session.transient) return;
+    if (!onDeleteSession || actionKey || session.transient || session.relation?.kind === "subagent") return;
     if (typeof window !== "undefined" && !window.confirm(t("talkMap.deleteConfirm", { title: sessionTitle(session) }))) return;
     setActionKey(`delete:${session.id}`);
     setError(null);
@@ -1906,26 +1906,26 @@ export function TalkMapOverlay({ open, projectRoot, deviceName, focusSessionId, 
             {onArchiveSession && <button
               type="button"
               data-talk-map-archive
-              disabled={edgeMode || Boolean(actionKey) || Boolean(session.transient) || status === "running"}
+              disabled={edgeMode || Boolean(actionKey) || Boolean(session.transient) || status === "running" || session.relation?.kind === "subagent"}
               aria-busy={actionKey === `archive:${session.id}`}
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => { event.stopPropagation(); void archiveCardSession(session); }}
-              title={actionKey === `archive:${session.id}` ? t("talkMap.archiving") : status === "running" ? t("talkMap.archiveRunning") : t("talkMap.archive")}
-              aria-label={actionKey === `archive:${session.id}` ? t("talkMap.archiving") : status === "running" ? t("talkMap.archiveRunning") : t("talkMap.archive")}
-              style={{ ...controlStyle(edgeMode || Boolean(actionKey) || Boolean(session.transient) || status === "running"), width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+              title={actionKey === `archive:${session.id}` ? t("talkMap.archiving") : session.relation?.kind === "subagent" ? t("sessionActivity.subagentLifecycleRequiresParent") : status === "running" ? t("talkMap.archiveRunning") : t("talkMap.archive")}
+              aria-label={actionKey === `archive:${session.id}` ? t("talkMap.archiving") : session.relation?.kind === "subagent" ? t("sessionActivity.subagentLifecycleRequiresParent") : status === "running" ? t("talkMap.archiveRunning") : t("talkMap.archive")}
+              style={{ ...controlStyle(edgeMode || Boolean(actionKey) || Boolean(session.transient) || status === "running" || session.relation?.kind === "subagent"), width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
             >
               <Archive size={12} strokeWidth={1.8} aria-hidden="true" />
             </button>}
             {onDeleteSession && <button
               type="button"
               data-talk-map-delete
-              disabled={edgeMode || Boolean(actionKey) || Boolean(session.transient)}
+              disabled={edgeMode || Boolean(actionKey) || Boolean(session.transient) || session.relation?.kind === "subagent"}
               aria-busy={actionKey === `delete:${session.id}`}
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => { event.stopPropagation(); void deleteCardSession(session); }}
-              title={actionKey === `delete:${session.id}` ? t("talkMap.deleting") : t("talkMap.delete")}
-              aria-label={actionKey === `delete:${session.id}` ? t("talkMap.deleting") : t("talkMap.delete")}
-              style={{ ...controlStyle(edgeMode || Boolean(actionKey) || Boolean(session.transient)), width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#dc2626" }}
+              title={actionKey === `delete:${session.id}` ? t("talkMap.deleting") : session.relation?.kind === "subagent" ? t("sessionActivity.subagentLifecycleRequiresParent") : t("talkMap.delete")}
+              aria-label={actionKey === `delete:${session.id}` ? t("talkMap.deleting") : session.relation?.kind === "subagent" ? t("sessionActivity.subagentLifecycleRequiresParent") : t("talkMap.delete")}
+              style={{ ...controlStyle(edgeMode || Boolean(actionKey) || Boolean(session.transient) || session.relation?.kind === "subagent"), width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", color: "#dc2626" }}
             >
               <Trash2 size={12} strokeWidth={1.8} aria-hidden="true" />
             </button>}

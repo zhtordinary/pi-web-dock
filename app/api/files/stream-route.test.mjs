@@ -33,5 +33,5 @@ test("the restrictive headers are applied to every streamFile response shape", (
 test("a binary text preview is never editable", () => {
   // The binary branch returns no text, so an edit would save replacement
   // characters over the user's bytes.
-  assert.match(source, /editable: !chunk\.binary && isFileWriteAllowed/);
+  assert.match(source, /editable: !chunk\.binary && \(offset === 0 \|\| !isBinaryTextFile/);
 });

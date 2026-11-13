@@ -12,7 +12,7 @@ import { assertSessionMutationOk } from "@/lib/session-mutation";
 import { clearSessionActivityCache, fetchSessionActivity } from "@/lib/session-activity-fetch";
 import { loadExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
-import { skillExpansionToCommand } from "@/lib/slash-display";
+import { sessionDisplayTitle } from "@/lib/session-display";
 import { useI18n } from "@/hooks/useI18n";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { isWithinActivityTimeRange } from "@/lib/session-activity-filters";
@@ -22,6 +22,8 @@ import { SessionListMeta } from "./SessionListMeta";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { ExplorerSection } from "./ExplorerSection";
 import { SessionSearchInput } from "./SessionSearchInput";
+import { SubagentVisibilityMenu } from "./SubagentVisibilityMenu";
+import { useSubagentVisibility, setSubagentVisibility } from "@/hooks/useSubagentVisibility";
 import { SessionSubprojectMenu } from "./SessionSubprojectMenu";
 import { isSubprojectReorderDragBlocked, useSessionSubprojectPointerDrag } from "@/lib/session-subproject-pointer-dnd";
 import { lineageParentId } from "@/lib/session-lineage";
@@ -470,6 +472,8 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
   const [sharedFilters] = useSharedActivityFilters();
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [activityTimes, setActivityTimes] = useState<Record<string, string>>({});
+  const [activityRunningSessionIds, setActivityRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [sessionModelNames, setSessionModelNames] = useState<Record<string, string>>({});
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [sessionListSnapshotView, setSessionListSnapshotView] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
@@ -492,6 +496,8 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
   const [subprojectSortSettings, setSubprojectSortSettings] = useState<SubprojectSortSetting[]>([]);
   const [collapsedSubprojectBuckets, setCollapsedSubprojectBuckets] = useState<string[]>([]);
   const [collapsedSessionIds, setCollapsedSessionIds] = useState<Set<string>>(() => new Set());
+  const [subagentContextMenu, setSubagentContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const visibleSubagentParentIds = useSubagentVisibility();
   const [subprojectDeleteConfirmId, setSubprojectDeleteConfirmId] = useState<string | null>(null);
   const [subprojectDeleteBusyId, setSubprojectDeleteBusyId] = useState<string | null>(null);
   const [subprojectDeleteError, setSubprojectDeleteError] = useState<string | null>(null);
@@ -623,6 +629,10 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
   const activityLoadInFlightRef = useRef<{ view: boolean; promise: Promise<void> } | null>(null);
   const currentArchiveViewRef = useRef(showArchived);
   currentArchiveViewRef.current = showArchived;
+  const effectiveRunningSessionIds = useMemo(() => {
+    if (activityRunningSessionIds.size === 0) return runningSessionIds;
+    return new Set([...runningSessionIds, ...activityRunningSessionIds]);
+  }, [activityRunningSessionIds, runningSessionIds]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
@@ -639,15 +649,22 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
       if (currentArchiveViewRef.current !== showArchived) return;
       try {
         const activityUrl = `/api/session-runs?scope=local${showArchived ? "&archived=1" : ""}`;
-        const body = await fetchSessionActivity<{ sessions?: Array<{ session?: { id?: string }; lastActivityAt?: string }> }>(activityUrl, { force: true });
+        const body = await fetchSessionActivity<{ sessions?: Array<{ session?: { id?: string }; lastActivityAt?: string; modelName?: string; status?: string; execution?: { active?: boolean } }> }>(activityUrl, { force: true });
         if (requestId !== activityLoadRequestRef.current || currentArchiveViewRef.current !== showArchived) return;
         const next: Record<string, string> = {};
+        const nextModels: Record<string, string> = {};
+        const nextRunning = new Set<string>();
         for (const item of body.sessions ?? []) {
           const id = item.session?.id;
-          if (typeof id === "string" && typeof item.lastActivityAt === "string") next[id] = item.lastActivityAt;
+          if (typeof id !== "string") continue;
+          if (typeof item.lastActivityAt === "string") next[id] = item.lastActivityAt;
+          if (typeof item.modelName === "string" && item.modelName.trim()) nextModels[id] = item.modelName.trim();
+          if (item.execution?.active || item.status === "running" || item.status === "retrying" || item.status === "waiting_user") nextRunning.add(id);
         }
         if (requestId !== activityLoadRequestRef.current || currentArchiveViewRef.current !== showArchived) return;
         setActivityTimes(next);
+        setActivityRunningSessionIds(nextRunning);
+        setSessionModelNames(nextModels);
       } catch {
         // Session modified timestamps remain the local fallback.
       }
@@ -689,6 +706,36 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
       if (sessionLoadInFlightRef.current?.promise === request) sessionLoadInFlightRef.current = null;
     }
   }, [loadSessionActivityTimes, showArchived]);
+
+  useEffect(() => {
+    setAllSessions((current) => {
+      let changed = false;
+      const next = current.map((session) => {
+        const modelName = sessionModelNames[session.id];
+        if (session.modelName === modelName) return session;
+        changed = true;
+        if (modelName) return { ...session, modelName };
+        const withoutModel = { ...session };
+        delete withoutModel.modelName;
+        return withoutModel;
+      });
+      return changed ? next : current;
+    });
+  }, [sessionModelNames]);
+
+  useEffect(() => {
+    const refreshActivityWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadSessionActivityTimes(true);
+    };
+    const id = window.setInterval(refreshActivityWhenVisible, 5_000);
+    document.addEventListener("visibilitychange", refreshActivityWhenVisible);
+    window.addEventListener("focus", refreshActivityWhenVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", refreshActivityWhenVisible);
+      window.removeEventListener("focus", refreshActivityWhenVisible);
+    };
+  }, [loadSessionActivityTimes]);
 
   const initialLoadDone = useRef(false);
   const previousShowArchivedRef = useRef(showArchived);
@@ -793,13 +840,13 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
-    const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
+    const completedInBackground = [...previous].filter((id) => !effectiveRunningSessionIds.has(id) && id !== selectedSessionId);
+    const newlyRunning = [...effectiveRunningSessionIds].filter((id) => !previous.has(id));
 
     if (completedInBackground.length > 0 || newlyRunning.length > 0) {
       setUnreadSessionIds((prev) => {
         const next = new Set(prev);
-        runningSessionIds.forEach((id) => next.delete(id));
+        effectiveRunningSessionIds.forEach((id) => next.delete(id));
         completedInBackground.forEach((id) => next.add(id));
         return next;
       });
@@ -814,8 +861,8 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
       onBackgroundTaskDone?.(completedInBackground);
     }
 
-    previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId, allSessions, loadSessions, onBackgroundTaskDone]);
+    previousRunningSessionIdsRef.current = effectiveRunningSessionIds;
+  }, [effectiveRunningSessionIds, selectedSessionId, allSessions, loadSessions, onBackgroundTaskDone]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -1148,11 +1195,11 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
       if (!key) continue;
       let entry = counts.get(key);
       if (!entry) { entry = { running: 0, unread: 0 }; counts.set(key, entry); }
-      if (runningSessionIds.has(s.id)) entry.running++;
+      if (effectiveRunningSessionIds.has(s.id)) entry.running++;
       if (unreadSessionIds.has(s.id)) entry.unread++;
     }
     return counts;
-  }, [allSessions, runningSessionIds, unreadSessionIds]);
+  }, [allSessions, effectiveRunningSessionIds, unreadSessionIds]);
 
   // Any activity in a project other than the one currently selected — shown as
   // a dot on the (collapsed) selector button so it is visible without opening
@@ -1195,17 +1242,27 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
     [autoHiddenSubprojectIds, projectSubprojects],
   );
   const visibleFilteredSessions = filterSubprojectItems(filteredSessions, selectedSubprojectHiddenIds);
+  const visibleSubagentSessions = useMemo(
+    () => visibleFilteredSessions.filter((session) => session.id === selectedSessionId
+      || session.relation?.kind !== "subagent"
+      || visibleSubagentParentIds.has(session.relation.parentSessionId)),
+    [selectedSessionId, visibleFilteredSessions, visibleSubagentParentIds],
+  );
+  const subagentParentIds = useMemo(
+    () => new Set(allSessions.flatMap((session) => session.relation?.kind === "subagent" ? [session.relation.parentSessionId] : [])),
+    [allSessions],
+  );
   const selectedSubprojectSortMode = selectedSubprojectSort?.mode ?? "custom";
   const selectedSubprojectCustomOrder = orderedSubprojectIds(selectedSubprojects, selectedSubprojectSort?.order);
   const subprojectBuckets = useMemo(
     () => selectedSubprojects.length > 0 && selectedProjectKey
-      ? groupBySubproject(visibleFilteredSessions, selectedSubprojects, selectedProjectKey, t("sessionActivity.unclassified"), {
+      ? groupBySubproject(visibleSubagentSessions, selectedSubprojects, selectedProjectKey, t("sessionActivity.unclassified"), {
         mode: selectedSubprojectSortMode,
         customOrder: selectedSubprojectSort?.order,
         compareItems: (left, right) => right.modified.localeCompare(left.modified),
       })
       : [],
-    [selectedProjectKey, selectedSubprojectSort?.order, selectedSubprojectSortMode, selectedSubprojects, t, visibleFilteredSessions],
+    [selectedProjectKey, selectedSubprojectSort?.order, selectedSubprojectSortMode, selectedSubprojects, t, visibleSubagentSessions],
   );
   const persistSubprojectSort = useCallback(async (order: string[]): Promise<boolean> => {
     if (!selectedProjectKey || selectedSubprojectSortMode !== "custom") return false;
@@ -1411,7 +1468,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
       : null);
 
   // Build parent-child tree within the filtered set
-  const sessionTree = buildSessionTree(visibleFilteredSessions);
+  const sessionTree = buildSessionTree(visibleSubagentSessions);
   const virtualScopeKey = `${showArchived ? "archived" : "active"}:${searchQuery.trim() ? "search" : groupByWorktree ? "worktree" : selectedSubprojects.length > 0 ? "subproject" : "tree"}:${selectedProjectKey ?? ""}`;
   useEffect(() => {
     setVirtualRowHeights({});
@@ -1430,12 +1487,15 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
     ...row,
     height: virtualRowHeights[row.id] ?? row.height,
   })) as SessionSidebarRow<T, B>[];
+  const openSubagentContextMenu = useCallback((id: string, clientX: number, clientY: number) => {
+    setSubagentContextMenu({ id, x: clientX, y: clientY });
+  }, []);
   const renderVirtualSession = (session: SessionInfo, depth: number, hasChildren: boolean, collapsed: boolean): ReactNode => (
     <SessionTreeItem
       node={{ session, children: [] }}
       selectedSessionId={selectedSessionId}
       highlightedSessionId={highlightedSessionId}
-      runningSessionIds={runningSessionIds}
+      runningSessionIds={effectiveRunningSessionIds}
       unreadSessionIds={unreadSessionIds}
       onSelectSession={handleSelectSessionFromList}
       onRenamed={() => loadSessions(false, true)}
@@ -1451,6 +1511,9 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
         return next;
       })}
       hasChildrenOverride={hasChildren}
+      hasSubagentChildren={() => subagentParentIds.has(session.id)}
+      subagentsVisible={() => visibleSubagentParentIds.has(session.id)}
+      onSubagentContextMenu={openSubagentContextMenu}
       virtualized
       onInteractionChange={markVirtualInteraction}
     />
@@ -2261,7 +2324,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
                 {t("sidebar.searchNoResults")}
               </div>
             )}
-            {!loading && !error && searchQuery.trim().length === 0 && visibleFilteredSessions.length === 0 && (
+            {!loading && !error && searchQuery.trim().length === 0 && visibleSubagentSessions.length === 0 && (
               <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
                 {showArchived ? t("sessionActivity.noArchived") : t("sessionActivity.empty")}
               </div>
@@ -2297,7 +2360,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
             {searchQuery.trim().length === 0 && !loading && (groupByWorktree
               ? <div ref={virtualContentRef}>
                 <WorktreeSessionBuckets
-                  items={visibleFilteredSessions}
+                  items={visibleSubagentSessions}
                   sessionOf={session => session}
                   focusSessionId={highlightedSessionId ?? undefined}
                   showProjectPath
@@ -2379,6 +2442,15 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
           />
         </div>
       )}
+      {subagentContextMenu && (
+        <SubagentVisibilityMenu
+          position={{ x: subagentContextMenu.x, y: subagentContextMenu.y }}
+          visible={visibleSubagentParentIds.has(subagentContextMenu.id)}
+          onToggle={() => setSubagentVisibility(subagentContextMenu.id, !visibleSubagentParentIds.has(subagentContextMenu.id))}
+          onClose={() => setSubagentContextMenu(null)}
+          label={visibleSubagentParentIds.has(subagentContextMenu.id) ? t("sidebar.hideSubagents") : t("sidebar.showSubagents")}
+        />
+      )}
     </div>
   );
 }
@@ -2401,6 +2473,9 @@ function SessionTreeItem({
   onToggleCollapse,
   virtualized = false,
   hasChildrenOverride,
+  hasSubagentChildren = () => false,
+  subagentsVisible = () => false,
+  onSubagentContextMenu,
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
@@ -2419,6 +2494,9 @@ function SessionTreeItem({
   onToggleCollapse?: () => void;
   virtualized?: boolean;
   hasChildrenOverride?: boolean;
+  hasSubagentChildren?: (sessionId: string) => boolean;
+  subagentsVisible?: (sessionId: string) => boolean;
+  onSubagentContextMenu?: (id: string, clientX: number, clientY: number) => void;
 }) {
   const [localCollapsed, setLocalCollapsed] = useState(false);
   const collapsed = controlledCollapsed ?? localCollapsed;
@@ -2434,7 +2512,7 @@ function SessionTreeItem({
             left: depth * 12 + 6,
             top: 0, bottom: 0,
             width: 1,
-            background: "var(--border)",
+            background: "color-mix(in srgb, var(--text-dim) 28%, transparent)",
             pointerEvents: "none",
           }} />
         )}
@@ -2450,6 +2528,9 @@ function SessionTreeItem({
           onArchived={(id) => onSessionArchived?.(id)}
           depth={depth}
           hasChildren={hasChildren}
+          hasSubagentChildren={hasSubagentChildren(node.session.id)}
+          subagentsVisible={subagentsVisible(node.session.id)}
+          onSubagentContextMenu={onSubagentContextMenu}
           collapsed={collapsed}
           onToggleCollapse={() => {
             if (onToggleCollapse) onToggleCollapse();
@@ -2477,6 +2558,9 @@ function SessionTreeItem({
               depth={depth + 1}
               subprojects={subprojects}
               onMoveToSubproject={onMoveToSubproject}
+              hasSubagentChildren={hasSubagentChildren}
+              subagentsVisible={subagentsVisible}
+              onSubagentContextMenu={onSubagentContextMenu}
             />
           ))}
         </div>
@@ -2545,6 +2629,9 @@ function SessionItem({
   subprojects = [],
   onMoveToSubproject,
   onInteractionChange,
+  hasSubagentChildren = false,
+  subagentsVisible = false,
+  onSubagentContextMenu,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -2562,6 +2649,9 @@ function SessionItem({
   subprojects?: SubprojectDefinition[];
   onMoveToSubproject?: (session: SessionInfo, subprojectId: string | null) => Promise<boolean>;
   onInteractionChange?: (id: string, active: boolean) => void;
+  hasSubagentChildren?: boolean;
+  subagentsVisible?: boolean;
+  onSubagentContextMenu?: (id: string, clientX: number, clientY: number) => void;
 }) {
   const { t } = useI18n();
   const hover = useSessionHover();
@@ -2592,11 +2682,8 @@ function SessionItem({
     }
   }, [renaming]);
 
-  // A stored first message may be an SDK-expanded <skill> block; collapse it
-  // back to the compact /skill:name args command the user typed before using
-  // it as the auto-name fallback, mirroring MessageView's rendering.
-  const displayFirstMessage = skillExpansionToCommand(session.firstMessage) ?? session.firstMessage;
-  const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const title = sessionDisplayTitle(session, 50);
+  const lifecycleManagedByParent = session.relation?.kind === "subagent";
   const pointerDrag = useSessionSubprojectPointerDrag({
     projectKey: session.projectKey,
     disabled: session.transient || !onMoveToSubproject,
@@ -2607,17 +2694,16 @@ function SessionItem({
     e.stopPropagation();
     if (session.transient) return;
     setRenameError(null);
-    setRenameValue(session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12));
+    setRenameValue(session.name || title);
     setRenaming(true);
-  }, [session.name, session.transient, displayFirstMessage, session.id]);
+  }, [session.name, session.transient, title]);
 
   const commitRename = useCallback(async () => {
     const name = renameValue.trim();
     setRenaming(false);
     // No-op when unchanged: the fallback title (first message / id) isn't a
-    // real stored name, so don't persist it as one. (The rename input seeds
-    // from the same collapsed displayFirstMessage, so an untouched rename of
-    // a skill-invoked session stays a no-op instead of persisting raw XML.)
+    // real stored name, so don't persist it as one. The rename input uses the
+    // same compact title, so a skill-invoked session stays a no-op when untouched.
     if (renameValue === title || name === (session.name ?? "")) return;
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
@@ -2639,7 +2725,7 @@ function SessionItem({
   }, [renameValue, session.id, session.name, onRenamed, title]);
 
   const performDelete = useCallback(async () => {
-    if (session.transient) return;
+    if (session.transient || lifecycleManagedByParent) return;
     setConfirmDelete(false);
     setDeleteError(null);
     setDeleting(true);
@@ -2652,16 +2738,17 @@ function SessionItem({
       setDeleteError(error instanceof Error ? error.message : String(error));
       setDeleting(false);
     }
-  }, [session.id, session.transient, onDeleted]);
+  }, [lifecycleManagedByParent, session.id, session.transient, onDeleted]);
 
   const handleDeleteClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    if (lifecycleManagedByParent) return;
     if (e.shiftKey) {
       void performDelete();
     } else {
       setConfirmDelete(true);
     }
-  }, [performDelete]);
+  }, [lifecycleManagedByParent, performDelete]);
 
   const handleDeleteConfirm = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -2675,7 +2762,7 @@ function SessionItem({
 
   const handleArchiveClick = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (archiving) return;
+    if (archiving || lifecycleManagedByParent) return;
     setArchiveError(null);
     setArchiving(true);
     try {
@@ -2692,9 +2779,15 @@ function SessionItem({
     } finally {
       setArchiving(false);
     }
-  }, [session.id, session.archived, onArchived, archiving]);
+  }, [lifecycleManagedByParent, session.id, session.archived, onArchived, archiving]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (hasSubagentChildren && onSubagentContextMenu) {
+      e.preventDefault();
+      e.stopPropagation();
+      onSubagentContextMenu(session.id, e.clientX, e.clientY);
+      return;
+    }
     const handled = dispatchSessionRowContextMenu({
       id: session.id,
       path: session.path,
@@ -2707,11 +2800,11 @@ function SessionItem({
     if (!handled) return;
     e.preventDefault();
     e.stopPropagation();
-  }, [onRenamed, session.cwd, session.id, session.name, session.path]);
+  }, [hasSubagentChildren, onRenamed, onSubagentContextMenu, session.cwd, session.id, session.name, session.path]);
 
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
   const ITEM_HEIGHT = 54;
-  const archiveTitle = archiveError ?? (isRunning ? "Stop the agent before archiving" : (session.archived ? "Unarchive" : "Archive"));
+  const archiveTitle = archiveError ?? (lifecycleManagedByParent ? t("sessionActivity.subagentLifecycleRequiresParent") : isRunning ? "Stop the agent before archiving" : (session.archived ? "Unarchive" : "Archive"));
 
   return (
     <div
@@ -2821,10 +2914,14 @@ function SessionItem({
               </svg>
             </span>
           )}
-          {session.parentSessionId || (!session.contextSourceSessionId && depth > 0) ? (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.forkedSession")} style={{ flexShrink: 0 }}>
+          {session.relation?.kind === "subagent" ? (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sidebar.subagent")} style={{ flexShrink: 0 }}>
               <rect x="5" y="7" width="14" height="11" rx="2" />
               <path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
+            </svg>
+          ) : (session.parentSessionId || (!session.contextSourceSessionId && depth > 0)) ? (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-label={t("sessionActivity.forkedSession")} style={{ flexShrink: 0 }}>
+              <line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" />
             </svg>
           ) : null}
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -2901,7 +2998,7 @@ function SessionItem({
               </button>
               <button
                 onClick={handleArchiveClick}
-                disabled={isRunning}
+                disabled={isRunning || lifecycleManagedByParent}
                 title={archiveTitle}
                 aria-label={archiveTitle}
                 style={{
@@ -2909,12 +3006,12 @@ function SessionItem({
                   width: 32, height: 32, padding: 0,
                   background: "var(--bg-hover)", border: "1px solid var(--border)",
                   borderRadius: 7, color: "var(--text-muted)",
-                  cursor: isRunning ? "default" : "pointer", flexShrink: 0,
-                  opacity: isRunning ? 0.5 : 1,
+                  cursor: isRunning || lifecycleManagedByParent ? "default" : "pointer", flexShrink: 0,
+                  opacity: isRunning || lifecycleManagedByParent ? 0.5 : 1,
                   transition: "background 0.12s, color 0.12s, border-color 0.12s",
                 }}
                 onMouseEnter={(e) => {
-                  if (isRunning) return;
+                  if (isRunning || lifecycleManagedByParent) return;
                   e.currentTarget.style.background = "var(--bg-selected)";
                   e.currentTarget.style.color = "var(--accent)";
                   e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
@@ -2933,16 +3030,19 @@ function SessionItem({
               </button>
               <button
                 onClick={handleDeleteClick}
-                title={t("sidebar.deleteWithShiftClick")}
+                disabled={lifecycleManagedByParent}
+                title={lifecycleManagedByParent ? t("sessionActivity.subagentLifecycleRequiresParent") : t("sidebar.deleteWithShiftClick")}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
                   width: 32, height: 32, padding: 0,
                   background: "var(--bg-hover)", border: "1px solid var(--border)",
                   borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
+                  cursor: lifecycleManagedByParent ? "default" : "pointer", flexShrink: 0,
+                  opacity: lifecycleManagedByParent ? 0.5 : 1,
                   transition: "background 0.12s, color 0.12s, border-color 0.12s",
                 }}
                 onMouseEnter={(e) => {
+                  if (lifecycleManagedByParent) return;
                   e.currentTarget.style.background = "rgba(239,68,68,0.08)";
                   e.currentTarget.style.color = "#ef4444";
                   e.currentTarget.style.borderColor = "rgba(239,68,68,0.35)";
@@ -3015,7 +3115,8 @@ function SearchResultItem({
   }, [archiveError, busy, confirmDelete, hit.id, onInteractionChange, renaming]);
   // Same title source as SessionTreeItem rows.
   const title = hit.name?.trim() || hit.firstMessage?.trim().split("\n")[0]?.slice(0, 50) || hit.id.slice(0, 12);
-  const archiveTitle = archiveError ?? (hit.archived ? "Unarchive" : "Archive");
+  const lifecycleManagedByParent = hit.relation?.kind === "subagent";
+  const archiveTitle = archiveError ?? (lifecycleManagedByParent ? t("sessionActivity.subagentLifecycleRequiresParent") : (hit.archived ? "Unarchive" : "Archive"));
   const searchLabels = sessionSearchResultSources(hit).map((source) => source === "content"
     ? t("sessionActivity.searchContentMatch", { count: hit.contentMatchCount })
     : source === "title"
@@ -3040,7 +3141,7 @@ function SearchResultItem({
   };
 
   const archive = async () => {
-    if (busy) return;
+    if (busy || lifecycleManagedByParent) return;
     setArchiveError(null);
     setBusy(true);
     try {
@@ -3059,7 +3160,7 @@ function SearchResultItem({
   };
 
   const remove = async () => {
-    if (busy) return;
+    if (busy || lifecycleManagedByParent) return;
     setConfirmDelete(false);
     setArchiveError(null);
     setBusy(true);
@@ -3170,16 +3271,18 @@ function SearchResultItem({
               <button
                 title={archiveTitle}
                 aria-label={archiveTitle}
+                disabled={lifecycleManagedByParent}
                 onClick={(e) => { e.stopPropagation(); void archive(); }}
-                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer" }}
+                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--text-muted)", cursor: lifecycleManagedByParent ? "default" : "pointer", opacity: lifecycleManagedByParent ? 0.5 : 1 }}
               >
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" /></svg>
               </button>
               <button
-                title={t("sidebar.delete")}
-                aria-label={t("sidebar.delete")}
-                onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "#ef4444", cursor: "pointer" }}
+                title={lifecycleManagedByParent ? t("sessionActivity.subagentLifecycleRequiresParent") : t("sidebar.delete")}
+                aria-label={lifecycleManagedByParent ? t("sessionActivity.subagentLifecycleRequiresParent") : t("sidebar.delete")}
+                disabled={lifecycleManagedByParent}
+                onClick={(e) => { e.stopPropagation(); if (!lifecycleManagedByParent) setConfirmDelete(true); }}
+                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "#ef4444", cursor: lifecycleManagedByParent ? "default" : "pointer", opacity: lifecycleManagedByParent ? 0.5 : 1 }}
               >
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></svg>
               </button>

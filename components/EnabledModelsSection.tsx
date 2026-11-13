@@ -66,6 +66,7 @@ const FAILURE_KEYS: Record<string, string> = {
   "last-model": "models.enabledLastModel",
   "project-scope": "models.enabledProjectScope",
   "unverified-models": "models.enabledStaleHint",
+  "unrestricted-scope": "models.enabledUnrestrictedScope",
   "unsafe-scope": "models.enabledUnsafeScope",
   "revision-conflict": "models.enabledRevisionConflict",
 };
@@ -402,6 +403,7 @@ export function EnabledModelsSection({
   const scopeNoteId = `${noteId}-scope`;
   const lastModelNoteId = `${noteId}-last`;
   const contextNoteId = `${noteId}-context`;
+  const disableBlockedByUnsafeScope = editable && view?.allEnabled === true && view.patterns !== null && bulk.disableRefs.length > 0;
   const disableBlockedByLastModel = editable && !bulk.canDisable && bulk.disableRefs.length > 0;
   const showLastModelNote = disableBlockedByLastModel || (editable && shown.some((model) => isLastEnabledModel(view, model)));
   // A provider-wide action is resolved server-side so models the browser has
@@ -429,7 +431,13 @@ export function EnabledModelsSection({
         <ConfigButton
           size="small"
           disabled={busy || !bulk.canDisable}
-          aria-describedby={!editable ? scopeNoteId : disableBlockedByLastModel ? lastModelNoteId : undefined}
+          aria-describedby={!editable
+            ? scopeNoteId
+            : disableBlockedByUnsafeScope
+              ? scopeNoteId
+              : disableBlockedByLastModel
+                ? lastModelNoteId
+                : undefined}
           onClick={() => runBulk(false, bulk.disableRefs)}
         >
           {filtered ? t("models.disableShown") : t("models.disableAll")}
@@ -460,6 +468,7 @@ export function EnabledModelsSection({
       ) : null}
 
       {!editable && <div id={scopeNoteId} className="enabled-models-note">{t("models.enabledProjectScope")}</div>}
+      {disableBlockedByUnsafeScope && <div id={scopeNoteId} className="enabled-models-note">{t("models.enabledUnsafeScope")}</div>}
       {showLastModelNote && <div id={lastModelNoteId} className="enabled-models-note">{t("models.enabledLastModel")}</div>}
       {failure && (
         <div role="alert" className="enabled-models-error">
@@ -511,9 +520,15 @@ export function EnabledModelsSection({
               <ConfigSwitch
                 checked={model.enabled}
                 loading={pending === model.ref}
-                disabled={busy || !view?.editable || lastOne}
+                disabled={busy || !view?.editable || (view.allEnabled && view.patterns !== null) || lastOne}
                 label={t("models.enabledToggle", { model: model.name })}
-                describedBy={!editable ? scopeNoteId : lastOne ? lastModelNoteId : undefined}
+                describedBy={!editable
+                  ? scopeNoteId
+                  : view.allEnabled && view.patterns !== null
+                    ? scopeNoteId
+                    : lastOne
+                      ? lastModelNoteId
+                      : undefined}
                 onChange={(checked) => controller.setModels(model.ref, [model.ref], checked)}
               />
             </div>

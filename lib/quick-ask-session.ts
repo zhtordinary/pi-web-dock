@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { getCurrentSystemMessage, type TranscriptMessages } from "@earendil-works/pi-ai/utils/transcript";
 
 /**
  * The provider session for a Side Ask is synthetic. Keep it stable for the
@@ -56,7 +57,19 @@ export function withQuickAskCacheAffinity(
   // Pi/OpenAI limits prompt_cache_key to 64 Unicode characters.
   const scopeKey = Array.from(providerSessionId).slice(0, 64).join("");
   if (body.prompt_cache_key !== scopeKey && body.prompt_cache_key !== parentKey) return undefined;
-  return { ...body, prompt_cache_key: parentKey };
+  const routed = { ...body, prompt_cache_key: parentKey };
+  // Codex also routes by a header; this private marker keeps transport identity separate.
+  if (model.provider === "openai-codex" && model.api === "openai-codex-responses") {
+    Object.defineProperty(routed, Symbol.for("pi-web:side-ask-cache-route"), { value: parentKey });
+  }
+  return routed;
+}
+
+/** Wait only for summaries already present in the anchored transcript, not for every MCP server. */
+export function quickAskCachedMcpSummaries(messages: TranscriptMessages): Set<string> {
+  const section = getCurrentSystemMessage(messages)?.sections?.mcp_servers;
+  if (typeof section !== "string") return new Set();
+  return new Set([...section.matchAll(/^- (mcp__[^\s]+) \((?:codemode|tool_search)\): \S/gm)].map((match) => match[1]));
 }
 
 export interface QuickAskRequestGeneration {

@@ -112,6 +112,8 @@ export interface QuickAskData {
   /** Fixed context origin, independent of the physical metadata parent. */
   contextAnchorId?: string | null;
   nativeEntries?: SessionEntry[];
+  /** Display projection of native tool results, without arguments or output. */
+  toolCalls?: Array<{ name: string; isError: boolean }>;
   usageEvent?: QuickAskUsageEvent;
 }
 
@@ -182,14 +184,20 @@ export function normalizeQuickAskEntry(value: unknown, admitted: SessionEntry[] 
   if (!value || typeof value !== "object") return undefined;
   const entry = value as QuickAskEntry;
   if (entry.type !== "custom" || entry.customType !== "quick_ask" || !entry.id || !entry.data) return undefined;
-  const nativeEntries = [...admitted, ...(entry.data.nativeEntries ?? [])];
+  const recorded = entry.data.nativeEntries ?? [];
+  const actualUser = recorded.find((native) => native.type === "message" && native.message.role === "user");
+  const admittedUser = admitted.find((native) => native.type === "message" && native.message.role === "user");
+  const nativeEntries = [...(actualUser ? admitted.filter((native) => native !== admittedUser) : admitted), ...recorded];
   const messages = nativeEntries.flatMap((native) => native.type === "message" ? [native.message] : []);
-  const user = messages.find((message) => message.role === "user");
+  const user = admittedUser?.type === "message" && admittedUser.message.role === "user"
+    ? admittedUser.message : messages.find((message) => message.role === "user");
   const assistant = [...messages].reverse().find((message) => message.role === "assistant");
   const question = user ? messageText(user.content) : entry.data.question;
   const answer = assistant ? messageText(assistant.content) : entry.data.answer;
   if (typeof question !== "string" || typeof answer !== "string") return undefined;
   const thinking = assistant ? messageText(assistant.content, "thinking") : entry.data.thinking;
+  const toolCalls = messages.flatMap((message) => message.role === "toolResult" && typeof message.toolName === "string"
+    ? [{ name: message.toolName, isError: message.isError === true }] : []);
   const images = userMessageImages(user) ?? entry.data.images;
   const modelState = nativeEntries.findLast((native) => native.type === "model_change"
     || (native.type === "message" && native.message.role === "assistant"));
@@ -198,7 +206,8 @@ export function normalizeQuickAskEntry(value: unknown, admitted: SessionEntry[] 
     : modelState?.type === "message" && modelState.message.role === "assistant"
       ? { provider: modelState.message.provider, modelId: modelState.message.model } : undefined;
   const data: QuickAskData = { ...entry.data, question, answer, ...(thinking ? { thinking } : {}),
-    ...(images?.length ? { images } : {}), ...(nativeEntries.length ? { nativeEntries } : {}) };
+    ...(images?.length ? { images } : {}), ...(nativeEntries.length ? { nativeEntries } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}) };
   return {
     ...entry, data, requestedModel,
     stopReason: assistant?.role === "assistant" ? assistant.stopReason : undefined,

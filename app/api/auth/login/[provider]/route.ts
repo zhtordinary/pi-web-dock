@@ -1,7 +1,12 @@
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
+import { createLoginOptions, createModelRuntimeWithExtensions, disposeModelRuntime } from "@/lib/model-runtime";
+import {
+  registerReaderStreamCloser,
+  READER_STREAM_HIGH_WATER_MARK_BYTES,
+  type ReaderStreamDiagnostic,
+} from "@/lib/reader-event-stream";
 
 export const dynamic = "force-dynamic";
 
@@ -48,92 +53,134 @@ export async function GET(
   { params }: { params: Promise<{ provider: string }> }
 ) {
   const { provider } = await params;
-
   const encoder = new TextEncoder();
-  const send = (controller: ReadableStreamDefaultController, data: unknown) => {
-    controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-  };
 
   // AbortController propagates client disconnect into ModelRuntime.login().
   const abort = new AbortController();
-  req.signal.addEventListener("abort", () => abort.abort());
+  const abortRequest = () => abort.abort();
+  req.signal.addEventListener("abort", abortRequest, { once: true });
 
   const stream = new ReadableStream({
     async start(controller) {
-      const modelRuntime = await createModelRuntimeWithExtensions();
-      if (!modelRuntime.getProvider(provider)?.auth.oauth) {
-        send(controller, { type: "error", message: `Unknown provider: ${provider}` });
-        controller.close();
-        return;
-      }
-
+      const diagnostic: ReaderStreamDiagnostic = {
+        kind: "provider-login",
+        sessionId: null,
+        holder: null,
+        openedAt: Date.now(),
+        connectedAt: null,
+        lastWriteAt: null,
+        droppedEvents: 0,
+        queuedBytes: 0,
+      };
+      let closed = false;
+      let unregister = () => {};
       const registry = getCallbackRegistry();
       const activeTokens = new Set<string>();
       let pendingManualRequest: { token: string; promise: Promise<string> } | undefined;
 
-      const createClientInputRequest = () => {
-        // Manual-code handshake token; crypto randomness so a pending OAuth
-        // manual flow cannot be hijacked by predicting Math.random().
-        const token = `${provider}-${randomUUID()}`;
-        activeTokens.add(token);
-
-        const promise = new Promise<string>((resolve, reject) => {
-          registry.set(token, {
-            resolve: (value) => {
-              activeTokens.delete(token);
-              registry.delete(token);
-              resolve(value);
-            },
-            reject: (error) => {
-              activeTokens.delete(token);
-              registry.delete(token);
-              reject(error);
-            },
-          });
-        });
-
-        return { token, promise };
-      };
-
-      const getManualInputRequest = () => {
-        if (!pendingManualRequest) {
-          pendingManualRequest = createClientInputRequest();
-          pendingManualRequest.promise
-            .finally(() => {
-              pendingManualRequest = undefined;
-            })
-            .catch(() => {});
-        }
-        return pendingManualRequest;
-      };
-
-      // Cleanup: remove pending token and abort any waiting promise
-      const cleanup = () => {
+      const cleanupPending = () => {
         for (const token of activeTokens) {
           registry.get(token)?.reject(new Error("Login cancelled"));
           registry.delete(token);
         }
         activeTokens.clear();
       };
-
-      // Also cancel on client disconnect
-      abort.signal.addEventListener("abort", cleanup);
+      const cleanup = (mode: boolean | "error" = true) => {
+        if (closed) return;
+        closed = true;
+        cleanupPending();
+        abort.abort();
+        req.signal.removeEventListener("abort", abortRequest);
+        abort.signal.removeEventListener("abort", cleanupPending);
+        try {
+          if (mode === "error") controller.error(new Error("Reader provider login stream shutting down"));
+          else if (mode) controller.close();
+        } catch { /* stream already closed */ }
+        finally { unregister(); }
+      };
+      const send = (data: unknown) => {
+        if (closed) return false;
+        if ((controller.desiredSize ?? 0) <= 0) {
+          diagnostic.droppedEvents += 1;
+          cleanup("error");
+          return false;
+        }
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          const now = Date.now();
+          diagnostic.connectedAt ??= now;
+          diagnostic.lastWriteAt = now;
+          diagnostic.queuedBytes = Math.max(0, READER_STREAM_HIGH_WATER_MARK_BYTES - (controller.desiredSize ?? READER_STREAM_HIGH_WATER_MARK_BYTES));
+          return true;
+        } catch {
+          cleanup(false);
+          return false;
+        }
+      };
+      abort.signal.addEventListener("abort", cleanupPending);
+      unregister = registerReaderStreamCloser(cleanup, diagnostic);
+      let loginOptions: ReturnType<typeof createLoginOptions> | undefined;
+      let modelRuntime: Awaited<ReturnType<typeof createModelRuntimeWithExtensions>> | undefined;
 
       try {
+        modelRuntime = await createModelRuntimeWithExtensions();
+        if (!modelRuntime.getProvider(provider)?.auth.oauth) {
+          send({ type: "error", message: `Unknown provider: ${provider}` });
+          cleanup();
+          return;
+        }
+
+        loginOptions = createLoginOptions();
+        const createClientInputRequest = () => {
+          // Manual-code handshake token; crypto randomness so a pending OAuth
+          // manual flow cannot be hijacked by predicting Math.random().
+          const token = `${provider}-${randomUUID()}`;
+          activeTokens.add(token);
+
+          const promise = new Promise<string>((resolve, reject) => {
+            registry.set(token, {
+              resolve: (value) => {
+                activeTokens.delete(token);
+                registry.delete(token);
+                resolve(value);
+              },
+              reject: (error) => {
+                activeTokens.delete(token);
+                registry.delete(token);
+                reject(error);
+              },
+            });
+          });
+
+          return { token, promise };
+        };
+
+        const getManualInputRequest = () => {
+          if (!pendingManualRequest) {
+            pendingManualRequest = createClientInputRequest();
+            pendingManualRequest.promise
+              .finally(() => {
+                pendingManualRequest = undefined;
+              })
+              .catch(() => {});
+          }
+          return pendingManualRequest;
+        };
+
         await modelRuntime.login(provider, "oauth", {
           prompt: async (prompt: AuthPrompt) => {
             const request = prompt.type === "manual_code"
               ? getManualInputRequest()
               : createClientInputRequest();
             if (prompt.type === "select") {
-              send(controller, {
+              send({
                 type: "select_request",
                 message: prompt.message,
                 options: prompt.options,
                 token: request.token,
               });
             } else {
-              send(controller, {
+              send({
                 type: "prompt_request",
                 message: prompt.message,
                 placeholder: prompt.placeholder ?? null,
@@ -145,14 +192,14 @@ export async function GET(
           notify: (event: AuthEvent) => {
             if (event.type === "auth_url") {
               const request = getManualInputRequest();
-              send(controller, {
+              send({
                 type: "auth",
                 url: event.url,
                 instructions: event.instructions ?? null,
                 token: request.token,
               });
             } else if (event.type === "device_code") {
-              send(controller, {
+              send({
                 type: "device_code",
                 userCode: event.userCode,
                 verificationUri: event.verificationUri,
@@ -160,29 +207,33 @@ export async function GET(
                 expiresInSeconds: event.expiresInSeconds ?? null,
               });
             } else {
-              send(controller, { type: "progress", message: event.message });
+              send({ type: "progress", message: event.message });
             }
           },
           signal: abort.signal,
-        });
+        }, loginOptions.options);
 
         invalidateModelsCache();
-        send(controller, { type: "success" });
+        send({ type: "success" });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg !== "Login cancelled") {
-          send(controller, { type: "error", message: msg });
+          send({ type: "error", message: msg });
         } else {
-          send(controller, { type: "cancelled" });
+          send({ type: "cancelled" });
         }
       } finally {
         cleanup();
-        controller.close();
+        if (modelRuntime) disposeModelRuntime(modelRuntime);
+        await loginOptions?.flush();
       }
     },
     cancel() {
       abort.abort();
     },
+  }, {
+    highWaterMark: READER_STREAM_HIGH_WATER_MARK_BYTES,
+    size: (chunk) => chunk.byteLength,
   });
 
   return new Response(stream, {

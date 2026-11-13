@@ -108,7 +108,7 @@ test("preserves old bytes when the atomic replacement fails", async () => {
   assert.deepEqual(fs.readdirSync(workspace).filter((name) => name.includes("upload.tmp")), []);
 });
 
-test("rejects path names, links, directories, and outside upload roots", async () => {
+test("rejects unsafe file names and directory conflicts, while allowing external linked directories", async () => {
   fs.mkdirSync(path.join(workspace, "folder"));
   fs.writeFileSync(path.join(outside, "secret.txt"), "secret");
   fs.symlinkSync(outside, path.join(workspace, "outside-link"), "dir");
@@ -119,15 +119,17 @@ test("rejects path names, links, directories, and outside upload roots", async (
 
   const traversal = await post([{ name: "../escape.txt", content: "no" }], "error");
   assert.equal(traversal.status, 400);
-  const linkDirectory = await post([{ name: "escape.txt", content: "no" }], "error", ["~", "workspace", "outside-link"]);
-  assert.equal(linkDirectory.status, 403);
+  const linkDirectory = await post([{ name: "linked.txt", content: "linked" }], "error", ["~", "workspace", "outside-link"]);
+  assert.equal(linkDirectory.status, 200);
+  assert.equal(fs.readFileSync(path.join(outside, "linked.txt"), "utf8"), "linked");
   const outsideSegments = outside.split(path.sep).filter(Boolean);
-  const outsideResponse = await post([{ name: "escape.txt", content: "no" }], "error", outsideSegments);
-  assert.equal(outsideResponse.status, 403);
+  const outsideResponse = await post([{ name: "direct.txt", content: "direct" }], "error", outsideSegments);
+  assert.equal(outsideResponse.status, 200);
+  assert.equal(fs.readFileSync(path.join(outside, "direct.txt"), "utf8"), "direct");
 });
 
 test("keeps the directory identity recheck and atomic helper in the upload branch", () => {
-  assert.match(routeSource, /isCreateDirectoryStillBound\(directory, directoryIdentityAtStart, allowedRoots\)/);
+  assert.match(routeSource, /isCreateDirectoryStillBound\(directory, directoryIdentityAtStart\)/);
   assert.match(routeSource, /writeUploadFileAtomicSync\(destination, bytes/);
   assert.doesNotMatch(routeSource, /fs\.unlinkSync\(destination\)/);
   assert.match(routeSource, /MAX_UPLOAD_FILE_BYTES/);

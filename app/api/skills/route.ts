@@ -21,7 +21,7 @@ import {
   setProjectTopLevelOverride,
 } from "@/lib/project-resource-policy";
 import type { SkillInvocationMode, SkillViewScope, SkillUseState, SkillStateSnapshot } from "@/lib/api-types";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
 import {
@@ -57,9 +57,8 @@ async function patchPluginSkill(body: {
   viewScope?: SkillViewScope;
 }): Promise<NextResponse> {
   if (!body.cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) {
-    return NextResponse.json({ error: "Access denied" }, { status: 403 });
+  if (!isExistingDirectory(body.cwd)) {
+    return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
   }
   const targetScope = readScope(body.scope);
   const viewScope = body.viewScope ? readScope(body.viewScope) : targetScope;
@@ -163,19 +162,14 @@ async function patchGlobalSkillResource(body: {
   if (typeof body.enabled !== "boolean" && body.action === "set_global_skill_resource") {
     return NextResponse.json({ error: "enabled must be a boolean" }, { status: 400 });
   }
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-    return NextResponse.json({ error: "Access denied" }, { status: 403 });
+  if (!isExistingDirectory(cwd)) {
+    return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
   }
   if (path.basename(filePath) !== "SKILL.md") {
     return NextResponse.json({ error: "filePath must point to a SKILL.md file" }, { status: 400 });
   }
   if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
   const agentDir = getAgentDir();
-  const skillRoots = allowedRoots;
-  if (!isExistingFilePathAllowed(filePath, skillRoots)) {
-    return NextResponse.json({ error: "Access denied" }, { status: 403 });
-  }
   const discovered = await loadSkillsWithInstallInfo(cwd, "global");
   const target = discovered.skills.find((skill) => path.resolve(skill.filePath) === path.resolve(filePath));
   if (!target) return NextResponse.json({ error: "Skill not found in this project" }, { status: 404 });
@@ -210,9 +204,8 @@ async function patchSkillInvocationMode(body: {
   }
   const targetScope = readScope(body.scope);
   const viewScope = body.viewScope ? readScope(body.viewScope) : targetScope;
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-    return NextResponse.json({ error: "Access denied" }, { status: 403 });
+  if (!isExistingDirectory(cwd)) {
+    return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
   }
   const agentDir = getAgentDir();
   const projectTrust = getProjectTrustStatus(cwd, agentDir);
@@ -314,8 +307,7 @@ async function patchUnifiedSkillStates(body: { cwd?: string; viewScope?: SkillVi
   }
   const paths = body.items.map((item) => path.resolve(item.filePath));
   if (new Set(paths).size !== paths.length) return NextResponse.json({ error: "Duplicate Skill paths" }, { status: 400 });
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) return NextResponse.json({ error: "Access denied" }, { status: 403 });
+  if (!isExistingDirectory(body.cwd)) return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
   const agentDir = getAgentDir();
   if (scope === "project" && !getProjectTrustStatus(body.cwd, agentDir).trusted) return NextResponse.json({ error: "Project resources must be trusted before modifying project skills" }, { status: 403 });
   const loaded = await loadSkillsWithInstallInfo(body.cwd, scope);
@@ -349,9 +341,8 @@ export async function GET(req: Request) {
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
   try {
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    if (!isExistingDirectory(cwd)) {
+      return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
     }
     const viewScope = searchParams.has("scope") ? readScope(searchParams.get("scope")) : "project";
     return NextResponse.json(await loadSkillsWithInstallInfo(cwd, viewScope));
@@ -416,19 +407,14 @@ async function patchSkillSettings(body: SkillSettingsEdit): Promise<NextResponse
       if (typeof enabled !== "boolean") {
         return NextResponse.json({ error: "enabled must be a boolean" }, { status: 400 });
       }
-      const allowedRoots = await getAllowedFileRoots();
-      if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      if (!isExistingDirectory(cwd)) {
+        return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
       }
       if (path.basename(filePath) !== "SKILL.md") {
         return NextResponse.json({ error: "filePath must point to a SKILL.md file" }, { status: 400 });
       }
       if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
       const agentDir = getAgentDir();
-      const skillRoots = allowedRoots;
-      if (!isExistingFilePathAllowed(filePath, skillRoots)) {
-        return NextResponse.json({ error: "Access denied" }, { status: 403 });
-      }
       const discovered = await loadSkillsWithInstallInfo(cwd, "global");
       const target = discovered.skills.find((skill) => path.resolve(skill.filePath) === path.resolve(filePath));
       if (!target) return NextResponse.json({ error: "Skill not found in this project" }, { status: 404 });
@@ -443,16 +429,11 @@ async function patchSkillSettings(body: SkillSettingsEdit): Promise<NextResponse
       if (!body.cwd || !filePath) {
         return NextResponse.json({ error: "cwd and filePath required" }, { status: 400 });
       }
-      const allowedRoots = await getAllowedFileRoots();
-      if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) {
-        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      if (!isExistingDirectory(body.cwd)) {
+        return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
       }
       if (!existsSync(filePath)) return NextResponse.json({ error: "file not found" }, { status: 404 });
-      const resourceRoots = allowedRoots;
       const agentDir = getAgentDir();
-      if (!isExistingFilePathAllowed(filePath, resourceRoots)) {
-        return NextResponse.json({ error: "Access denied" }, { status: 403 });
-      }
       const projectTrust = getProjectTrustStatus(body.cwd, agentDir);
       if (!projectTrust.trusted) {
         return NextResponse.json(

@@ -1103,6 +1103,19 @@ button.extension-widget-trigger:focus-visible {
 
 :root {
   --font-mono: var(--font-noto-mono), 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, 'PingFang SC', 'Microsoft YaHei', monospace;
+  --file-tree-row-height: 24px;
+  --file-change-row-height: 26px;
+  --file-tree-action-size: 20px;
+  --file-tree-action-step: 24px;
+}
+
+@media (max-width: 640px), (pointer: coarse) {
+  :root {
+    --file-tree-row-height: 36px;
+    --file-change-row-height: 36px;
+    --file-tree-action-size: 32px;
+    --file-tree-action-step: 36px;
+  }
 }
 
 pre, code {
@@ -1177,6 +1190,10 @@ pre, code {
 .chat-message:focus-within .chat-message-action {
   opacity: 1;
   pointer-events: auto;
+}
+
+@media (max-width: 380px) {
+  .chat-message-actions .message-action-label { display: none; }
 }
 
 .markdown-body p { margin: 0 0 8px; }
@@ -1443,6 +1460,9 @@ pre, code {
   line-height: 1.32;
 }
 .markdown-custom-message p { margin: 0; }
+.markdown-custom-message.is-terminal-layout { font-family: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+.markdown-custom-message.is-terminal-layout p { white-space: pre-wrap; }
+.markdown-custom-message.is-terminal-layout p + p { margin-top: 1.32em; }
 .markdown-custom-message h1,
 .markdown-custom-message h2,
 .markdown-custom-message h3,
@@ -2012,6 +2032,35 @@ pre, code {
       color 0.12s,
       visibility 0s;
   }
+}
+
+.file-viewer-back-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: max-content;
+  height: 30px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.file-viewer-back-button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.file-viewer-back-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .file-viewer-icon-button {
@@ -3016,6 +3065,9 @@ body.session-subproject-pointer-dragging {
   .session-search-match-filter-select {
     font-size: 11px !important;
   }
+  .worktree-graph-search-input {
+    font-size: 11px !important;
+  }
   .chat-input-textarea {
     font-size: max(16px, var(--chat-content-font-size, 14px)) !important;
   }
@@ -3094,6 +3146,9 @@ body.session-subproject-pointer-dragging {
 }
 
 .talk-map-toolbar-identity > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
 }
 
@@ -3462,13 +3517,15 @@ body.talk-map-card-pointer-dragging {
 
   .talk-map-toolbar-top {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
-    overflow: visible;
+    overflow-x: auto;
+    overflow-y: visible;
+    scrollbar-width: thin;
   }
 
   .talk-map-toolbar-top .talk-map-toolbar-identity {
-    flex: 1 1 100%;
+    flex: 1 1 auto;
     max-width: none;
   }
 
@@ -3477,10 +3534,9 @@ body.talk-map-card-pointer-dragging {
   }
 
   .talk-map-toolbar-top-actions {
-    flex: 1 1 auto;
+    flex: 0 0 auto;
     min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: thin;
+    overflow: visible;
   }
 
 

@@ -33,6 +33,35 @@ test("ModelRoutingConfig provides one-click manual switch for all non-idle sessi
   assert.match(source, /t\("modelRouting\.nonIdleCount", \{ count: nonIdleCount \}\)/);
 });
 
+const routingHelpersSource = source.slice(
+  source.indexOf("export function getRoutingProviderNames("),
+  source.indexOf("export function ModelRoutingConfig("),
+);
+
+function loadRoutingHelpers() {
+  const context = {};
+  const helperSource = routingHelpersSource.replaceAll("export ", "")
+    + "\nglobalThis.getRoutingProviderNames = getRoutingProviderNames;"
+    + "\nglobalThis.getRoutingModelIds = getRoutingModelIds;";
+  vm.runInNewContext(stripTypeScriptTypes(helperSource), context);
+  return context;
+}
+
+test("routing includes built-in provider models from runtime discovery", () => {
+  const { getRoutingProviderNames, getRoutingModelIds } = loadRoutingHelpers();
+  const providers = { "openai-codex": { modelOverrides: { "gpt-5.6": {} } } };
+  const availableModels = [
+    { provider: "openai-codex", id: "gpt-5.6" },
+    { provider: "openai-codex", id: "gpt-5.6-codex" },
+  ];
+
+  assert.deepEqual(Array.from(getRoutingProviderNames(providers, availableModels)), ["openai-codex"]);
+  assert.deepEqual(
+    Array.from(getRoutingModelIds("openai-codex", providers["openai-codex"], availableModels)),
+    ["gpt-5.6", "gpt-5.6-codex"],
+  );
+});
+
 test("explains route attempts and exponential retry backoff", () => {
   assert.match(source, /title=\{t\("modelRouting\.attemptsHint"\)\}/);
   assert.match(en("modelRouting.attemptsHint"), /exponential backoff/);

@@ -120,7 +120,135 @@ export function serializeHeaderRows(rows: readonly HeaderRow[]): Record<string, 
 
 /** The parts of models.json needed for provider rename edits. */
 export interface ModelsConfigDraft {
-  providers?: Record<string, { models?: { id: string }[] }>;
+  providers?: Record<string, { models?: { id: string; name?: string }[] }>;
+}
+
+export interface ModelOrderChange<T extends ModelsConfigDraft> {
+  config: T;
+  providerName: string;
+  order: number[];
+}
+
+export interface ProviderOrderChange<T extends ModelsConfigDraft> {
+  config: T;
+  order: string[];
+}
+
+export interface ModelCopyChange<T extends ModelsConfigDraft> {
+  config: T;
+  sourceProviderName: string;
+  sourceIndex: number;
+  targetProviderName: string;
+  targetIndex: number;
+}
+
+function reorderModelEntries<T extends ModelsConfigDraft>(
+  config: T,
+  providerName: string,
+  order: number[],
+): ModelOrderChange<T> | null {
+  const providers = config.providers ?? {};
+  const provider = providers[providerName];
+  const models = provider?.models;
+  if (!models || order.every((index, position) => index === position)) return null;
+  return {
+    config: {
+      ...config,
+      providers: { ...providers, [providerName]: { ...provider, models: order.map((index) => models[index]) } },
+    },
+    providerName,
+    order,
+  };
+}
+
+export function moveModelEntry<T extends ModelsConfigDraft>(
+  config: T,
+  providerName: string,
+  from: number,
+  to: number,
+): ModelOrderChange<T> | null {
+  const models = config.providers?.[providerName]?.models ?? [];
+  if (from < 0 || from >= models.length || to < 0 || to >= models.length) return null;
+  const order = [...models.keys()];
+  order.splice(from, 1);
+  order.splice(to, 0, from);
+  return reorderModelEntries(config, providerName, order);
+}
+
+export function modelDropIndex(from: number, target: number, after: boolean): number {
+  const slot = after ? target + 1 : target;
+  return from < slot ? slot - 1 : slot;
+}
+
+export function sortModelEntries<T extends ModelsConfigDraft>(
+  config: T,
+  providerName: string,
+): ModelOrderChange<T> | null {
+  const models = config.providers?.[providerName]?.models ?? [];
+  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+  const order = [...models.keys()].sort((left, right) => {
+    const leftLabel = models[left].name?.trim() || models[left].id;
+    const rightLabel = models[right].name?.trim() || models[right].id;
+    return collator.compare(leftLabel, rightLabel) || collator.compare(models[left].id, models[right].id);
+  });
+  return reorderModelEntries(config, providerName, order);
+}
+
+export function moveProviderEntry<T extends ModelsConfigDraft>(
+  config: T,
+  fromName: string,
+  targetName: string,
+  after: boolean,
+): ProviderOrderChange<T> | null {
+  const entries = Object.entries(config.providers ?? {});
+  const fromIndex = entries.findIndex(([name]) => name === fromName);
+  const targetIndex = entries.findIndex(([name]) => name === targetName);
+  if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex) return null;
+
+  const originalOrder = entries.map(([name]) => name);
+  const [entry] = entries.splice(fromIndex, 1);
+  const insertion = targetIndex + (after ? 1 : 0) - (fromIndex < targetIndex ? 1 : 0);
+  entries.splice(insertion, 0, entry);
+  const order = entries.map(([name]) => name);
+  if (order.every((name, index) => name === originalOrder[index])) return null;
+  return {
+    config: { ...config, providers: Object.fromEntries(entries) },
+    order,
+  };
+}
+
+export function copyModelEntry<T extends ModelsConfigDraft>(
+  config: T,
+  sourceProviderName: string,
+  sourceIndex: number,
+  targetProviderName: string,
+): ModelCopyChange<T> | null {
+  const providers = config.providers ?? {};
+  const source = providers[sourceProviderName]?.models?.[sourceIndex];
+  if (!source) return null;
+
+  const targetProvider = providers[targetProviderName] ?? {};
+  const targetModels = [...(targetProvider.models ?? [])];
+  const copied = structuredClone(source);
+  const sourceId = source.id.trim();
+  if (sourceId && targetModels.some((model) => model.id === sourceId)) {
+    let copyId = `${sourceId}-copy`;
+    let suffix = 2;
+    while (targetModels.some((model) => model.id === copyId)) copyId = `${sourceId}-copy-${suffix++}`;
+    copied.id = copyId;
+  }
+  targetModels.push(copied);
+
+  return {
+    config: {
+      ...config,
+      providers: { ...providers, [targetProviderName]: { ...targetProvider, models: targetModels } },
+    },
+    sourceProviderName,
+    sourceIndex,
+    targetProviderName,
+    targetIndex: targetModels.length - 1,
+  };
 }
 
 /**

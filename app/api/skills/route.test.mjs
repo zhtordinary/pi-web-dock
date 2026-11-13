@@ -11,7 +11,7 @@ test("global top-level Skill invocation updates use discovered-resource validati
   const source = await readFile(routeUrl, "utf8");
   assert.match(source, /set_global_skill_invocation/);
   assert.match(source, /isApiRequestAllowed\(req\)/);
-  assert.match(source, /isExistingFilePathAllowed\(filePath, skillRoots\)/);
+  assert.doesNotMatch(source, /isExistingFilePathAllowed\(filePath, skillRoots\)/);
   assert.match(source, /loadSkillsWithInstallInfo\(cwd, "global"\)/);
   assert.match(source, /target\.sourceInfo\.scope !== "user" \|\| target\.sourceInfo\.origin !== "top-level"/);
   assert.match(source, /setGlobalSkillInvocationOverride\(agentDir, target\.filePath/);
@@ -31,8 +31,6 @@ test("top-level local Skill invocation mode set and clear bind to the exact file
     await mkdir(join(agentDir, "skills", "fixture"), { recursive: true });
     await writeFile(filePath, "---\nname: fixture\ndescription: Local fixture\n---\nfixture\n");
     const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, moduleCache: false });
-    const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
-    allowFileRoot(cwd);
     const { PATCH } = await jiti.import("./route.ts");
     const request = (action, extra = {}) => new Request("http://localhost/api/skills", {
       method: "PATCH",
@@ -86,8 +84,6 @@ test("invocation mode rejects conflicting filePath and package identity before w
     const before = await readFile(settingsPath, "utf8");
 
     const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, moduleCache: false });
-    const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
-    allowFileRoot(cwd);
     const { PATCH } = await jiti.import("./route.ts");
     const response = await PATCH(new Request("http://localhost/api/skills", {
       method: "PATCH",
@@ -139,8 +135,6 @@ test("unified state API validates every target before writing and preserves Skil
     const content = "---\nname: fixture\ndescription: Group fixture\n---\nfixture\n";
     await writeFile(filePath, content);
     const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, moduleCache: false });
-    const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
-    allowFileRoot(cwd);
     const { PATCH } = await jiti.import("./route.ts");
     const request = (extra = {}) => new Request("http://localhost/api/skills", {
       method: "PATCH", headers: { host: "localhost", "content-type": "application/json" },

@@ -7,13 +7,13 @@ import { createJiti } from "jiti";
 
 const source = fs.readFileSync(new URL("./[...path]/route.ts", import.meta.url), "utf8");
 
-test("file create route keeps bounded JSON, allowed roots, and race-safe conflicts", () => {
+test("file create route keeps bounded JSON and race-safe conflicts", () => {
   assert.match(source, /type === "create-folder" \|\| type === "create-file"/);
   assert.match(source, /readJsonWithinLimit\(request, MAX_CREATE_REQUEST_BYTES\)/);
   assert.match(source, /validateUploadFileNames\(\[parsed\.name\]\)/);
   assert.match(source, /const targetPath = path\.join\(directory, parsed\.name\)/);
-  assert.match(source, /!isFileWriteAllowed\(targetPath, allowedRoots\)/);
-  assert.match(source, /isCreateDirectoryStillBound\(directory, directoryIdentityAtStart, allowedRoots\)/);
+  assert.match(source, /hasParentDirectorySegment\(directory\)/);
+  assert.match(source, /isCreateDirectoryStillBound\(directory, directoryIdentityAtStart\)/);
   assert.match(source, /fs\.mkdirSync\(targetPath\)/);
   assert.match(source, /fs\.writeFileSync\(targetPath, "", \{ flag: "wx" \}\)/);
   assert.match(source, /A file or folder with that name already exists/);
@@ -74,7 +74,7 @@ test.after(() => {
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
-test("creates a folder and blank document only inside the synthetic allowed project", async () => {
+test("creates a folder and blank document in the selected project", async () => {
   const folder = await post("create-folder", "docs");
   assert.equal(folder.status, 200);
   assert.deepEqual(await folder.json(), {
@@ -96,7 +96,7 @@ test("creates a folder and blank document only inside the synthetic allowed proj
   assert.equal(fs.readFileSync(path.join(workspace, "docs", "README.md"), "utf8"), "");
 });
 
-test("rejects conflicts, traversal, symlink escape, and outside roots", async () => {
+test("rejects conflicts and invalid names while permitting external linked directories", async () => {
   const conflict = await post("create-file", "README.md", ["~", "workspace", "docs"]);
   assert.equal(conflict.status, 409);
 
@@ -105,12 +105,14 @@ test("rejects conflicts, traversal, symlink escape, and outside roots", async ()
 
   const link = path.join(workspace, "outside-link");
   fs.symlinkSync(outside, link, "dir");
-  const symlinkEscape = await post("create-file", "escape.md", ["~", "workspace", "outside-link"]);
-  assert.equal(symlinkEscape.status, 403);
+  const linked = await post("create-file", "linked.md", ["~", "workspace", "outside-link"]);
+  assert.equal(linked.status, 200);
+  assert.equal(fs.readFileSync(path.join(outside, "linked.md"), "utf8"), "");
 
   const outsideSegments = outside.split(path.sep).filter(Boolean);
-  const outsideResponse = await post("create-file", "escape.md", outsideSegments);
-  assert.equal(outsideResponse.status, 403);
+  const outsideResponse = await post("create-file", "direct.md", outsideSegments);
+  assert.equal(outsideResponse.status, 200);
+  assert.equal(fs.readFileSync(path.join(outside, "direct.md"), "utf8"), "");
 });
 
 
@@ -132,7 +134,7 @@ test("rejects a parent replacement observed by final identity validation", async
   });
   try {
     const response = await post("create-file", "escaped.md", ["~", "workspace", "race-dir"]);
-    assert.equal(response.status, 403);
+    assert.equal(response.status, 409);
     assert.equal(fs.existsSync(path.join(outside, "escaped.md")), false);
   } finally {
     fs.realpathSync = originalRealpathSync;

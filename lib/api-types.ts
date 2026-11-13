@@ -9,6 +9,7 @@ export interface SubagentProfilesResponse {
 export interface SubagentSettingsResponse {
   enabled: boolean;
   maxConcurrent: number;
+  order: string[];
 }
 
 /** Code mode's one choice (ADR 0006): Automatic writes nothing, Always on adds `+codemode` to the global defaultTools. */
@@ -714,7 +715,7 @@ export interface McpResponse {
 export type McpRefusalReason =
   /** `cwd` is empty or not an absolute path. */
   | "cwd-invalid"
-  /** `cwd` is outside the folders Pi Web may read, has a `..` segment, or does not exist. */
+  /** `cwd` contains a parent directory segment. */
   | "cwd-denied"
   /** `cwd` is not a directory (anymore). */
   | "cwd-not-directory"

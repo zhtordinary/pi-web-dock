@@ -7,12 +7,13 @@ import {
   deleteSubagentProfile,
   type SubagentProfile,
 } from "@/lib/subagent-profiles";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
-import { disabledBuiltInSubagents, writeDisabledBuiltInSubagent, writeBuiltInSubagentOverride } from "@/lib/subagent-settings";
+import { isExistingDirectory } from "@/lib/file-access";
+import { disabledBuiltInSubagents, readSubagentProfileOrder, writeDisabledBuiltInSubagent, writeBuiltInSubagentOverride } from "@/lib/subagent-settings";
 import { isApiRequestAllowed, hasJsonContentType } from "@/lib/request-security";
 import { writePiSubagentOverride } from "@/lib/pi-subagent-settings";
 import { VALID_THINKING_LEVELS } from "@/lib/subagent-profile-types";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { orderSubagentProfiles } from "@/lib/subagent-order";
 
 export const dynamic = "force-dynamic";
 
@@ -20,9 +21,8 @@ async function validateCwd(rawCwd: unknown): Promise<string> {
   if (typeof rawCwd !== "string" || !rawCwd || !existsSync(rawCwd)) {
     throw new Error("Valid cwd required");
   }
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(rawCwd, allowedRoots)) {
-    throw new Error("Access denied");
+  if (!isExistingDirectory(rawCwd)) {
+    throw new Error("Valid cwd required");
   }
   return rawCwd;
 }
@@ -94,7 +94,7 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const cwd = await validateCwd(url.searchParams.get("cwd"));
     const parentProvider = await verifiedParentProvider(cwd, url.searchParams.get("sessionId"));
-    return NextResponse.json({ profiles: projectProfiles(cwd, parentProvider) });
+    return NextResponse.json({ profiles: orderSubagentProfiles(projectProfiles(cwd, parentProvider), readSubagentProfileOrder()) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });

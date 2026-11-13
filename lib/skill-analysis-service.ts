@@ -1,7 +1,7 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SkillInfo, SkillViewScope } from "@/lib/api-types";
 import type { SkillTriggerAnalysisStats } from "@/lib/skill-trigger-analysis";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { getProjectTrustStatus } from "@/lib/project-trust";
 import { refreshUpdatedSkillTriggerMetadata } from "@/lib/skill-trigger-analysis";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
@@ -32,9 +32,8 @@ export async function validateSkillAnalysisScope(
   scope: SkillViewScope,
 ): Promise<{ cwd: string; agentDir: string }> {
   const cwd = requireText(cwdInput, "cwd");
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-    throw new SkillAnalysisRequestError("Access denied", 403);
+  if (!isExistingDirectory(cwd)) {
+    throw new SkillAnalysisRequestError("cwd must be an existing directory", 400);
   }
 
   const agentDir = getAgentDir();

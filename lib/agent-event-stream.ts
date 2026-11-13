@@ -5,6 +5,11 @@ import {
 } from "./agent-event-wire";
 import { acquireSessionLivenessLease } from "./session-liveness";
 import { subscribeSessionFileChanges } from "./session-file-events";
+import {
+  closeAllReaderEventStreams,
+  registerReaderStreamCloser,
+  type ReaderStreamDiagnostic,
+} from "./reader-event-stream";
 
 export interface AgentEventStreamSession {
   readonly isStreaming: boolean;
@@ -100,16 +105,9 @@ function logBackpressure(
  * graphs, each with its own copy of this module; a plain module-level Set
  * would be two disconnected registries. Symbol.for + globalThis shares one.
  */
-const CLOSER_REGISTRY: symbol = Symbol.for("pi-web.agentEventStreamClosers");
-type StreamCloser = (closeController: boolean | "error") => void;
-const activeStreamClosers: Set<StreamCloser> =
-  ((globalThis as Record<symbol, Set<StreamCloser>>)[CLOSER_REGISTRY] ??= new Set<StreamCloser>());
-
 /** Close every live SSE stream (called on process shutdown signals). */
 export function closeAllAgentEventStreams(): void {
-  for (const close of [...activeStreamClosers]) {
-    try { close("error"); } catch { /* stream already closed */ }
-  }
+  closeAllReaderEventStreams();
 }
 
 function errorMessage(error: unknown): string {
@@ -126,6 +124,7 @@ export function createAgentEventStream(
   sessionPromise: Promise<AgentEventStreamSession | null>,
   sessionFile?: string,
   observeRuntime?: (publish: (session: Promise<AgentEventStreamSession>) => void) => () => void,
+  streamMetadata: { holder?: string | null } = {},
 ): ReadableStream<Uint8Array> {
   let cancelStream: (closeController: boolean | "error") => void = () => {};
   let releaseLease: () => void = () => {};
@@ -134,6 +133,17 @@ export function createAgentEventStream(
   return new ReadableStream<Uint8Array>({
     start(controller) {
       const encoder = new TextEncoder();
+      const diagnostic: ReaderStreamDiagnostic = {
+        kind: "agent",
+        sessionId,
+        holder: streamMetadata.holder ?? null,
+        openedAt: Date.now(),
+        connectedAt: null,
+        lastWriteAt: null,
+        droppedEvents: 0,
+        queuedBytes: 0,
+      };
+      let unregisterDiagnostic = () => {};
       let closed = false;
       let heartbeat: ReturnType<typeof setInterval> | null = null;
       let unsubscribe: (() => void) | null = null;
@@ -152,13 +162,12 @@ export function createAgentEventStream(
       // Also used when a client stops consuming: a graceful close() there
       // would leave the socket (and the queued backlog) alive.
       // "true": graceful close after we finished writing a final event.
-      const cleanup = (closeController: boolean | "error", reason?: Error) => {
+      const cleanup = (closeController: boolean | "error" = true, reason?: Error) => {
         if (closed) return;
         closed = true;
         releaseLease();
         releaseLease = () => {};
         renewLease = () => {};
-        activeStreamClosers.delete(cleanup);
         if (heartbeat !== null) clearInterval(heartbeat);
         if (toolUpdateTimer !== null) clearTimeout(toolUpdateTimer);
         pendingToolUpdates.clear();
@@ -169,17 +178,17 @@ export function createAgentEventStream(
         unsubscribeRuntime?.();
         unsubscribeRuntime = null;
         if (abortHandler) req.signal.removeEventListener("abort", abortHandler);
-        if (closeController === "error") {
-          try { controller.error(reason ?? new Error("pi-web server shutting down")); } catch { /* already closed */ }
-        } else if (closeController) {
-          try { controller.close(); } catch { /* stream already closed */ }
-        }
+        try {
+          if (closeController === "error") controller.error(reason ?? new Error("pi-web server shutting down"));
+          else if (closeController) controller.close();
+        } catch { /* stream already closed */ }
+        finally { unregisterDiagnostic(); }
       };
       cancelStream = cleanup;
       const lease = acquireSessionLivenessLease(sessionId);
       releaseLease = lease.release;
       renewLease = lease.renew;
-      activeStreamClosers.add(cleanup);
+      unregisterDiagnostic = registerReaderStreamCloser(cleanup, diagnostic);
 
       const backlogLimitBytes = resolveBacklogLimitBytes();
       let droppedEvents = 0;
@@ -190,9 +199,11 @@ export function createAgentEventStream(
           cleanup(false);
           return;
         }
-        const queuedBytes = STREAM_HIGH_WATER_MARK_BYTES - desiredSize;
+        const queuedBytes = Math.max(0, STREAM_HIGH_WATER_MARK_BYTES - desiredSize);
+        diagnostic.queuedBytes = queuedBytes;
         if (options?.droppable && queuedBytes > STREAM_HIGH_WATER_MARK_BYTES) {
           droppedEvents += 1;
+          diagnostic.droppedEvents = droppedEvents;
           logBackpressure(sessionId, queuedBytes, backlogLimitBytes, droppedEvents, false);
           return;
         }
@@ -206,6 +217,9 @@ export function createAgentEventStream(
         }
         try {
           controller.enqueue(encoder.encode(text));
+          const now = Date.now();
+          diagnostic.connectedAt ??= now;
+          diagnostic.lastWriteAt = now;
         } catch {
           cleanup(false);
         }
@@ -307,7 +321,8 @@ export function createAgentEventStream(
           });
           for (const event of bufferedEvents) forwardEvent(event, snapshot);
           if (snapshot !== undefined && snapshot !== null) {
-            encode({ type: "message_start", message: snapshot });
+            const snapshotEvent = toClientAgentEvent({ type: "message_start", message: snapshot });
+            if (snapshotEvent) encode(snapshotEvent);
           }
           snapshotPublished = true;
         } catch (error) {

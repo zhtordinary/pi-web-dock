@@ -5,13 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
-const { PATCHES, SUPPORTED_VERSIONS, patchPiFileTools } = require("../bin/patch-pi-volume-access.cjs");
+const { PATCHES, SUPPORTED_VERSIONS, patchPiFileTools, piPackageRoot } = require("../bin/patch-pi-volume-access.cjs");
 
-test("patches Pi file preflights without widening real filesystem operations", () => {
+test("patches Pi 1.5 file preflights without widening real filesystem operations", () => {
   const root = mkdtempSync(join("/tmp", "reader-pi-volume-patch-"));
   try {
     mkdirSync(join(root, "dist/core/tools"), { recursive: true });
-    writeFileSync(join(root, "package.json"), JSON.stringify({ version: [...SUPPORTED_VERSIONS][0] }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ version: "1.5.0" }));
     for (const patch of PATCHES) {
       writeFileSync(join(root, patch.relative), patch.oldText);
     }
@@ -25,6 +25,18 @@ test("patches Pi file preflights without widening real filesystem operations", (
     assert.equal(patchPiFileTools(root), 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the installed pinned Pi version has every file preflight patched", () => {
+  const root = piPackageRoot();
+  const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const app = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(version, app.dependencies["@earendil-works/pi-coding-agent"]);
+  assert.ok(SUPPORTED_VERSIONS.has(version));
+  for (const patch of PATCHES) {
+    const source = readFileSync(join(root, patch.relative), "utf8");
+    assert.equal(source.split(patch.marker).length - 1, 1, patch.marker);
   }
 });
 

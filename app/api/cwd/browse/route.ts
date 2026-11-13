@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stat } from "fs/promises";
-import { getAllowedFileRoots } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
   createDirectory,
@@ -75,7 +74,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Directory name is required" }, { status: 400 });
     }
 
-    const createdPath = await createDirectory(parentPath, name, await getAllowedFileRoots("write"));
+    const createdPath = await createDirectory(parentPath, name);
     return NextResponse.json({ success: true, path: createdPath });
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error

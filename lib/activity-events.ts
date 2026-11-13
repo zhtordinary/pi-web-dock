@@ -4,8 +4,7 @@ import type { SessionRunStatus } from "./session-activity-types";
 /**
  * 会话活动事件总线（本机进程内）：run 生命周期事件（开始/完成/失败/中止/未知）
  * 的广播 + 环形缓冲。消费方：
- * - `/api/activity/events`：本地 SSE 流 / 跨机 peer SSE（聚合端订阅 peer）
- * - `/api/activity/relay`：浏览器聚合通道（本地事件 + peer SSE 转发）
+ * - `/api/activity/events`：本地 SSE 流；跨机 peer 通过 `/api/reader/events` 聚合
  *
  * seq 在单个进程内单调递增；bootId 区分进程重启。环形缓冲供晚到订阅者
  * 回放。跨进程不共享（每台设备的 pi-web 进程各自一套）；服务重启后事件丢失，
@@ -24,6 +23,8 @@ export interface ActivityEvent {
   sessionId?: string;
   runId?: string;
   status?: SessionRunStatus;
+  /** Run start time lets clients reject delayed events from older runs. */
+  startedAt?: string;
   /** Server-side unattended mode for terminal failure/abort events. */
   unattended?: boolean;
   /** Transport-only marker set by an SSE buffer replay. */

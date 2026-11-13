@@ -14,11 +14,13 @@ function renderIcon(id) {
   return renderToStaticMarkup(React.createElement(ProviderIcon, { id, size: 20 }));
 }
 
-test("known providers use the local sprite and preserve mono color behavior", () => {
-  const html = renderIcon("openai");
-  assert.match(html, /<svg[^>]*width="20"[^>]*height="20"/);
-  assert.match(html, /style="color:var\(--text-muted\);/);
-  assert.match(html, /<use href="\/provider-icons\.svg#openai"><\/use>/);
+test("known OpenAI providers use the local sprite and preserve mono color behavior", () => {
+  for (const provider of ["openai", "openai-subscription", "openai-api"]) {
+    const html = renderIcon(provider);
+    assert.match(html, /<svg[^>]*width="20"[^>]*height="20"/);
+    assert.match(html, /style="color:var\(--text-muted\);/);
+    assert.match(html, /<use href="\/provider-icons\.svg#openai"><\/use>/);
+  }
 });
 
 test("unknown providers keep the readable initials fallback", () => {

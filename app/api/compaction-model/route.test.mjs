@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -20,20 +21,30 @@ after(async () => {
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 let disposed = 0;
 const mocks = {
+  "@earendil-works/pi-coding-agent": {
+    getAgentDir: () => root,
+    SettingsManager: { create: () => ({ getEnabledModels: () => {
+      try { return JSON.parse(readFileSync(join(root, "settings.json"), "utf8")).enabledModels; } catch { return undefined; }
+    } }) },
+  },
   "@earendil-works/pi-ai": await import("@earendil-works/pi-ai"),
   "@/lib/model-runtime": { createModelRuntimeWithExtensions: async () => ({ getAvailable: async () => [
     { provider: "fixture", id: "compress", name: "Fixture compressor", contextWindow: 128000, reasoning: true,
       thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, xhigh: "high", max: "max" } },
+    { provider: "fixture", id: "other", name: "Fixture other", contextWindow: 64000, reasoning: false },
     { provider: "virtual", id: "route", name: "Virtual route", api: "pi-virtual" },
   ] }), disposeModelRuntime: () => { disposed++; } },
   "@/lib/compaction-model": await jiti.import("../../../lib/compaction-model.ts"),
+  "@/lib/model-scope": await jiti.import("../../../lib/model-scope.ts"),
+  "@/lib/model-visibility": await jiti.import("../../../lib/model-visibility.ts"),
+  "@/lib/models-config-store": { readModelsConfig: () => ({ hiddenModels: [] }) },
   "@/lib/compaction-model-settings": await jiti.import("../../../lib/compaction-model-settings.ts"),
   "@/lib/request-security": await jiti.import("../../../lib/request-security.ts"),
 };
 const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
 const loaded = { exports: {} };
 vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-  { module: loaded, exports: loaded.exports, require: (name) => mocks[name] ?? require(name), Response, AbortSignal });
+  { module: loaded, exports: loaded.exports, require: (name) => mocks[name] ?? require(name), Response, AbortSignal, URL, process, console });
 const { GET, PUT } = loaded.exports;
 function request(body, headers = {}) {
   return new Request("http://localhost/api/compaction-model", { method: "PUT",
@@ -43,11 +54,11 @@ function request(body, headers = {}) {
 test("lists configured physical models, saves and clears only the Reader preference", async () => {
   const document = { defaultProvider: "fixture", defaultModel: "main", compaction: { enabled: false, keepRecentTokens: 20000 } };
   await writeFile(join(root, "settings.json"), JSON.stringify(document));
-  let response = await GET();
+  let response = await GET(new Request("http://localhost/api/compaction-model"));
   const initial = await response.json();
   assert.equal(initial.model, null);
-  assert.equal(initial.models.length, 1);
-  assert.equal(initial.models[0].modelId, "compress");
+  assert.equal(initial.models.length, 2);
+  assert.deepEqual(initial.models.map((item) => item.modelId), ["compress", "other"]);
   assert.equal("apiKey" in initial.models[0], false);
   response = await PUT(request({ model: { provider: "fixture", modelId: "compress" } }));
   assert.equal(response.status, 200);
@@ -59,11 +70,19 @@ test("lists configured physical models, saves and clears only the Reader prefere
   assert.equal(disposed, 2);
 });
 
+test("enabledModels removes disabled models from the plugin and compaction choices", async () => {
+  await writeFile(join(root, "settings.json"), JSON.stringify({ enabledModels: ["!{[f]ixture/compress,@(compress)}"] }));
+  const response = await GET(new Request("http://localhost/api/compaction-model"));
+  const data = await response.json();
+  assert.deepEqual(data.models.map((item) => item.modelId), ["other"]);
+  await writeFile(join(root, "settings.json"), JSON.stringify({}));
+});
+
 test("compression thinking is persisted, capability-checked and exposed with model mapping", async () => {
   const response = await PUT(request({ model: { provider: "fixture", modelId: "compress" }, thinkingLevel: "max" }));
   assert.equal(response.status, 200);
   assert.equal((await response.json()).thinkingLevel, "max");
-  const snapshot = await GET();
+  const snapshot = await GET(new Request("http://localhost/api/compaction-model"));
   const data = await snapshot.json();
   assert.equal(data.thinkingLevel, "max");
   assert.equal(data.models[0].thinkingLevelMap.xhigh, "high");
@@ -95,7 +114,7 @@ test("rejects malformed, unavailable, virtual and untrusted changes without writ
 
 test("damaged configuration cannot be overwritten, even when clearing", async () => {
   await writeFile(join(root, "settings.json"), "{invalid");
-  assert.equal((await GET()).status, 500);
+  assert.equal((await GET(new Request("http://localhost/api/compaction-model"))).status, 500);
   assert.equal((await PUT(request({ model: null }))).status, 500);
   assert.equal(await readFile(join(root, "settings.json"), "utf8"), "{invalid");
 });

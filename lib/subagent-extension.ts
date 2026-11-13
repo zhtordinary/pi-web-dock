@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
   defineTool,
   type ExtensionContext,
@@ -158,6 +158,24 @@ export function subagentNotificationText(run: SubagentRunInfo): string {
 }
 
 
+function withSubagentCandidates(text: string, ctx?: ExtensionContext): string {
+  if (!text.startsWith("Subagent not found:")) return text;
+  let entries: unknown;
+  try { entries = ctx?.sessionManager?.getBranch(); } catch { return text; }
+  if (!Array.isArray(entries)) return text;
+  const candidates = new Map<string, string>();
+  for (let index = entries.length - 1; index >= 0 && candidates.size < 10; index--) {
+    const entry = entries[index] as { type?: unknown; message?: { role?: unknown; details?: Partial<SubagentToolDetails> } } | null;
+    const details = entry?.message?.details;
+    if (entry?.type !== "message" || entry.message?.role !== "toolResult" || details?.kind !== "pi-web-subagent"
+      || typeof details.sessionId !== "string" || !details.sessionId || candidates.has(details.sessionId)) continue;
+    candidates.set(details.sessionId, typeof details.description === "string" ? details.description : "");
+  }
+  if (candidates.size === 0) return text;
+  const list = [...candidates].map(([id, description]) => `- ${id}${description ? `: ${description}` : ""}`).join("\n");
+  return `${text}\nSubagents seen in this branch (they may no longer be accessible):\n${list}`;
+}
+
 export function createSubagentExtension(
   runtime: SubagentExtensionRuntime,
   getProfiles: SubagentProfileProvider,
@@ -272,7 +290,7 @@ export function createSubagentExtension(
             };
           } catch (error) {
             return {
-              content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+              content: [{ type: "text", text: withSubagentCandidates(error instanceof Error ? error.message : String(error), ctx) }],
               details: undefined,
               isError: true,
             };
@@ -291,7 +309,7 @@ export function createSubagentExtension(
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
           let run = await runtime.get(params.agent_id, ctx);
-          if (!run) return { content: [{ type: "text", text: `Subagent not found: ${params.agent_id}` }], details: undefined, isError: true };
+          if (!run) return { content: [{ type: "text", text: withSubagentCandidates(`Subagent not found: ${params.agent_id}`, ctx) }], details: undefined, isError: true };
           while (params.wait && (run.status === "queued" || run.status === "starting" || run.status === "running")) {
             await new Promise<void>((resolve, reject) => {
               const onAbort = () => {
@@ -306,7 +324,7 @@ export function createSubagentExtension(
               else signal?.addEventListener("abort", onAbort, { once: true });
             });
             run = await runtime.get(params.agent_id, ctx);
-            if (!run) return { content: [{ type: "text", text: `Subagent not found: ${params.agent_id}` }], details: undefined, isError: true };
+            if (!run) return { content: [{ type: "text", text: withSubagentCandidates(`Subagent not found: ${params.agent_id}`, ctx) }], details: undefined, isError: true };
           }
           // The parent now holds this result, so the background completion notification must not
           // deliver the same text again and wake a duplicate turn.

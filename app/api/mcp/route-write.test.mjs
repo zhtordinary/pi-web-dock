@@ -15,22 +15,24 @@ const cwd = join(root, "project");
 const outside = join(root, "outside");
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousDisable = process.env.PI_WEB_DISABLE_MCP;
+const previousPolicy = process.env.PI_WEB_FILE_PERMISSIONS_FILE;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+process.env.PI_WEB_FILE_PERMISSIONS_FILE = join(root, "file-permissions.json");
 delete process.env.PI_WEB_DISABLE_MCP;
 await mkdir(agentDir, { recursive: true });
 await mkdir(join(cwd, ".pi"), { recursive: true });
 await mkdir(outside, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { POST } = await jiti.import("./route.ts");
-allowFileRoot(cwd);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   if (previousDisable === undefined) delete process.env.PI_WEB_DISABLE_MCP;
   else process.env.PI_WEB_DISABLE_MCP = previousDisable;
+  if (previousPolicy === undefined) delete process.env.PI_WEB_FILE_PERMISSIONS_FILE;
+  else process.env.PI_WEB_FILE_PERMISSIONS_FILE = previousPolicy;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -169,8 +171,8 @@ test("requests from another page, not sent as JSON, or naming nothing to do are 
     assert.equal(response.body.reason, "invalid-request", JSON.stringify(body));
   }
   assert.equal(
-    (await post({ action: "disable", scope: "global", name: "lint", cwd: outside })).body.reason,
-    "cwd-denied",
+    (await post({ action: "disable", scope: "global", name: "lint", cwd: join(outside, "missing") })).body.reason,
+    "cwd-not-directory",
   );
   assert.equal((await post({ action: "disable", scope: "global", name: "lint", cwd: "project" })).body.reason, "cwd-invalid");
   assert.equal(await readFile(globalPath, "utf8"), globalText);
@@ -275,7 +277,7 @@ test("a project removal is undone only while the project is still trusted", asyn
   assert.equal(await readFile(projectPath, "utf8"), projectText);
 });
 
-test("a file that no longer parses, a server removed meanwhile, or a link outside are refused with the file untouched", async () => {
+test("invalid or missing entries are refused and linked project files remain writable", async () => {
   await writeFile(globalPath, `{ "mcpServers": { "lint": { "env": { "T": '${SECRET}' } } } }`);
   const unparsable = await post({ action: "disable", scope: "global", name: "lint" });
   assert.deepEqual([unparsable.status, unparsable.body.reason, unparsable.body.path], [409, "unparsable", globalPath]);
@@ -294,8 +296,8 @@ test("a file that no longer parses, a server removed meanwhile, or a link outsid
     await rm(projectPath);
     await symlink(target, projectPath);
     const linked = await post({ action: "disable", scope: "project", name: "repo", cwd });
-    assert.deepEqual([linked.status, linked.body.reason], [409, "link-outside"]);
-    assert.equal(await readFile(target, "utf8"), projectText);
+    assert.equal(linked.status, 200);
+    assert.equal(JSON.parse(await readFile(target, "utf8")).mcpServers.repo.enabled, false);
   }
   assert.equal(await readFile(globalPath, "utf8"), globalText);
 });

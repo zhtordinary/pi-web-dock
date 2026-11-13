@@ -4,13 +4,13 @@ import test from "node:test";
 
 const source = await readFile(new URL("./[...path]/route.ts", import.meta.url), "utf8");
 
-test("file rename route protects roots, symlinks, path segments, and collisions", () => {
+test("file rename route permits links while protecting path segments and collisions", () => {
   assert.match(source, /export async function PATCH\(/);
   assert.match(source, /parseFileRenameBody/);
   assert.match(source, /validateUploadFileNames\(\[parsed\.name\]\)/);
-  assert.match(source, /The project root cannot be renamed/);
-  assert.match(source, /!isExistingFilePathAllowed\(filePath, allowedRoots\)/);
-  assert.match(source, /Symbolic links cannot be renamed/);
+  assert.match(source, /hasParentDirectorySegment\(filePath\)/);
+  assert.match(source, /!stat\.isSymbolicLink\(\)/);
+  assert.doesNotMatch(source, /The project root cannot be renamed|Symbolic links cannot be renamed/);
   assert.match(source, /A file or folder with that name already exists/);
   assert.match(source, /renamePathNoClobberSync\(filePath, targetPath\)/);
   assert.doesNotMatch(source, /fs\.renameSync\(filePath, targetPath\)/);

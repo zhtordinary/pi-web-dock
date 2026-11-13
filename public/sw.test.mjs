@@ -26,7 +26,7 @@ function dispatchNotificationClick(data) {
   return { pending, wasClosed: () => closed };
 }
 
-function dispatchPush(payload, clients) {
+function dispatchPush(payload, clients, getNotifications = async () => []) {
   let pending;
   const shown = [];
   self.clients = {
@@ -35,6 +35,7 @@ function dispatchPush(payload, clients) {
   };
   self.registration = {
     showNotification: async (title, options) => { shown.push({ title, options }); },
+    getNotifications,
   };
   listeners.get("push")({
     data: { json: () => payload },
@@ -48,8 +49,11 @@ test("push always shows a notification, even when a window is visible", async ()
     {
       title: "Session complete",
       body: "Task finished.",
-      url: "/?session=session-1",
-      tag: "pi-session-complete:session-1",
+      url: "/?session=session-1&device=device-1",
+      tag: "pi-session-complete:device-1:session-1:run-1",
+      deviceId: "device-1",
+      sessionId: "session-1",
+      runId: "run-1",
     },
     [
       { url: "https://pi.test/?session=other", visibilityState: "hidden" },
@@ -60,15 +64,70 @@ test("push always shows a notification, even when a window is visible", async ()
 
   // iOS revokes the push subscription when a push is handled without a
   // notification, so the notification must never be suppressed.
+  const shownAt = event.shown[0].options.data.shownAt;
+  assert.equal(typeof shownAt, "number");
   assert.deepEqual(event.shown, [{
     title: "Session complete",
     options: {
       body: "Task finished.",
-      data: { url: "/?session=session-1" },
-      tag: "pi-session-complete:session-1",
+      data: { url: "/?session=session-1&device=device-1", shownAt, deviceId: "device-1", sessionId: "session-1", runId: "run-1" },
+      tag: "pi-session-complete:device-1:session-1:run-1",
       renotify: true,
     },
   }]);
+});
+
+const completionPush = {
+  title: "Session complete",
+  body: "Task finished.",
+  url: "/?session=session-1&device=device-1",
+  tag: "pi-session-complete:device-1:session-1:run-1",
+  deviceId: "device-1",
+  sessionId: "session-1",
+  runId: "run-1",
+};
+
+function existingNotifications(list) {
+  return async ({ tag }) => list.filter((notification) => notification.tag === tag);
+}
+
+test("push quietly replaces the page notification for the same device/session/run", async () => {
+  const event = dispatchPush(completionPush, [], existingNotifications([
+    {
+      tag: completionPush.tag,
+      data: { url: completionPush.url, shownAt: Date.now() - 600, deviceId: "device-1", sessionId: "session-1", runId: "run-1" },
+    },
+  ]));
+  await event.pending;
+
+  assert.equal(event.shown.length, 1);
+  assert.equal(event.shown[0].options.tag, completionPush.tag);
+  assert.equal(event.shown[0].options.renotify, false);
+});
+
+test("different runs and devices are never deduplicated", async () => {
+  const run = dispatchPush({ ...completionPush, runId: "run-2", tag: "pi-session-complete:device-1:session-1:run-2" }, [], existingNotifications([
+    { tag: completionPush.tag, data: { shownAt: Date.now() - 100, deviceId: "device-1", sessionId: "session-1", runId: "run-1" } },
+  ]));
+  await run.pending;
+  assert.equal(run.shown[0].options.renotify, true);
+
+  const device = dispatchPush({ ...completionPush, deviceId: "device-2", tag: "pi-session-complete:device-2:session-1:run-1" }, [], existingNotifications([
+    { tag: completionPush.tag, data: { shownAt: Date.now() - 100, deviceId: "device-1", sessionId: "session-1", runId: "run-1" } },
+  ]));
+  await device.pending;
+  assert.equal(device.shown[0].options.renotify, true);
+});
+
+test("missing completion identity keeps every push visible instead of swallowing it", async () => {
+  const event = dispatchPush({ ...completionPush, tag: "pi-session-complete:session-1", deviceId: undefined, sessionId: undefined, runId: undefined }, [], existingNotifications([
+    { tag: "pi-session-complete:session-1", data: { shownAt: Date.now() - 100 } },
+  ]));
+  await event.pending;
+
+  assert.equal(event.shown.length, 1);
+  assert.equal(event.shown[0].options.tag, undefined);
+  assert.equal(typeof event.shown[0].options.data.shownAt, "number");
 });
 
 test("push ignores malformed payloads", async () => {

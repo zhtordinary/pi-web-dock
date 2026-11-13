@@ -76,6 +76,10 @@ test("FavoritesConfig defines canonical controls and subcategory management", ()
 
   // Event synchronization
   assert.ok(source.includes("SLASH_FAVORITES_CHANGED_EVENT"), "exports and listens to favorite changed event");
+
+  const initialize = source.indexOf('JSON.stringify({ type: "initialize_runtime" })');
+  const commands = source.indexOf('JSON.stringify({ type: "get_commands" })');
+  assert.ok(initialize >= 0 && initialize < commands, "cold sessions initialize before reading runtime commands");
 });
 
 test("FavoritesConfig supports moving commands via drag and drop to category tabs without redundant button", () => {

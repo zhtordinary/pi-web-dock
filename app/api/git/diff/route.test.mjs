@@ -62,7 +62,7 @@ test.after(() => {
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
-test("returns normal and deleted Git diffs while rejecting physical link escapes", async () => {
+test("returns normal and deleted Git diffs without treating an external link as a repository file", async () => {
   const modified = await GET(request(workspace, path.join(workspace, "tracked.txt")));
   assert.equal(modified.status, 200);
   const modifiedBody = await modified.json();
@@ -79,7 +79,8 @@ test("returns normal and deleted Git diffs while rejecting physical link escapes
   assert.match(deletedBody.patch, /-before/);
 
   const escaped = await GET(request(workspace, path.join(workspace, "outside-dir", "secret.txt")));
-  assert.equal(escaped.status, 403);
+  assert.equal(escaped.status, 200);
+  assert.deepEqual(await escaped.json(), { supported: false });
 });
 
 test("keeps unknown missing targets unsupported instead of authorizing arbitrary paths", async () => {
@@ -88,5 +89,6 @@ test("keeps unknown missing targets unsupported instead of authorizing arbitrary
   assert.deepEqual(await response.json(), { supported: false });
 
   const outsideResponse = await GET(request(workspace, path.join(outside, "secret.txt")));
-  assert.equal(outsideResponse.status, 403);
+  assert.equal(outsideResponse.status, 200);
+  assert.deepEqual(await outsideResponse.json(), { supported: false });
 });

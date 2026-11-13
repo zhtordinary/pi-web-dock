@@ -4,7 +4,11 @@ import { runInNewContext } from "node:vm";
 import { THEME_INIT_SCRIPT } from "../lib/theme.ts";
 import test from "node:test";
 
-const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const resourceSource = await readFile(new URL("./SessionInfoResourcePanel.tsx", import.meta.url), "utf8");
+const topBarSource = await readFile(new URL("./SessionTopBarStats.tsx", import.meta.url), "utf8");
+const worktreeSource = await readFile(new URL("./app-shell-worktree.tsx", import.meta.url), "utf8");
+const source = appShellSource;
 const themeSource = await readFile(new URL("../lib/theme.ts", import.meta.url), "utf8");
 
 
@@ -31,57 +35,74 @@ test("first-paint theme init falls back to system when storage is blocked", () =
 });
 
 test("shows effective duration, agent total, model response total and share in that order", () => {
-  assert.doesNotMatch(source, /session\.responseTotal/);
-  assert.match(source, /\{agentTotalValue\}/);
-  assert.match(source, /\{modelResponseValue\}/);
-  assert.match(source, /color: "var\(--accent\)"/);
-  const timingSection = source.slice(source.indexOf('translate("session.timing")'), source.indexOf("const sessionInfoSection", source.indexOf('translate("session.timing")')));
+  assert.doesNotMatch(resourceSource, /session\.responseTotal/);
+  assert.match(resourceSource, /\{agentTotalValue\}/);
+  assert.match(resourceSource, /\{modelResponseValue\}/);
+  assert.match(resourceSource, /color: "var\(--accent\)"/);
+  const timingSection = resourceSource.slice(resourceSource.indexOf('translate("session.timing")'), resourceSource.length);
   const order = ["session.effectiveDuration", "session.agentTotalDuration", "session.modelResponseTotal", "session.modelResponseShare"]
     .map((key) => timingSection.indexOf(`translate("${key}")`));
   assert.ok(order.every((index) => index >= 0));
   assert.deepEqual([...order].sort((left, right) => left - right), order);
-  assert.match(source, /session\.timingUserWait/);
-  assert.match(source, /session\.timingMissingChildren/);
+  assert.match(resourceSource, /session\.timingUserWait/);
+  assert.match(resourceSource, /session\.timingMissingChildren/);
+});
+
+test("AppShell wires the production resource panel for lightweight stats before pricing", () => {
+  assert.match(source, /<SessionInfoResourcePanel/);
+  assert.match(resourceSource, /statsSource === "reader-file"/);
+  assert.match(resourceSource, /data-session-stats-scope/);
+  assert.match(resourceSource, /costState === "loading"/);
+  assert.match(`${source}\n${topBarSource}`, />…<\/span>/);
+});
+
+test("AppShell wires guarded top-bar stats into the production component", () => {
+  assert.match(source, /import \{ SessionTopBarStats \} from "\.\/SessionTopBarStats";/);
+  assert.match(source, /<SessionTopBarStats\s+sessionActive=\{topBarSessionActive\}\s+sessionStats=\{sessionStats\}\s+contextUsage=\{contextUsage\}\s+active=\{activeTopPanel === "session"\}\s+onOpen=\{handleSessionStatsButtonClick\}\s*\/>/s);
 });
 
 test("shows available partial session costs as conservative lower bounds", () => {
-  assert.ok(source.includes('costStatus === "partial"'));
-  assert.ok(source.includes('`≥$${(Math.floor(cost * 100) / 100).toFixed(2)}`'));
-  assert.ok(source.includes('`≥$${(Math.floor(amount * 10_000) / 10_000).toFixed(4)}`'));
-  assert.ok(source.includes("missingPriceModels.join(", ")"));
+  const costSource = `${source}\n${resourceSource}\n${topBarSource}`;
+  assert.ok(costSource.includes('costStatus === "partial"'));
+  assert.ok(costSource.includes('`≥$${(Math.floor(cost * 100) / 100).toFixed(2)}`'));
+  assert.ok(costSource.includes('`≥$${(Math.floor(amount * 10_000) / 10_000).toFixed(4)}`'));
+  assert.ok(costSource.includes("missingPriceModels.join(", ")"));
 });
 
 test("shows other pending usage separately without adding a partial-cost label", () => {
-  assert.match(source, /sessionCostPresentation/);
-  assert.match(source, /session\.pendingUsageCount/);
-  assert.match(source, /extensionPresentation\.pendingUsageCount/);
-  assert.match(source, /session\.costPartialHint/);
-  assert.doesNotMatch(source, /session\.recordedCost/);
+  const costSource = `${source}\n${resourceSource}`;
+  assert.match(costSource, /sessionCostPresentation/);
+  assert.match(costSource, /session\.pendingUsageCount/);
+  assert.match(costSource, /extensionPresentation\.pendingUsageCount/);
+  assert.match(costSource, /session\.costPartialHint/);
+  assert.doesNotMatch(costSource, /session\.recordedCost/);
 });
 
 test("labels child-agent cost rows with the agent count directly", () => {
-  assert.match(source, /translate\("session\.childCostCount", \{ count: childSessionCount \}\)/);
-  assert.doesNotMatch(source, /\$\{translate\("session\.childCost"\)\} \(\$\{childSessionCount\}\)/);
+  assert.match(resourceSource, /translate\("session\.childCostCount", \{ count: childSessionCount \}\)/);
+  assert.doesNotMatch(resourceSource, /\$\{translate\("session\.childCost"\)\} \(\$\{childSessionCount\}\)/);
 });
 
 test("session statistics section headings use the primary text color", () => {
-  const headingRows = source.match(/fontSize: 11, fontWeight: 600, color: "var\(--text\)"/g) ?? [];
+  const panelSource = `${source}\n${resourceSource}`;
+  const headingRows = panelSource.match(/fontSize: 11, fontWeight: 600, color: "var\(--text\)"/g) ?? [];
   assert.equal(headingRows.length, 6);
-  assert.doesNotMatch(source, /translate\("session\.(infoSection|projectSection|messages|tokens|cost|timing)"\)[\s\S]{0,80}color: "var\(--text-muted\)"/);
+  assert.doesNotMatch(panelSource, /translate\("session\.(infoSection|projectSection|messages|tokens|cost|timing)"\)[\s\S]{0,80}color: "var\(--text-muted\)"/);
 });
 
-test("closes the session statistics popover when the pointer lands outside its trigger or content", () => {
-  assert.match(source, /const sessionStatsPanelRef = useRef<HTMLDivElement>\(null\);/);
-  assert.match(source, /if \(activeTopPanel !== "session"\) return;[\s\S]*?document\.addEventListener\("pointerdown", handlePointerDown\)/);
-  assert.match(source, /topBarRef\.current\?\.contains\(target\) \|\| sessionStatsPanelRef\.current\?\.contains\(target\)/);
-  assert.match(source, /<div ref=\{sessionStatsPanelRef\} className="session-info-popover"/);
+test("closes every top panel when the pointer lands outside its trigger or content", () => {
+  assert.match(source, /const topPanelRef = useRef<HTMLDivElement>\(null\);/);
+  assert.match(source, /if \(!activeTopPanel\) return;[\s\S]*?document\.addEventListener\("pointerdown", handlePointerDown\)/);
+  assert.match(source, /topBarRef\.current\?\.contains\(target\) \|\| topPanelRef\.current\?\.contains\(target\)/);
+  assert.match(source, /<div ref=\{topPanelRef\} style=\{\{/);
+  assert.match(source, /<div className="session-info-popover" style=\{\{/);
 });
 
 test("renders the response share only from available timing", () => {
-  const shareStart = source.indexOf("const modelResponseShareValue = ") + "const modelResponseShareValue = ".length;
-  const shareEnd = source.indexOf(";\n", shareStart);
+  const shareStart = resourceSource.indexOf("const modelResponseShareValue = ") + "const modelResponseShareValue = ".length;
+  const shareEnd = resourceSource.indexOf(";\n", shareStart);
   assert.ok(shareStart > 0 && shareEnd > shareStart);
-  const formatShare = (timing) => runInNewContext(source.slice(shareStart, shareEnd), {
+  const formatShare = (timing) => runInNewContext(resourceSource.slice(shareStart, shareEnd), {
     timing,
     timingAvailable: typeof timing?.effectiveMs === "number" && timing.quality !== "unavailable",
     translate: (key) => key === "session.timingUnavailable" ? "unavailable" : key,
@@ -91,9 +112,9 @@ test("renders the response share only from available timing", () => {
   assert.equal(formatShare({ effectiveMs: 1, quality: "partial", modelResponsePercent: 50 }), "50.0%");
   assert.equal(formatShare({ effectiveMs: 0, quality: "unavailable" }), "unavailable");
   assert.equal(formatShare(undefined), "unavailable");
-  assert.match(source, /const formatCostModels/);
-  assert.match(source, /formatCostModels\(sessionStats\.parentCost\)/);
-  assert.match(source, /\.join\(\", \"\)/);
+  assert.match(resourceSource, /const formatCostModels/);
+  assert.match(resourceSource, /formatCostModels\(sessionStats\.parentCost\)/);
+  assert.match(resourceSource, /\.join\(\", \"\)/);
 });
 
 test("wraps full session file paths instead of ellipsizing them", () => {
@@ -164,8 +185,9 @@ test("session A changes only session-list layout preference", () => {
 test("seeds remote chat from the activity item’s running status and preserves owner identity", () => {
   assert.equal(
     [...source.matchAll(/sessionRunning: item\.status === "running" \|\| item\.status === "retrying"/g)].length,
-    4,
+    3,
   );
+  assert.equal([...source.matchAll(/selectRemoteActivitySession\(item, searchTerm\)/g)].length, 2);
   assert.match(source, /sessionRunning=\{Boolean\(\s*remoteSession\.sessionInfo && remoteSession\.sessionRunning\s*\)\}/);
   assert.match(source, /sessionRunning: false/);
   assert.match(source, /onAgentEnd=\{\(\) => handleAgentEnd\(remoteSession\.sessionInfo\?\.id \?\? undefined, remoteSession\.device\.id\)\}/);
@@ -193,6 +215,15 @@ test("top activity panel primes its position before the active render", () => {
   assert.match(source, /const updateTopPanelPosition = useCallback/);
   assert.match(source, /const toggleTopPanel = useCallback[\s\S]{0,900}updateTopPanelPosition\(\)/);
   assert.match(source, /\{activeTopPanel && topPanelPos && typeof document !== "undefined" && createPortal\([\s\S]{0,220}position: "fixed"/);
+});
+
+test("branch panel uses the shared top-panel host", () => {
+  assert.match(worktreeSource, /import \{ BranchNavigator, BranchNavigatorPanel \} from "\.\/BranchNavigator";/);
+  assert.match(worktreeSource, /<BranchNavigator /);
+  assert.match(worktreeSource, /<BranchNavigatorPanel /);
+  assert.match(source, /<AppShellWorktreeBranchPanel/);
+  assert.match(source, /onToggle=\{\(\) => toggleTopPanel\("branches"\)\}/);
+  assert.match(source, /tree=\{branchTree\}/);
 });
 
 test("mobile responsive layout keeps device selection separate from fixed sidebar", () => {
@@ -225,20 +256,20 @@ test("session search updates highlight when clicking current session", () => {
 });
 
 test("Talk Map context injection carries its source independently of the editable prompt", () => {
-  const start = source.indexOf("const handleTalkMapInjectContext");
-  const end = source.indexOf("const handleTalkMapFork", start);
+  const start = worktreeSource.indexOf("const handleTalkMapInjectContext");
+  const end = worktreeSource.indexOf("const handleTalkMapFork", start);
   assert.ok(start >= 0 && end > start);
-  assert.match(source.slice(start, end), /contextSourceSessionId: session\.id/);
-  assert.doesNotMatch(source.slice(start, end), /firstMessage|context:/);
+  assert.match(worktreeSource.slice(start, end), /contextSourceSessionId: session\.id/);
+  assert.doesNotMatch(worktreeSource.slice(start, end), /firstMessage|context:/);
   assert.match(source, /newSessionContextSourceId=\{effectiveNewSessionCwd \? pendingContextSourceSessionId : null\}/);
   assert.match(source, /newSessionContextSourceId=\{remoteSession\.newSessionContextSourceId \?\? null\}/);
 });
 
 test("Talk Map fork keeps the latest user entry as the backend boundary", () => {
-  const start = source.indexOf("const handleTalkMapFork");
-  const end = source.indexOf("const activitySidebarContainerVisible", start);
+  const start = worktreeSource.indexOf("const handleTalkMapFork");
+  const end = worktreeSource.indexOf("const handleActivityTalkMap", start);
   assert.ok(start >= 0 && end > start);
-  const handler = source.slice(start, end);
+  const handler = worktreeSource.slice(start, end);
   assert.match(handler, /messages\[index\]\?\.role === "user" && typeof entryIds\[index\] === "string"/);
   assert.doesNotMatch(handler, /isSubagentWakeMessage/);
   assert.match(handler, /type: "fork", entryId: entryIds\[userIndex\]/);
@@ -262,7 +293,7 @@ test("new session actions close an open Talk Map", () => {
   assert.ok(activityStart >= 0 && activityEnd > activityStart);
   assert.match(source.slice(activityStart, activityEnd), /closeTalkMap\(\)/);
   assert.match(source.slice(activityStart, activityEnd), /closeWorktreeGraph\(\)/);
-  assert.match(source, /onNewSession=\{handleTalkMapNewSession\}/);
+  assert.match(worktreeSource, /onNewSession=\{onTalkMapNewSession\}/);
 });
 
 test("same-device activity navigation updates the outer selection before iframe acknowledgement", () => {
@@ -348,7 +379,7 @@ test("aggregate remote navigation clears the previous embedded Reader owner", ()
   const aggregate = open.indexOf("if ((aggregateWorkspaceActive || hiddenView || favoritesView || isMobileViewport() || aggregateDeviceScope) && !embeddedReaderMode)");
   assert.ok(aggregate >= 0);
   const branch = open.slice(aggregate, open.indexOf("    if (fallbackToEmbeddedSession()", aggregate));
-  assert.ok(branch.indexOf("clearEmbeddedReaderOwner();") < branch.indexOf("setRemoteSession({ device: item.device"));
+  assert.ok(branch.indexOf("clearEmbeddedReaderOwner();") < branch.indexOf("selectRemoteActivitySession(item, searchTerm)"));
 });
 
 test("aggregate remote drafts clear the previous embedded Reader owner", () => {
@@ -424,7 +455,8 @@ test("session info omits cumulative token total row", () => {
 test("refreshes full session statistics when opening the top-bar panel", () => {
   assert.match(source, /sessionStatsRefreshRef = useRef/);
   assert.match(source, /const handleSessionStatsButtonClick = useCallback\(\(\) => \{[\s\S]*?activeTopPanelRef\.current !== "session"[\s\S]*?sessionStatsRefreshRef\.current\?\.\(\)[\s\S]*?refreshTopBarSessionMetadata\(\)[\s\S]*?toggleTopPanel\("session"\)/);
-  assert.match(source, /onClick=\{handleSessionStatsButtonClick\}/);
+  assert.match(topBarSource, /onClick=\{onOpen\}/);
+  assert.match(source, /onOpen=\{handleSessionStatsButtonClick\}/);
   assert.match(source, /const refreshTopBarSessionMetadata = useCallback/);
   assert.match(source, /sessionStatsRefreshRef=\{sessionStatsRefreshRef\}/);
 });
@@ -457,42 +489,42 @@ test("abandoned draft context source is cleared when selecting an existing sessi
 });
 
 test("session info renders canonical extension costs only", () => {
-  assert.match(source, /extensionCosts\.map\(\(summary\)/);
-  assert.match(source, /session\.extensionCost/);
-  assert.match(source, /session\.extensionHistoricalUnpriced/);
-  assert.match(source, /\.replace\(\/\\s\+usage\$\/i, ""\)/);
-  assert.match(source, /session\.extensionCost", \{ name \}/);
-  assert.match(source, /session\.extensionHistoricalEstimated/);
-  assert.match(source, /session\.extensionHistoricalEstimatedPartial/);
-  assert.doesNotMatch(source, /extensionUsageRows/);
-  assert.doesNotMatch(source, /session\.extensionUsageNote/);
-  assert.doesNotMatch(source, /session\.extensionUsage"/);
-  assert.doesNotMatch(source, /usage\.cost\.toFixed/);
+  assert.match(resourceSource, /extensionCosts\.map\(\(summary\)/);
+  assert.match(resourceSource, /session\.extensionCost/);
+  assert.match(resourceSource, /session\.extensionHistoricalUnpriced/);
+  assert.match(resourceSource, /\.replace\(\/\\s\+usage\$\/i, ""\)/);
+  assert.match(resourceSource, /session\.extensionCost", \{ name \}/);
+  assert.match(resourceSource, /session\.extensionHistoricalEstimated/);
+  assert.match(resourceSource, /session\.extensionHistoricalEstimatedPartial/);
+  assert.doesNotMatch(resourceSource, /extensionUsageRows/);
+  assert.doesNotMatch(resourceSource, /session\.extensionUsageNote/);
+  assert.doesNotMatch(resourceSource, /session\.extensionUsage"/);
+  assert.doesNotMatch(resourceSource, /usage\.cost\.toFixed/);
 });
 
 test("session info groups plugin costs and removes the recap cache row", () => {
-  assert.match(source, /mergeSessionCostSummaries\(\[/);
-  assert.match(source, /label: translate\("session\.pluginCost"\)/);
-  assert.match(source, /details: pluginCostDetails/);
-  assert.doesNotMatch(source, /recapCacheHitRate/);
-  assert.doesNotMatch(source, /key: "recapCache"/);
+  assert.match(resourceSource, /mergeSessionCostSummaries\(\[/);
+  assert.match(resourceSource, /label: translate\("session\.pluginCost"\)/);
+  assert.match(resourceSource, /details: pluginCostDetails/);
+  assert.doesNotMatch(resourceSource, /recapCacheHitRate/);
+  assert.doesNotMatch(resourceSource, /key: "recapCache"/);
 });
 
 test("session info cost breakdown allows expanding cost details and specific models", () => {
   assert.match(source, /const \[expandedCostModels, setExpandedCostModels\] = useState<Record<string, boolean>>/);
   assert.match(source, /const toggleCostModels = useCallback/);
-  assert.match(source, /const hasMultipleModels = row\.models\.length > 1/);
-  assert.match(source, /const hasDetails = \(row\.details\?\.length \?\? 0\) > 0/);
-  assert.match(source, /const isExpandable = hasDetails \|\| hasMultipleModels/);
-  assert.match(source, /onClick=\{\(\) => toggleCostModels\(row\.key\)\}/);
-  const costRow = source.slice(source.indexOf("const renderCostDetailRow"), source.indexOf("{isExpanded && hasDetails"));
+  assert.match(resourceSource, /const hasMultipleModels = row\.models\.length > 1/);
+  assert.match(resourceSource, /const hasDetails = \(row\.details\?\.length \?\? 0\) > 0/);
+  assert.match(resourceSource, /const isExpandable = hasDetails \|\| hasMultipleModels/);
+  assert.match(resourceSource, /onClick=\{\(\) => toggleCostModels\(row\.key\)\}/);
+  const costRow = resourceSource.slice(resourceSource.indexOf("const renderCostDetailRow"), resourceSource.indexOf("{isExpanded && hasDetails"));
   assert.match(costRow, /aria-expanded=\{isExpanded\}/);
   assert.match(costRow, /<span aria-hidden="true"/);
   assert.match(costRow, /isExpanded \? "▾" : "▸"/);
-  assert.match(source, /row\.details\?\.map\(renderCostDetailRow\)/);
-  assert.match(source, /row\.models\.map\(\(model\) =>/);
-  assert.match(source, /gridColumn:\s*"1 \/ -1"/);
-  assert.match(source, /filter\(\(model\) => Boolean\(model\) && model !== "unknown\/unknown"\)/);
+  assert.match(resourceSource, /row\.details\?\.map\(renderCostDetailRow\)/);
+  assert.match(resourceSource, /row\.models\.map\(\(model\) =>/);
+  assert.match(resourceSource, /gridColumn:\s*"1 \/ -1"/);
+  assert.match(resourceSource, /filter\(\(model\) => Boolean\(model\) && model !== "unknown\/unknown"\)/);
 });
 
 

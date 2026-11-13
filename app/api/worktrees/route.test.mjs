@@ -10,7 +10,6 @@ import { createJiti } from "jiti";
 const execFileAsync = promisify(execFile);
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const { GET, POST, PATCH, DELETE } = await jiti.import("./route.ts");
-const { allowFileRoot } = await jiti.import("@/lib/file-access");
 
 async function git(cwd, args) {
   await execFileAsync("git", ["-C", cwd, ...args]);
@@ -45,10 +44,6 @@ test("GET /api/worktrees supports basic, graph, and inspect queries", async (t) 
   await mkdir(path.join(linked, "secrets"));
   await writeFile(path.join(linked, "secrets", "secret.txt"), "synthetic fixture only\n");
 
-  // Allow tempRoot so security gate passes
-  allowFileRoot(tempRoot);
-  allowFileRoot(repo);
-  allowFileRoot(linked);
 
   // 1. Basic query without graph=1
   const req1 = new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}`);
@@ -130,8 +125,6 @@ test("POST, PATCH and DELETE /api/worktrees manage plain Git worktrees and keep 
   await writeFile(path.join(repo, "README.md"), "# main\n");
   await git(repo, ["add", "README.md"]);
   await git(repo, ["commit", "-m", "initial commit on main"]);
-  allowFileRoot(tempRoot);
-  allowFileRoot(repo);
 
   const unconfigured = await POST(jsonRequest("POST", { cwd: repo, branch: "not-created" }));
   assert.equal(unconfigured.status, 400);
@@ -167,9 +160,9 @@ test("POST, PATCH and DELETE /api/worktrees manage plain Git worktrees and keep 
   assert.match(stdout, /side-ask/);
 });
 
-test("worktree mutations require a JSON request for an allowed directory", async () => {
+test("worktree mutations require JSON and an existing directory", async () => {
   const plain = new Request("http://localhost/api/worktrees", { method: "POST", headers: { Host: "localhost" }, body: "{}" });
   assert.equal((await POST(plain)).status, 415);
   assert.equal((await DELETE(jsonRequest("DELETE", { path: "/tmp/x" }))).status, 400);
-  assert.equal((await PATCH(jsonRequest("PATCH", { cwd: "/definitely/not/allowed", path: "/x", branch: "y" }))).status, 403);
+  assert.equal((await PATCH(jsonRequest("PATCH", { cwd: "/definitely/not/allowed", path: "/x", branch: "y" }))).status, 400);
 });

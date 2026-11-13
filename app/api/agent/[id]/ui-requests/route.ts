@@ -1,5 +1,11 @@
 import { getRpcSession, assertRpcSessionRuntimeBinding } from "@/lib/rpc-manager";
 import { isApiRequestAllowed } from "@/lib/request-security";
+import {
+  createReaderStreamWriter,
+  registerReaderStreamCloser,
+  READER_STREAM_HIGH_WATER_MARK_BYTES,
+  type ReaderStreamDiagnostic,
+} from "@/lib/reader-event-stream";
 
 export const dynamic = "force-dynamic";
 
@@ -17,40 +23,69 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   if (new URL(req.url).searchParams.get("stream") !== "1") {
     return Response.json(live?.getPendingUiRequestsSnapshot() ?? absent, { headers: { "Cache-Control": "no-store" } });
   }
-  const encoder = new TextEncoder();
   let dispose = () => {};
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
+      const diagnostic: ReaderStreamDiagnostic = {
+        kind: "ui-requests",
+        sessionId: id,
+        holder: null,
+        openedAt: Date.now(),
+        connectedAt: null,
+        lastWriteAt: null,
+        droppedEvents: 0,
+        queuedBytes: 0,
+      };
       let closed = false;
       let unsubscribe = () => {};
-      const heartbeat: { timer?: ReturnType<typeof setInterval> } = {};
-      const close = (cancelled = false) => {
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
+      let unregister = () => {};
+      let writer: ReturnType<typeof createReaderStreamWriter>;
+      const close = (closeController: boolean | "error" = true) => {
         if (closed) return;
         closed = true;
         unsubscribe();
-        if (heartbeat.timer) clearInterval(heartbeat.timer);
+        if (heartbeat !== null) clearInterval(heartbeat);
         req.signal.removeEventListener("abort", abort);
-        if (!cancelled) controller.close();
+        try {
+          if (closeController === "error") controller.error(new Error("Reader UI request stream shutting down"));
+          else if (closeController) controller.close();
+        } catch { /* already closed */ }
+        finally { unregister(); }
       };
+      writer = createReaderStreamWriter(
+        controller,
+        diagnostic,
+        () => close("error"),
+        () => close(true),
+      );
       const abort = () => close();
-      dispose = () => close(true);
-      const send = (snapshot: unknown) => {
-        if (!closed) controller.enqueue(encoder.encode(`event: ui_requests\ndata: ${JSON.stringify(snapshot)}\n\n`));
-      };
+      dispose = () => close(false);
+      unregister = registerReaderStreamCloser(close, diagnostic);
       req.signal.addEventListener("abort", abort, { once: true });
       if (req.signal.aborted) { close(); return; }
-      if (!live) { send(absent); close(); return; }
+      if (!live) {
+        writer.write(`event: ui_requests\ndata: ${JSON.stringify(absent)}\n\n`);
+        writer.flush();
+        close();
+        return;
+      }
       unsubscribe = live.subscribeUiRequests(snapshot => {
-        send(snapshot);
-        if (snapshot.runtimeStatus === "closed") close();
+        writer.write(`event: ui_requests\ndata: ${JSON.stringify(snapshot)}\n\n`);
+        if (snapshot.runtimeStatus === "closed") {
+          writer.flush();
+          close();
+        }
       });
       if (closed) { unsubscribe(); return; }
+      if (!writer.flush() || closed) return;
       // Transport keepalive only: never reads a ledger, polls a runtime, or wakes it.
-      heartbeat.timer = setInterval(() => {
-        if (!closed) controller.enqueue(encoder.encode("event: ping\ndata: {}\n\n"));
-      }, 15_000);
+      heartbeat = setInterval(() => writer.write("event: ping\ndata: {}\n\n"), 15_000);
     },
     cancel() { dispose(); },
+  }, {
+    highWaterMark: READER_STREAM_HIGH_WATER_MARK_BYTES,
+    size: (chunk) => chunk.byteLength,
   });
   return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no" } });
 }

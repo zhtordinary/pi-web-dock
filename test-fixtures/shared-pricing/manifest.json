@@ -4,8 +4,7 @@
   "sourceSnapshotManifest": "maintainer pricing-skill snapshot manifest (not distributed)",
   "sourceSnapshotManifestSha256": "e13d5f9b35616e554c566d2d2dcc4735e64e0d1d2c007ab7a0f87efc58e9bef0",
   "lockedTestPackages": {
-    "@pydantic/genai-prices": "0.1.9",
-    "pi-subagents": "0.74.0"
+    "@pydantic/genai-prices": "0.1.9"
   },
   "files": [
     {

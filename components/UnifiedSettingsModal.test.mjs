@@ -185,7 +185,23 @@ test("AgentsConfig provides full subagent options matching official pi-web", () 
   assert.ok(source.includes("agents.thinking"), "thinking level select present");
   assert.ok(source.includes("defaultContext"), "native context mode present");
   assert.ok(source.includes("defaultAsync"), "native async default present");
-  assert.doesNotMatch(source, /loadSkills|loadExtensions|maxTurns|runInBackground/, "removed legacy controls stay absent");
+  assert.ok(source.includes("agents.readerRuntime"), "Reader-native runtime section present");
+  assert.ok(source.includes("agents.loadSkills"), "Reader-native skill loading control present");
+  assert.ok(source.includes("agents.loadExtensions"), "Reader-native extension loading control present");
+  assert.ok(source.includes("agents.maxTurns"), "Reader-native turn limit control present");
+  assert.ok(source.includes("reader: { ...DEFAULT_READER_NATIVE }"), "new profiles get an explicit Reader-native projection");
+});
+
+test("agent reload notifications reach only the matching live session without remounting chat", () => {
+  const modal = fs.readFileSync(path.join(process.cwd(), "components", "UnifiedSettingsModal.tsx"), "utf8");
+  const shell = fs.readFileSync(path.join(process.cwd(), "components", "AppShell.tsx"), "utf8");
+  const hook = fs.readFileSync(path.join(process.cwd(), "hooks", "useAgentSession.ts"), "utf8");
+  const agentPanel = modal.slice(modal.indexOf("<AgentsConfig"), modal.indexOf("/>", modal.indexOf("<AgentsConfig")));
+  assert.match(agentPanel, /onReloaded=\{onSessionReloaded\}/);
+  assert.match(shell, /onSessionReloaded=\{\(\) => \{[\s\S]*?SESSION_RESOURCES_RELOADED_EVENT[\s\S]*?sessionId: resourceSessionId, remotePeer: resourcePeer \?\? null/);
+  assert.match(hook, /detail\?\.sessionId !== sid/);
+  assert.match(hook, /detail\.remotePeer \?\? null\) !== \(remotePeerRef\.current \?\? null/);
+  assert.match(hook, /Promise\.allSettled\(\[loadAgentState\(sid\), loadTools\(sid\), loadSlashCommands\(\)\]\)/);
 });
 
 test("ChatWindow quote selection provides both current chat and side chat options", () => {
@@ -268,6 +284,22 @@ test("settings modal guards unsaved changes with in-app confirmation dialog and 
   assert.ok(agentsSource.includes("settings.discardUnsaved"), "AgentsConfig has discard unsaved action");
 });
 
+test("phone split navigation is connected to each Reader resource panel", () => {
+  const read = (name) => fs.readFileSync(path.join(process.cwd(), "components", name), "utf8");
+  for (const name of ["ModelsConfig.tsx", "SkillsConfig.tsx", "PluginsConfig.tsx", "AgentsConfig.tsx"]) {
+    const source = read(name);
+    assert.match(source, /settings-phone-split/, `${name} has a split view`);
+    assert.match(source, /settings-phone-list/, `${name} marks its list`);
+    assert.match(source, /settings-phone-detail/, `${name} marks its detail`);
+    assert.match(source, /navigation\?\.openDetail\(/, `${name} enters detail on selection`);
+  }
+  const mcp = read("McpConfig.tsx");
+  assert.match(mcp, /<ConfigSplitView>/);
+  assert.match(mcp, /navigation\?\.openDetail\(t\("mcp\.codemode\.title"\)\)/);
+  assert.match(mcp, /navigation\?\.openDetail\(name\)/);
+  assert.match(mcp, /navigation\?\.openDetail\(t\("mcp\.add\.action"\)\)/);
+});
+
 test("resource mutations refresh only the opposite settings panel", () => {
   const source = fs.readFileSync(path.join(process.cwd(), "components", "UnifiedSettingsModal.tsx"), "utf8");
   const skillsStart = source.indexOf('{visitedTabs.has("skills")');
@@ -291,7 +323,7 @@ test("global skill edits validate discovery in global scope only", () => {
   assert.doesNotMatch(source, /Promise\.all\(\[\s*loadSkillsWithInstallInfo\(body\.cwd, "global"\),\s*loadSkillsWithInstallInfo\(body\.cwd, "project"\)\s*\]\)/s);
 });
 
-test("settings group headers share chevrons and preserve execution evidence and narrow layouts", () => {
+test("settings group headers share chevrons and avoid claiming unverified execution state", () => {
   const read = (name) => fs.readFileSync(path.join(process.cwd(), "components", name), "utf8");
   const agents = read("AgentsConfig.tsx");
   const skills = read("SkillsConfig.tsx");
@@ -301,7 +333,8 @@ test("settings group headers share chevrons and preserve execution evidence and 
   const css = fs.readFileSync(path.join(process.cwd(), "app", "settings.css"), "utf8");
   assert.match(agents, /className="config-resource-group-header"/);
   assert.match(agents, /agents\.executionNotice/);
-  assert.match(agents, /agents\.executionReaderLoaded/);
+  assert.match(agents, /agents\.executionPending/);
+  assert.doesNotMatch(agents, /agents\.executionReaderLoaded|agents\.executionPiLoaded/);
   assert.match(agents, /flexDirection: isMobile \? "column" : "row"/);
   for (const source of [agents, skills, plugins]) {
     assert.match(source, /<ChevronDown/);

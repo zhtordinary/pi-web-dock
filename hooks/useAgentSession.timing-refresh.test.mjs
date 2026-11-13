@@ -9,6 +9,10 @@ const start = source.indexOf("  const refreshSessionTiming = useCallback");
 const end = source.indexOf("  const refreshSessionStats = useCallback", start);
 assert.ok(start >= 0 && end > start);
 const callback = stripTypeScriptTypes(`${source.slice(start, end)}\nglobalThis.refresh = refreshSessionTiming;`);
+const statsStart = source.indexOf("  const refreshSessionStats = useCallback");
+const statsEnd = source.indexOf("  // A transcript page carries", statsStart);
+assert.ok(statsStart >= 0 && statsEnd > statsStart);
+const statsCallback = stripTypeScriptTypes(`${source.slice(statsStart, statsEnd)}\nglobalThis.refreshStats = refreshSessionStats;`);
 
 function harness(state = { phase: "current", runtimeLeafId: "history", viewedLeafId: "history", ready: true }) {
   const requests = [];
@@ -34,9 +38,67 @@ function harness(state = { phase: "current", runtimeLeafId: "history", viewedLea
   return { ctx, requests };
 }
 
+function statsHarness() {
+  const requests = [];
+  const overrides = [];
+  const ctx = {
+    useCallback: (fn) => fn,
+    sessionIdRef: { current: "s" },
+    remotePeerRef: { current: null },
+    sessionStatsRequestGenerationRef: { current: 0 },
+    sendAgentCommandR: (_sid, command) => new Promise((resolve, reject) => requests.push({ command, resolve, reject })),
+    setSessionStatsOverride: (value) => overrides.push(value),
+  };
+  vm.createContext(ctx);
+  vm.runInContext(statsCallback, ctx);
+  return { ctx, requests, overrides };
+}
+
 function response(timing, leafId = "history") {
   return { ok: true, json: async () => ({ sessionId: "s", leafId, timing }) };
 }
+
+test("session stats refresh fails safely, then recovers the current lightweight metrics", async () => {
+  const h = statsHarness();
+  const failed = h.ctx.refreshStats("s");
+  assert.equal(h.requests.length, 1);
+  h.requests[0].reject(new Error("stats unavailable"));
+  await failed;
+  assert.equal(h.overrides.length, 0);
+
+  const recovered = h.ctx.refreshStats("s");
+  h.requests[1].resolve({ sessionId: "s", tokens: 220, totalMessages: 4, cost: 0, costStatus: "unavailable" });
+  await recovered;
+  assert.equal(h.overrides.length, 1);
+  assert.equal(h.overrides[0].stats.tokens, 220);
+  assert.equal(h.overrides[0].peer, null);
+});
+
+test("session stats ignore out-of-order, session and peer-scope changes", async () => {
+  const h = statsHarness();
+  const older = h.ctx.refreshStats("s");
+  const newer = h.ctx.refreshStats("s");
+  h.requests[1].resolve({ sessionId: "s", tokens: 2 });
+  await newer;
+  h.requests[0].resolve({ sessionId: "s", tokens: 1 });
+  await older;
+  assert.equal(h.overrides.at(-1).stats.tokens, 2);
+
+  const changes = [
+    (ctx) => { ctx.sessionIdRef.current = "other"; },
+    (ctx) => { ctx.remotePeerRef.current = "debian"; },
+  ];
+  for (const change of changes) {
+    const before = h.overrides.length;
+    const pending = h.ctx.refreshStats("s");
+    change(h.ctx);
+    h.requests.at(-1).resolve({ sessionId: "s", tokens: 99 });
+    await pending;
+    assert.equal(h.overrides.length, before);
+    h.ctx.sessionIdRef.current = "s";
+    h.ctx.remotePeerRef.current = null;
+  }
+});
 
 test("timing refresh always requests the viewed leaf, including current history and root", async () => {
   for (const [phase, leaf] of [["current", "history"], ["preview", "preview"], ["current", null], ["preview", null]]) {

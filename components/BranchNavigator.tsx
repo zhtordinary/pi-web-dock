@@ -1,7 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { createPortal } from "react-dom";
+import { useState, useCallback, useMemo } from "react";
 import type { BranchPreview, SessionEntry, SessionTreeNode } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 
@@ -11,8 +10,6 @@ interface Props {
   onLeafChange: (leafId: string | null) => void;
   /** When true, renders as a compact inline button for embedding in a top bar */
   inline?: boolean;
-  /** When inline, use this ref's bounding rect to size/position the dropdown */
-  containerRef?: React.RefObject<HTMLElement | null>;
   /** Controlled open state for inline mode */
   open?: boolean;
   /** Called when the button is clicked in inline mode */
@@ -387,90 +384,45 @@ function TreeNodeView({ node, activeLeafId, activePathIds, depth, isLast, parent
   );
 }
 
-export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, open: openProp, onToggle, hasSession, compact, hideInlineButton, busy = false, locked = false }: Props) {
+interface BranchPanelProps {
+  tree: SessionTreeNode[];
+  activeLeafId: string | null;
+  onLeafChange: (leafId: string | null) => void;
+  onToggle?: () => void;
+  hasSession?: boolean;
+  busy?: boolean;
+  locked?: boolean;
+}
+
+function BranchPanelContent({ tree, activeLeafId, onLeafChange, onToggle, hasSession, busy = false, locked = false }: BranchPanelProps) {
   const { t } = useI18n();
-  const [openInternal, setOpenInternal] = useState(false);
-  const open = openProp !== undefined ? openProp : openInternal;
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-  const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; width: number; maxHeight?: number } | null>(null);
-
-  useEffect(() => {
-    if (!open || !inline) return;
-    const anchor = btnRef.current;
-    if (!anchor) return;
-    const update = () => {
-      const rect = anchor.getBoundingClientRect();
-      const width = Math.min(560, Math.max(360, window.innerWidth - 24));
-      const left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width));
-      const maxHeight = Math.min(480, Math.max(260, window.innerHeight - rect.bottom - 16));
-      setDropdownPos({ top: rect.bottom + 4, left, width, maxHeight });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(anchor);
-    window.addEventListener("resize", update);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", update);
-    };
-  }, [open, inline]);
-
-  useEffect(() => {
-    if (!open || !inline) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (btnRef.current?.contains(target) || dropdownRef.current?.contains(target)) return;
-      if (onToggle) onToggle();
-      else setOpenInternal(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (onToggle) onToggle();
-      else setOpenInternal(false);
-    };
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [inline, onToggle, open]);
-
   const resolvedActiveLeafId = useMemo(
     () => activeLeafId ?? findLatestLeafId(tree),
     [activeLeafId, tree]
   );
-
   const activePathIds = useMemo(
     () => buildActivePath(tree, resolvedActiveLeafId),
     [tree, resolvedActiveLeafId]
   );
-
   const branchSwitchLocked = busy || locked;
   const handleSelect = useCallback((id: string) => {
     if (branchSwitchLocked) return;
     onLeafChange(id);
-    if (onToggle) onToggle();
-    else setOpenInternal(false);
+    onToggle?.();
   }, [branchSwitchLocked, onLeafChange, onToggle]);
-
   const selectBranch = branchSwitchLocked ? undefined : handleSelect;
   const lockedNotice = branchSwitchLocked && (
     <div style={{ padding: "4px 2px 6px", fontSize: 11, color: "var(--text-dim)", fontStyle: "italic" }}>
       {t("i18n.branchesLockedWhileRunning")}
     </div>
   );
-
   const noBranchReason = !hasSession
     ? t("i18n.noActiveSession")
     : !hasSessionBranches(tree)
       ? t("i18n.noBranches")
       : null;
-
   const branchCount = countBranches(tree);
   const hasContent = !noBranchReason && tree.length > 0;
-
   const branchIcon = (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: hasContent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
       <line x1="6" y1="3" x2="6" y2="15" />
@@ -479,13 +431,6 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, open
       <path d="M18 9a9 9 0 0 1-9 9" />
     </svg>
   );
-
-  const chevron = (
-    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 2, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-      <polyline points="2 3.5 5 6.5 8 3.5" />
-    </svg>
-  );
-
   const headerLegend = (
     <div style={{
       display: "flex",
@@ -516,46 +461,89 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, open
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 10, color: "var(--text-dim)" }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-          <span style={{
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            background: "var(--accent)",
-            boxShadow: "0 0 0 2px rgba(37,99,235,0.25)",
-            display: "inline-block",
-          }} />
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)", boxShadow: "0 0 0 2px rgba(37,99,235,0.25)", display: "inline-block" }} />
           {t("branches.current")}
         </span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-          <span style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
-            background: "var(--text-muted)",
-            display: "inline-block",
-          }} />
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--text-muted)", display: "inline-block" }} />
           {t("branches.historyPath")}
         </span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-          <span style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
-            border: "1.5px solid var(--border)",
-            background: "transparent",
-            display: "inline-block",
-          }} />
+          <span style={{ width: 6, height: 6, borderRadius: "50%", border: "1.5px solid var(--border)", background: "transparent", display: "inline-block" }} />
           {t("branches.alternative")}
         </span>
       </div>
     </div>
   );
 
+  return hasContent ? (
+    <div style={{ minWidth: "max-content" }}>
+      {headerLegend}
+      {lockedNotice}
+      {tree.map((child, idx) => (
+        <TreeNodeView
+          key={child.entry.id}
+          node={child}
+          activeLeafId={resolvedActiveLeafId}
+          activePathIds={activePathIds}
+          depth={0}
+          isLast={idx === tree.length - 1}
+          parentLines={[]}
+          onSelect={selectBranch}
+        />
+      ))}
+    </div>
+  ) : (
+    <div style={{ padding: "10px 0", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+      {noBranchReason}
+    </div>
+  );
+}
+
+export function BranchNavigatorPanel(props: BranchPanelProps) {
+  const { t } = useI18n();
+  return (
+    <section
+      role="dialog"
+      aria-label={t("i18n.branches")}
+      style={{
+        maxHeight: "min(600px, 75dvh)",
+        overflow: "auto",
+        background: "var(--bg-panel)",
+        borderBottom: "1px solid var(--border)",
+      }}
+    >
+      <div style={{ padding: "12px 16px" }}>
+        <BranchPanelContent {...props} />
+      </div>
+    </section>
+  );
+}
+
+export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, open: openProp, onToggle, hasSession, compact, hideInlineButton, busy = false, locked = false }: Props) {
+  const { t } = useI18n();
+  const [openInternal, setOpenInternal] = useState(false);
+  const open = openProp !== undefined ? openProp : openInternal;
+  const branchCount = countBranches(tree);
+  const hasContent = Boolean(hasSession && hasSessionBranches(tree) && tree.length > 0);
+  const branchIcon = (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: hasContent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+      <line x1="6" y1="3" x2="6" y2="15" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
+    </svg>
+  );
+  const chevron = (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 2, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+      <polyline points="2 3.5 5 6.5 8 3.5" />
+    </svg>
+  );
+
   if (inline) {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "stretch" }}>
         <button
-          ref={btnRef}
           disabled={busy || hideInlineButton}
           onClick={() => {
             if (busy || hideInlineButton) return;
@@ -583,65 +571,18 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, open
           onMouseLeave={(e) => { e.currentTarget.style.color = open ? "var(--text)" : "var(--text-muted)"; }}
           title={busy ? t("chat.sessionBusyDisabled") : t("i18n.branches")}
           aria-label={t("i18n.branches")}
-          aria-pressed={open}
+          aria-haspopup="dialog"
+          aria-expanded={open}
         >
           {branchIcon}
           {!compact && <span>{t("i18n.branches")}</span>}
         </button>
-        {open && dropdownPos && typeof document !== "undefined" && createPortal(
-          <div
-            ref={dropdownRef}
-            role="dialog"
-            aria-label={t("i18n.branches")}
-            style={{
-              position: "fixed",
-              top: dropdownPos.top,
-              left: dropdownPos.left,
-              width: dropdownPos.width,
-              maxHeight: dropdownPos.maxHeight ?? 420,
-              overflow: "auto",
-              background: "var(--bg-panel)",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
-              zIndex: 1000,
-              padding: "8px 10px",
-              fontSize: 12,
-              color: "var(--text)",
-            }}
-          >
-            {hasContent ? (
-              <div style={{ minWidth: "max-content", padding: "2px 4px" }}>
-                {headerLegend}
-                {lockedNotice}
-                {tree.map((child, idx) => (
-                  <TreeNodeView
-                    key={child.entry.id}
-                    node={child}
-                    activeLeafId={resolvedActiveLeafId}
-                    activePathIds={activePathIds}
-                    depth={0}
-                    isLast={idx === tree.length - 1}
-                    parentLines={[]}
-                    onSelect={selectBranch}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div style={{ padding: "10px 6px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                {noBranchReason}
-              </div>
-            )}
-          </div>,
-          document.body,
-        )}
       </div>
     );
   }
 
   return (
     <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg)", flexShrink: 0, position: "relative" }}>
-      {/* Header toggle */}
       <button
         disabled={busy}
         onClick={() => {
@@ -663,12 +604,10 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, open
         }}
       >
         {branchIcon}
-         <span style={{ color: "var(--text-muted)" }}>{t("i18n.branches")}</span>
+        <span style={{ color: "var(--text-muted)" }}>{t("i18n.branches")}</span>
         {branchCount > 0 && <span style={{ color: "var(--accent)", fontSize: 10, fontWeight: 600 }}>{branchCount}</span>}
         {chevron}
       </button>
-
-      {/* Tree panel - overlay */}
       {open && (
         <div style={{
           position: "absolute",
@@ -680,30 +619,17 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, open
           boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
           zIndex: 100,
         }}>
-          {hasContent ? (
-            <div style={{ padding: "6px 12px 8px 12px", maxHeight: 320, overflow: "auto" }}>
-              <div style={{ minWidth: "max-content" }}>
-                {headerLegend}
-                {lockedNotice}
-                {tree.map((child, idx) => (
-                  <TreeNodeView
-                    key={child.entry.id}
-                    node={child}
-                    activeLeafId={resolvedActiveLeafId}
-                    activePathIds={activePathIds}
-                    depth={0}
-                    isLast={idx === tree.length - 1}
-                    parentLines={[]}
-                    onSelect={selectBranch}
-                  />
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-              {noBranchReason ?? t("i18n.noBranches")}
-            </div>
-          )}
+          <div style={{ padding: "6px 12px 8px 12px", maxHeight: 320, overflow: "auto" }}>
+            <BranchPanelContent
+              tree={tree}
+              activeLeafId={activeLeafId}
+              onLeafChange={onLeafChange}
+              onToggle={() => setOpenInternal(false)}
+              hasSession={hasSession}
+              busy={busy}
+              locked={locked}
+            />
+          </div>
         </div>
       )}
     </div>

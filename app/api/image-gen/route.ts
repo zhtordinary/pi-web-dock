@@ -14,7 +14,6 @@ import { dirname, join, resolve } from "path";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "@/lib/atomic-file";
 import { getRpcSessionByFile } from "@/lib/rpc-manager";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { loadImageGenerationPackage } from "@/lib/image-generation-package";
 import { imageGenerationQuote } from "@/lib/image-generation-pricing";
 
@@ -96,10 +95,7 @@ function projectGenConfigPath(projectDir: string): string {
 
 /**
  * Validate a caller-supplied project path before it is used to read or write
- * <cwd>/.pi/multimodal-proxy.json. Same policy as app/api/models/route.ts:
- * resolve -> must exist -> must be a directory -> must stay inside the allowed
- * roots (project dirs with sessions, plus explicitly allowed roots). Rejects
- * traversal, non-existent paths and writes to unrelated directories.
+ * <cwd>/.pi/multimodal-proxy.json: resolve it and require an existing directory.
  */
 async function validateProjectCwd(cwd: string): Promise<string | { status: number; error: string }> {
   const requested = cwd.trim();
@@ -113,10 +109,6 @@ async function validateProjectCwd(cwd: string): Promise<string | { status: numbe
   }
   if (!cwdStat.isDirectory()) {
     return { status: 400, error: `Not a directory: ${resolved}` };
-  }
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(resolved, allowedRoots)) {
-    return { status: 403, error: "Access denied" };
   }
   return resolved;
 }
@@ -195,9 +187,8 @@ export async function GET(req: Request) {
   const cwdParam = url.searchParams.get("cwd") ?? "";
   // Only the image settings editor opts in; composer and quote reads stay redacted.
   const includeProviderKeys = url.searchParams.get("includeProviderKeys") === "1";
-  // Caller-supplied cwd is a project path boundary (same policy as /api/models):
-  // resolve, require an existing directory inside the allowed roots, then read
-  // <cwd>/.pi/multimodal-proxy.json from the validated path only.
+  // Resolve the caller-supplied cwd and require an existing directory before
+  // reading <cwd>/.pi/multimodal-proxy.json.
   let projectCwd: string | null = null;
   if (cwdParam) {
     const validated = await validateProjectCwd(cwdParam);

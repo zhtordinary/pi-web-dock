@@ -5,6 +5,18 @@ import test from "node:test";
 
 const source = fs.readFileSync(path.join(process.cwd(), "components", "AgentsConfig.tsx"), "utf8");
 
+test("AgentsConfig uses the execution-safe new profile defaults", () => {
+  assert.match(source, /loadSkills: true/);
+  assert.match(source, /loadExtensions: true/);
+  assert.match(source, /codemode: "inherit"/);
+  assert.match(source, /mcp: "on"/);
+  assert.match(source, /defaultAsync: true/);
+  assert.match(source, /inheritProjectContext: true/);
+  assert.match(source, /inheritGlobalContext: true/);
+  assert.match(source, /inheritSkills: true/);
+  assert.match(source, /runInBackground: true/);
+});
+
 test("AgentsConfig preserves drafts independently while switching profiles", () => {
   const selectStart = source.indexOf("const handleSelect =");
   const createStart = source.indexOf("const handleStartCreate", selectStart);
@@ -72,6 +84,14 @@ test("built-in enablement is persisted through the profile API instead of a loca
   assert.match(source, /isTogglableScope\(selectedProfile\.scope\)/);
 });
 
+test("saving profiles marks the active session for a subagent reload", () => {
+  const saveStart = source.indexOf("const handleSave =");
+  const saveSource = source.slice(saveStart);
+  assert.match(saveSource, /if \(sessionId\) \{[\s\S]*?setPendingSubagentReload\(sessionId, remotePeer, true\)/);
+  assert.match(saveSource, /reloadOwnerRef\.current\.sessionId === sessionId/);
+  assert.match(saveSource, /setReloadNeededFor\(reloadIdentity\)/);
+});
+
 test("AgentsConfig accepts remotePeer and routes settings and profiles through apiPathForPeer", () => {
   assert.ok(source.includes("remotePeer?: string"));
   assert.match(source, /apiPathForPeer\(remotePeer, `models\?cwd=/);
@@ -94,6 +114,37 @@ test("project trust reloads the selected peer's model catalog without dropping p
 test("AgentsConfig stacks the sidebar above the editor on mobile", () => {
   assert.match(source, /flexDirection: isMobile \? "column" : "row"/);
   assert.match(source, /maxHeight: isMobile \? "40vh"/);
+});
+
+test("AgentsConfig makes scoped sidebar rows draggable and persists their order", () => {
+  assert.match(source, /moveSubagentProfile/);
+  assert.match(source, /profileDragProps\(group, profileKey\(p\)\)/);
+  assert.match(source, /body: JSON\.stringify\(\{ order: nextProfiles\.map\(profileKey\) \}\)/);
+  assert.match(source, /modelRouting\.dragToReorder/);
+  assert.match(source, /event\.altKey/);
+  assert.match(source, /await fetchProfiles\(\)/, "failed order writes reload the server order");
+});
+
+test("AgentsConfig keeps existing IDs stable and avoids duplicate copy names", () => {
+  assert.match(source, /readOnly=\{isReadonlyProfile \|\| !isCreating\}/, "existing profile IDs are not renamed in place");
+  assert.match(source, /function duplicateProfileName\(name: string, profiles: readonly SubagentProfile\[\]\)/, "copy names are collision checked");
+  assert.match(source, /readerRuntime/, "Reader-native controls are visible separately");
+  assert.match(source, /agents\.inheritContext/, "context inheritance uses the unified control");
+  assert.match(source, /agents\.background/, "background mode uses the unified control");
+  assert.doesNotMatch(source, /readerInheritContext|readerBackground/, "Reader does not duplicate unified context controls");
+  assert.match(source, /reloadNeeded/, "built-in changes expose a reload-needed state");
+});
+
+test("AgentsConfig preserves scope choices and reports model and resource errors", () => {
+  assert.match(source, /newScopeRef\.current \?\? \(cwd \? "project" : "global"\)/);
+  assert.match(source, /newScopeRef\.current = scope/);
+  assert.match(source, /typeof data\?\.modelError\?\.message === "string"/);
+  assert.match(source, /if \(!ok \|\| message\) setModelError/);
+  assert.match(source, /Number\.isSafeInteger\(profile\.reader\.maxTurns\)/);
+  assert.match(source, /readerChatOnly && draftReader\.mcp !== "on"/);
+  assert.match(source, /readerChatOnly && draftReader\.codemode !== "on"/);
+  assert.match(source, /copyFrom: selectedProfile \? \{ scope: selectedProfile\.scope, name: selectedProfile\.name \}/);
+  assert.match(source, /pendingSubagentReloadToken\(sessionId, remotePeer\) === pendingToken/, "a reload does not clear a later settings change");
 });
 
 test("AgentsConfig keeps long paths and the open action on one row", () => {

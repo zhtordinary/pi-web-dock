@@ -36,6 +36,7 @@ test("model placement prioritizes hover width and preserves Map time", () => {
   assert.match(meta, /data-session-activity-model="after-time"/);
   assert.match(meta, /title=\{modelName\}/);
   assert.match(meta, /minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis"/);
+  assert.match(meta, /whiteSpace: "nowrap", direction: "rtl", textAlign: "left"/);
   assert.match(meta, /const nonModelFlexStyle: CSSProperties = modelPlacement \? \{ flexShrink: 0 \} : \{\}/);
   assert.equal((meta.match(/\.\.\.nonModelFlexStyle/g) ?? []).length, 5, "time and other textual metadata stay fixed in model layouts");
   assert.match(meta, /\{replaceTimeWithModel \? \([\s\S]*?data-session-activity-model="replace-time"[\s\S]*?\) : \([\s\S]*?<span title=\{timeValue\}/);

@@ -7,11 +7,14 @@ import ts from "typescript";
 const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
 const managed = source.slice(source.indexOf("async function handleManagedControl"));
 
-test("managed control is live-only and cannot fall through to runtime start", () => {
+test("managed control starts a persisted runtime only for message commands, after the write is authorized", () => {
   assert.match(source, /readerMcpControl/);
   assert.match(managed, /runtime_not_live/);
   assert.match(managed, /runtimeStartAttempted: false/);
-  assert.doesNotMatch(managed, /startRpcSession/);
+  const wake = managed.indexOf("startRpcSession(sessionId, filePath, undefined)");
+  assert.ok(wake > 0, "a persisted session is started from its resolved file");
+  assert.ok(managed.lastIndexOf("managedWriteAuthorization(body)", wake) > 0 && managed.lastIndexOf("managedWriteAuthorization(body)", wake) < wake, "confirmation is checked before the runtime is started");
+  assert.match(source, /MANAGED_RUNTIME_START_TYPES = new Set\(\["prompt", "continue", "steer", "follow_up", "initialize_runtime"\]\)/);
   assert.match(managed, /device_mismatch/);
   assert.match(managed, /cwd_mismatch/);
   assert.match(managed, /boot_changed/);
@@ -83,7 +86,9 @@ test("a stale expected leaf is rejected before binding or sending", () => {
 });
 
 
-function routeFixture({ uiError, retryError, raceQueue = false, failPersistence = false, failAfterMutation = false, failFirstPersistence = false, terminalAbort = false, denyRequest = false, inactive = false, activeRun = true, sendRejection = false, bindingRejection = false, lookupRejection = false } = {}) {
+function routeFixture({ uiError, retryError, raceQueue = false, failPersistence = false, failAfterMutation = false, failFirstPersistence = false, terminalAbort = false, denyRequest = false, inactive = false, activeRun = true, sendRejection = false, bindingRejection = false, lookupRejection = false, missingSession = false, startError } = {}) {
+  let sessionInactive = inactive;
+  const startCalls = [];
   const receipts = new Map();
   const bindings = new Set();
   let queueRevision = "queue-1";
@@ -97,7 +102,7 @@ function routeFixture({ uiError, retryError, raceQueue = false, failPersistence 
   const session = {
     cwd: "/tmp/reader-managed-queue-fixture",
     inner: { sessionManager: {} },
-    isAlive: () => !inactive,
+    isAlive: () => !sessionInactive,
     getActiveControlRunId: () => activeRun ? "fixture-run" : null,
     getLiveRuntimeIdentity: () => ({ bootId: "boot-1", revision: runtimeRevision }),
     getQueueIdentity: () => ({ revision: queueRevision, counts: { steering: 1, followUp: 1, total: 2 } }),
@@ -127,7 +132,7 @@ function routeFixture({ uiError, retryError, raceQueue = false, failPersistence 
         if (retryError) throw retryError;
         return null;
       }
-      if (["prompt", "abort"].includes(command.type)) {
+      if (["prompt", "steer", "follow_up", "abort"].includes(command.type)) {
         if (terminalAbort && command.type === "abort") {
           const [key, receipt] = [...receipts].find(([, value]) => value.receiptId === command.readerControlReceiptId);
           receipts.set(key, { ...receipt, outcome: "aborted", targetStopped: true, runId: "actual-settled-run" });
@@ -181,8 +186,12 @@ function routeFixture({ uiError, retryError, raceQueue = false, failPersistence 
     "@/lib/queue-recall-store": new Proxy({}, { get: () => () => { throw new Error("managed control must not enter UI attachment recall"); } }),
     "next/server": { NextResponse: { json: (value, init) => Response.json(value, init) } },
     "@/lib/request-security": { isApiRequestAllowed: () => !denyRequest, hasJsonContentType: () => true },
-    "@/lib/session-reader": { resolveSessionPath: () => { throw new Error("must not resolve a durable session"); } },
-    "@/lib/rpc-manager": { getRpcSession: () => { if (lookupRejection) throw new Error("/tmp/private-fixture-error"); return session; }, assertRpcSessionRuntimeBinding: async () => { if (bindingRejection) throw new Error("/tmp/private-fixture-error"); } },
+    "@/lib/session-reader": { resolveSessionPath: async () => { if (!inactive) throw new Error("must not resolve a durable session for a live runtime"); return missingSession ? null : "/tmp/reader-managed-fixture.jsonl"; } },
+    "@/lib/rpc-manager": {
+      getRpcSession: () => { if (lookupRejection) throw new Error("/tmp/private-fixture-error"); return session; },
+      assertRpcSessionRuntimeBinding: async () => { if (bindingRejection) throw new Error("/tmp/private-fixture-error"); },
+      startRpcSession: async (id, file) => { startCalls.push({ id, file }); if (startError) throw startError; sessionInactive = false; return { session, realSessionId: id }; },
+    },
     "@/lib/session-tool-selection": {},
     "@/lib/branch-navigation": { matchesExpectedLeaf: () => true },
     "@/lib/activity-peers": { localDeviceIdentity: () => ({ id: "fixture" }), readActivityConfig: () => ({}) },
@@ -212,6 +221,7 @@ function routeFixture({ uiError, retryError, raceQueue = false, failPersistence 
       return { status: response.status, body: await response.json() };
     },
     settingCalls: () => settingCalls,
+    startCalls: () => startCalls.length,
     post: async (changes = {}) => {
       const response = await testModule.exports.POST(new Request("http://reader.invalid/api/agent/fixture", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, ...changes }),
@@ -220,6 +230,104 @@ function routeFixture({ uiError, retryError, raceQueue = false, failPersistence 
     },
   };
 }
+
+test("managed message commands start a persisted runtime like opening the session in the UI, once authorized", async () => {
+  const fixture = routeFixture({ inactive: true });
+  const prompt = { type: "prompt", message: "implement the task", idempotencyKey: "wake-prompt-1" };
+
+  const dry = await fixture.post({ ...prompt, dryRun: true });
+  assert.equal(dry.status, 200);
+  assert.equal(dry.body.outcome, "dry_run");
+  assert.equal(dry.body.wouldStartRuntime, true);
+  assert.equal(dry.body.runtimeLive, false);
+  assert.equal(fixture.startCalls(), 0, "a dry-run must not start a runtime");
+
+  assert.equal((await fixture.post({ ...prompt, confirm: false })).status, 403);
+  assert.equal((await fixture.post({ ...prompt, confirmationReason: "" })).status, 400);
+  assert.equal((await fixture.post({ ...prompt, idempotencyKey: undefined })).status, 400);
+  assert.equal(fixture.startCalls(), 0, "an unauthorized write must not start a runtime");
+  assert.equal(fixture.receipts.size, 0);
+
+  const sent = await fixture.post(prompt);
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal(sent.body.outcome, "accepted");
+  assert.equal(fixture.startCalls(), 1);
+  assert.equal(fixture.lifecycleCalls().sendCalls, 1);
+  assert.equal(fixture.calls().bindCalls, 1);
+  assert.equal(fixture.receipts.size, 1);
+
+  const replay = await fixture.post(prompt);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(fixture.lifecycleCalls().sendCalls, 1, "an idempotent replay must not send again");
+  assert.equal(fixture.startCalls(), 1);
+  const conflict = await fixture.post({ ...prompt, message: "a different message" });
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.body.code, "idempotency_conflict");
+
+  for (const type of ["continue", "steer", "follow_up"]) {
+    const other = routeFixture({ inactive: true });
+    const result = await other.post({ type, message: "work", idempotencyKey: `wake-${type}-1` });
+    assert.equal(result.status, 200, `${type}: ${JSON.stringify(result.body)}`);
+    assert.equal(other.startCalls(), 1);
+    assert.equal(other.lifecycleCalls().sendCalls, 1);
+  }
+});
+
+test("managed commands that act on a running runtime never start one", async () => {
+  for (const change of [{ type: "abort" }, { type: "stop" }, { type: "clear_queue" }, { type: "set_model", provider: "fixture", modelId: "fixture-model" }, { type: "set_tools", toolNames: [] }, { type: "answer_question", questionId: "q", runtimeGeneration: "boot-1", confirmed: true }]) {
+    const fixture = routeFixture({ inactive: true });
+    const result = await fixture.post(change);
+    assert.equal(result.status, 409, JSON.stringify(change));
+    assert.equal(result.body.code, "runtime_not_live");
+    assert.equal(result.body.runtimeStartAttempted, false);
+    assert.equal(fixture.startCalls(), 0);
+    assert.equal(fixture.receipts.size, 0);
+  }
+});
+
+test("starting a persisted runtime reports a missing, archived or owned session without a receipt or send", async () => {
+  const missing = routeFixture({ inactive: true, missingSession: true });
+  const gone = await missing.post({ type: "prompt", message: "x", idempotencyKey: "wake-missing-1" });
+  assert.equal(gone.status, 404);
+  assert.equal(gone.body.code, "session_missing");
+  assert.equal(missing.startCalls(), 0);
+  const dryGone = await missing.post({ type: "prompt", message: "x", dryRun: true });
+  assert.equal(dryGone.status, 404);
+
+  for (const [code, status] of [["session_archived", 409], ["session_runtime_owned", 409], ["boom", 500]]) {
+    const failing = routeFixture({ inactive: true, startError: Object.assign(new Error(`start failed ${code}`), { code }) });
+    const failed = await failing.post({ type: "prompt", message: "x", idempotencyKey: "wake-fail-0001" });
+    assert.equal(failed.status, status, code);
+    assert.equal(failed.body.code, code === "boom" ? "runtime_start_failed" : code);
+    assert.equal(failed.body.accepted, false);
+    assert.equal(failed.body.runtimeStartAttempted, true);
+    assert.equal(failing.lifecycleCalls().sendCalls, 0);
+    assert.equal(failing.receipts.size, 0);
+  }
+});
+
+test("initialize_runtime starts a persisted runtime and reports its identity without sending a command", async () => {
+  const fixture = routeFixture({ inactive: true });
+  const open = { type: "initialize_runtime", idempotencyKey: "open-session-1" };
+  const first = await fixture.post(open);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(first.body.outcome, "completed");
+  assert.equal(first.body.receipt.outcome, "completed");
+  assert.equal(first.body.data.initialized, true);
+  assert.equal(first.body.data.bootId, "boot-1");
+  assert.equal(first.body.data.revision, "runtime-1");
+  assert.equal(fixture.startCalls(), 1);
+  assert.equal(fixture.lifecycleCalls().sendCalls, 0);
+  assert.equal(fixture.calls().bindCalls, 0, "opening a session is not a model run");
+  const replay = await fixture.post(open);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(fixture.startCalls(), 1);
+
+  const live = routeFixture();
+  const already = await live.post(open);
+  assert.equal(already.body.outcome, "completed");
+  assert.equal(live.startCalls(), 0, "an already running runtime is not started again");
+});
 
 test("retry-only POST distinguishes accepted requests from typed and generic preflight rejection", async () => {
   const command = { type: "retry_continue_only", readerMcpControl: false, idempotencyKey: undefined, expectedRunId: "observed-run" };

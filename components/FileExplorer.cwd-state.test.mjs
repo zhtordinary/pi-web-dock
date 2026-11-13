@@ -26,3 +26,13 @@ test("uses a visible blue treatment for the located current file", () => {
   assert.match(vm.runInNewContext(boxShadow, current), /#3b82f6/);
   assert.equal(vm.runInNewContext(background, { ...current, confirmingDelete: {} }), "rgba(239,68,68,0.08)");
 });
+
+test("filter settings panel supports toggling, closing on Escape, and saves custom names", () => {
+  assert.match(source, /toggleFilterSettings: \(\) => void;/);
+  assert.match(source, /closeFilterSettings: \(\) => void;/);
+  assert.match(source, /onFilterSettingsOpenChange\?: \(open: boolean\) => void;/);
+  assert.match(source, /const toggleFilterSettings = useCallback/);
+  assert.match(source, /const closeFilterSettings = useCallback/);
+  assert.match(source, /if \(settingsOpenRef\.current\) \{\s*closeFilterSettings\(\);\s*\} else \{\s*openFilterSettings\(\);\s*\}/);
+  assert.match(source, /event\.key === "Escape"[\s\S]*?closeFilterSettings\(\)/);
+});

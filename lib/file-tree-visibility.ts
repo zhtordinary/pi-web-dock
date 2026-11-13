@@ -200,7 +200,13 @@ export async function getFileTreeVisibility(
   directory: string,
   names: readonly string[],
   hideGitIgnored = false,
+  respectUserFilter = false,
 ): Promise<(name: string) => boolean> {
+  if (respectUserFilter) {
+    if (!hideGitIgnored) return () => true;
+    const ignored = await readGitIgnoredNames(directory, names);
+    return ignored ? (name) => !ignored.has(name) : () => true;
+  }
   const gitVisibility = await getGitFileTreeVisibility(directory, names, hideGitIgnored);
   if (gitVisibility) return gitVisibility;
   return (name) => !isHiddenOutsideGit(name, fallbackRelativePath(directory, name));

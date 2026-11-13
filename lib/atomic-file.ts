@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { lstatSync, realpathSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "fs";
+import { chmodSync, lstatSync, realpathSync, renameSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "fs";
 import { basename, dirname, join } from "path";
 
 /**
@@ -23,7 +23,7 @@ export class UnresolvableLinkError extends Error {
  * link that cannot be resolved throws UnresolvableLinkError and leaves both
  * the link and the filesystem untouched.
  */
-export function writePrivateFileAtomicSync(path: string, contents: string): void {
+export function writePrivateFileAtomicSync(path: string, contents: string, finalMode = 0o600): void {
   // Preserve managed symlinks while still replacing the real file atomically.
   let targetPath = path;
   let link = false;
@@ -51,6 +51,7 @@ export function writePrivateFileAtomicSync(path: string, contents: string): void
       mode: 0o600,
       flush: true,
     });
+    if (finalMode !== 0o600) chmodSync(tempPath, finalMode);
     renameSync(tempPath, targetPath);
     const directoryFd = openSync(dir, "r");
     try { fsyncSync(directoryFd); }

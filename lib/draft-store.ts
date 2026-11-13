@@ -1,7 +1,4 @@
-import {
-  MAX_ATTACHED_IMAGES,
-  isBase64ImageWithinLimits,
-} from "./image-attachments";
+import { isBase64ImageWithinLimits } from "./image-attachments";
 import type { QuoteContextItem } from "./quote-context";
 
 export interface ChatDraftImage {
@@ -9,24 +6,56 @@ export interface ChatDraftImage {
   mimeType: string;
 }
 
+export interface HistoryEditDraft {
+  entryId: string;
+  clientMessageId?: string;
+}
+
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
   quotes?: QuoteContextItem[];
   autoCompactionEnabled?: boolean;
+  /** The historical user entry this draft must not be sent as an ordinary prompt. */
+  historyEdit?: HistoryEditDraft | null;
   /** Deduplication for this draft content lifecycle, including unacknowledged recalls. */
   recalledQueueOperations?: string[];
+}
+
+export type DraftKey = string | { kind: "session" | "history"; sessionId: string; peer: string | null };
+
+export function sessionDraftKey(sessionId: string, peer?: string | null): DraftKey {
+  return { kind: "session", sessionId, peer: peer ?? null };
+}
+
+export function historyDraftKey(sessionId: string, peer?: string | null): DraftKey {
+  return { kind: "history", sessionId, peer: peer ?? null };
+}
+
+export function legacyHistoryDraftKey(sessionId: string, peer?: string | null): string {
+  return [peer ?? "local", sessionId].map(encodeURIComponent).join(":");
 }
 
 const drafts = new Map<string, ChatDraft>();
 
 export function hasMemoryDraftContent(): boolean {
-  return Array.from(drafts.values()).some((draft) => Boolean(draft.value || draft.images.length || draft.quotes?.length));
+  return Array.from(drafts.values()).some((draft) => Boolean(draft.value || draft.images.length || draft.quotes?.length || draft.historyEdit));
 }
 
 // 草稿按会话持久化到 localStorage：聚合页切会话会重载 iframe（内存 Map 随之清空），
 // 持久化后同源重载可读回；图片 data URL 可能超 5MB 配额，写失败时静默回退内存。
 const STORAGE_PREFIX = "pi-web-draft:";
+const SESSION_STORAGE_PREFIX = "pi-web-owned-draft:";
+
+export function draftKeyIdentity(key: DraftKey): string {
+  return typeof key === "string"
+    ? STORAGE_PREFIX + key
+    : SESSION_STORAGE_PREFIX + JSON.stringify([key.kind, key.peer, key.sessionId]);
+}
+
+export function sameDraftKey(a: DraftKey | undefined, b: DraftKey | undefined): boolean {
+  return a === undefined || b === undefined ? a === b : draftKeyIdentity(a) === draftKeyIdentity(b);
+}
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
   return {
@@ -34,6 +63,7 @@ function cloneDraft(draft: ChatDraft): ChatDraft {
     images: draft.images.map((image) => ({ ...image })),
     ...(draft.recalledQueueOperations ? { recalledQueueOperations: [...draft.recalledQueueOperations] } : {}),
     ...(Array.isArray(draft.quotes) ? { quotes: draft.quotes.map((q) => ({ ...q })) } : {}),
+    ...(draft.historyEdit ? { historyEdit: { ...draft.historyEdit } } : {}),
     ...(typeof draft.autoCompactionEnabled === "boolean" ? { autoCompactionEnabled: draft.autoCompactionEnabled } : {}),
   };
 }
@@ -43,13 +73,14 @@ function isEmptyDraft(draft: ChatDraft): boolean {
     !draft.value &&
     draft.images.length === 0 &&
     (!draft.quotes || draft.quotes.length === 0) &&
+    !draft.historyEdit &&
     typeof draft.autoCompactionEnabled !== "boolean"
   );
 }
 
-function readStorage(key: string): ChatDraft | null {
+function readStorage(key: DraftKey): ChatDraft | null {
   try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + key);
+    const raw = localStorage.getItem(draftKeyIdentity(key));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ChatDraft;
     if (!Array.isArray(parsed.images) || typeof parsed.value !== "string") return null;
@@ -60,66 +91,76 @@ function readStorage(key: string): ChatDraft | null {
   }
 }
 
-function writeStorage(key: string, draft: ChatDraft | null): void {
+function writeStorage(key: DraftKey, draft: ChatDraft | null): void {
   try {
-    if (draft) localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(draft));
-    else localStorage.removeItem(STORAGE_PREFIX + key);
+    if (draft) localStorage.setItem(draftKeyIdentity(key), JSON.stringify(draft));
+    else localStorage.removeItem(draftKeyIdentity(key));
   } catch {
     // 配额超限等：仅保留内存副本。
   }
 }
 
-export function getDraft(key: string): ChatDraft | null {
-  const mem = drafts.get(key);
+export function getDraft(key: DraftKey): ChatDraft | null {
+  const identity = draftKeyIdentity(key);
+  const mem = drafts.get(identity);
   if (mem) return cloneDraft(mem);
   if (typeof localStorage !== "undefined") {
     const stored = readStorage(key);
     if (stored) {
-      drafts.set(key, cloneDraft(stored));
+      drafts.set(identity, cloneDraft(stored));
       return cloneDraft(stored);
     }
   }
   return null;
 }
 
-export function setDraft(key: string, draft: ChatDraft): void {
-  const preference = draft.autoCompactionEnabled ?? getDraft(key)?.autoCompactionEnabled;
-  const recalledQueueOperations = draft.recalledQueueOperations ?? getDraft(key)?.recalledQueueOperations;
+export function setDraft(key: DraftKey, draft: ChatDraft): void {
+  const previous = getDraft(key);
+  const preference = draft.autoCompactionEnabled ?? previous?.autoCompactionEnabled;
+  const recalledQueueOperations = draft.recalledQueueOperations ?? previous?.recalledQueueOperations;
+  const historyEdit = draft.historyEdit === undefined ? previous?.historyEdit : draft.historyEdit;
+  if (historyEdit === null) {
+    const { historyEdit: _historyEdit, ...withoutHistoryEdit } = draft;
+    draft = withoutHistoryEdit;
+  } else if (historyEdit) {
+    draft = { ...draft, historyEdit: { ...historyEdit } };
+  }
   draft = { ...draft, ...(recalledQueueOperations ? { recalledQueueOperations } : {}), ...(typeof preference === "boolean" ? { autoCompactionEnabled: preference } : {}) };
   if (isEmptyDraft(draft)) {
-    drafts.delete(key);
+    drafts.delete(draftKeyIdentity(key));
     if (typeof localStorage !== "undefined") writeStorage(key, null);
     return;
   }
-  drafts.set(key, cloneDraft(draft));
+  drafts.set(draftKeyIdentity(key), cloneDraft(draft));
   if (typeof localStorage !== "undefined") writeStorage(key, draft);
 }
 
 /** Always restore the visible input. Only a successful durable write permits automatic ACK. */
-export function setRecalledDraft(key: string, draft: ChatDraft, operationId: string): { durable: boolean } {
+export function setRecalledDraft(key: DraftKey, draft: ChatDraft, operationId: string): { durable: boolean } {
   const previous = getDraft(key);
   // A count limit can evict an unresolved operation while its text is still
   // present. Keep the set for this draft's lifecycle; explicit clear/consume
   // retires it along with the draft, and rekey merges it with the content.
   const operations = [...new Set([...(previous?.recalledQueueOperations ?? []), operationId])];
   const saved = cloneDraft({ ...draft,
+    ...(draft.historyEdit === undefined && previous?.historyEdit ? { historyEdit: previous.historyEdit } : {}),
     ...(typeof previous?.autoCompactionEnabled === "boolean" ? { autoCompactionEnabled: previous.autoCompactionEnabled } : {}),
     recalledQueueOperations: operations,
   });
   let durable = false;
   try {
-    if (typeof localStorage !== "undefined") { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(saved)); durable = true; }
+    if (typeof localStorage !== "undefined") { localStorage.setItem(draftKeyIdentity(key), JSON.stringify(saved)); durable = true; }
   } catch { /* The server recovery inbox remains the durable attachment owner. */ }
-  drafts.set(key, saved);
+  drafts.set(draftKeyIdentity(key), saved);
   return { durable };
 }
 
-export function isRecalledDraftDurable(key: string, operationId: string): boolean {
+export function isRecalledDraftDurable(key: DraftKey, operationId: string): boolean {
   return readStorage(key)?.recalledQueueOperations?.includes(operationId) === true;
 }
 
-export function clearDraft(key: string): void {
-  drafts.delete(key);
+export function clearDraft(key: DraftKey): void {
+  drafts.delete(draftKeyIdentity(key));
   if (typeof localStorage !== "undefined") writeStorage(key, null);
 }
 
@@ -137,9 +178,11 @@ export function mergeRestoredSubmissionDraft(
   submittedQuotes?: QuoteContextItem[],
   currentQuotes?: QuoteContextItem[],
 ): ChatDraft {
+  // Keep every valid image in the recovery draft. The composer may only display
+  // its configured attachment limit, but recovery must not silently discard a
+  // submitted image while composing an unconfirmed or rejected operation.
   const images = [...(submittedImages ?? []), ...currentImages]
     .filter(isBase64ImageWithinLimits)
-    .slice(0, MAX_ATTACHED_IMAGES)
     .map(({ data, mimeType }) => ({ data, mimeType }));
 
   const existingQuotes = currentQuotes ?? [];
@@ -165,7 +208,7 @@ export function mergeRestoredSubmissionDraft(
 }
 
 export function restoreDraftSubmission(
-  key: string,
+  key: DraftKey,
   text: string,
   images?: ChatDraftImage[],
   quotes?: QuoteContextItem[],
@@ -184,11 +227,11 @@ export function restoreDraftSubmission(
 }
 
 export function rekeyDraft(
-  previousKey: string,
-  nextKey: string,
+  previousKey: DraftKey,
+  nextKey: DraftKey,
   currentDraft?: ChatDraft,
 ): ChatDraft | null {
-  if (previousKey === nextKey) return currentDraft ? cloneDraft(currentDraft) : getDraft(nextKey);
+  if (sameDraftKey(previousKey, nextKey)) return currentDraft ? cloneDraft(currentDraft) : getDraft(nextKey);
 
   const storedPrevious = getDraft(previousKey);
   const previous = currentDraft && !isEmptyDraft(currentDraft)

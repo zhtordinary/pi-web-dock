@@ -1,5 +1,5 @@
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
+import { createModelRuntimeWithExtensions, disposeModelRuntime } from "@/lib/model-runtime";
 import { invalidateModelsCache } from "@/lib/models-cache";
 
 /**
@@ -97,26 +97,30 @@ export async function refreshModelCatalogs(
     return { completed: false, changed: false, reason: "runtime" };
   }
 
-  // `createAgentSessionServices()` has already restored the stored overlay, so
-  // this is exactly the list the panel is showing right now.
-  const before = modelCatalogSignature(runtime.getModels());
-  let completed = false;
   try {
-    const result = await runtime.refresh({
-      ...(options.providers ? { providers: options.providers } : {}),
-      force: true,
-      signal,
-    });
-    completed = !result.aborted && result.errors.size === 0;
-  } catch {
-    completed = false;
-  }
+    // `createAgentSessionServices()` has already restored the stored overlay, so
+    // this is exactly the list the panel is showing right now.
+    const before = modelCatalogSignature(runtime.getModels());
+    let completed = false;
+    try {
+      const result = await runtime.refresh({
+        ...(options.providers ? { providers: options.providers } : {}),
+        force: true,
+        signal,
+      });
+      completed = !result.aborted && result.errors.size === 0;
+    } catch {
+      completed = false;
+    }
 
-  // A pass that failed for one provider can still have persisted another's
-  // catalog, so compare regardless of the outcome.
-  const changed = modelCatalogSignature(runtime.getModels()) !== before;
-  if (changed) invalidateModelsCache();
-  return { completed, changed };
+    // A pass that failed for one provider can still have persisted another's
+    // catalog, so compare regardless of the outcome.
+    const changed = modelCatalogSignature(runtime.getModels()) !== before;
+    if (changed) invalidateModelsCache();
+    return { completed, changed };
+  } finally {
+    disposeModelRuntime(runtime);
+  }
 }
 
 declare global {

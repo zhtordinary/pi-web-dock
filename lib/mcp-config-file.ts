@@ -33,7 +33,7 @@ import {
 /** Which file to write: the global `mcp.json`, or a project's `.pi/mcp.json` under the link rule. */
 export type McpConfigFileTarget =
   | { scope: "global"; agentDir: string }
-  | { scope: "project"; cwd: string; allowedRoots: Set<string> };
+  | { scope: "project"; cwd: string };
 
 /** The SDK's server patch: `enabled: true` and `exposure: "codemode"` remove their key. */
 export interface McpServerConfigPatch {
@@ -255,14 +255,9 @@ function resolveGlobalTarget(agentDir: string): ResolvedTarget {
   return { ...target, realPath: join(realDir, basename(current)) };
 }
 
-/**
- * The project file follows `lib/mcp-config-read.ts`' link rule, the one the
- * panel listed it under: its real path must stay inside the allowed roots,
- * and a dangling link is refused. A missing file is created inside the real
- * `.pi/` folder, which must resolve inside the roots too.
- */
-function resolveProjectTarget(cwd: string, allowedRoots: Set<string>): ResolvedTarget {
-  const location = locateProjectMcpConfig(cwd, allowedRoots);
+/** Resolve the project configuration target while preserving its links. */
+function resolveProjectTarget(cwd: string): ResolvedTarget {
+  const location = locateProjectMcpConfig(cwd);
   const target = {
     path: location.path,
     maxBytes: PROJECT_MCP_CONFIG_MAX_BYTES,
@@ -272,13 +267,13 @@ function resolveProjectTarget(cwd: string, allowedRoots: Set<string>): ResolvedT
     throw new McpConfigWriteError(location.reason, location.path, `${location.path}: ${location.error}`);
   }
   if (location.kind === "found") return { ...target, realPath: location.realPath };
-  const created = projectMcpConfigCreatePath(cwd, allowedRoots);
+  const created = projectMcpConfigCreatePath(cwd);
   if (!created.ok) throw new McpConfigWriteError(created.reason, location.path, `${location.path}: ${created.error}`);
   return { ...target, realPath: created.realPath };
 }
 
 function resolveTarget(target: McpConfigFileTarget): ResolvedTarget {
-  return target.scope === "global" ? resolveGlobalTarget(target.agentDir) : resolveProjectTarget(target.cwd, target.allowedRoots);
+  return target.scope === "global" ? resolveGlobalTarget(target.agentDir) : resolveProjectTarget(target.cwd);
 }
 
 // ---------------------------------------------------------------------------

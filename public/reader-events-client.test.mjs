@@ -73,7 +73,8 @@ test("SharedWorker carries four ports on one SSE, replays silently, recovers CLO
   const f=fixture(), self={}, reconnects=[];
   const context=vm.createContext({self,EventSource:f.EventSource,Map,Date,JSON,
     setTimeout:(fn,ms)=>{reconnects.push({fn,ms});return reconnects.length},
-    clearTimeout:()=>{}});
+    clearTimeout:()=>{}, setInterval:(fn,ms)=>{reconnects.push({fn,ms,interval:true});return reconnects.length},
+    clearInterval:()=>{}});
   vm.runInContext(await readFile(new URL("./reader-events-worker.js",import.meta.url),"utf8"),context);
   const port=()=>({messages:[],postMessage(p){this.messages.push(p)},start(){},close(){this.closed=true}});
   const ports=Array.from({length:4},port);
@@ -134,16 +135,25 @@ test("insecure HTTP crypto and worker startup failure preserve shared fallback d
  try{await until(()=>f.sources.length===1);assert.equal(closed,true);assert.equal(unsubscribed,true);f.sources[0].onopen();f.sources[0].emit({type:"waiting_user",sessions:[{requestIds:["q"]}]});assert.equal(packets.at(-1).data.type,"waiting_user")}finally{stop();c.dispose()}
 });
 
-test("visible ping resets silence watchdog and a silent open stream reconnects with its cursor", () => {
- const f=fixture(),env=f.env(),timers=new Map();let id=0;
- env.BroadcastChannel=undefined;env.setTimeout=(fn,ms)=>{timers.set(++id,{fn,ms});return id};env.clearTimeout=id=>timers.delete(id);
+test("wall-clock silence watchdog survives ping delivery and reconnects with its cursor", () => {
+ const f=fixture(),env=f.env(),timers=new Map();let id=0,now=Date.now();
+ env.BroadcastChannel=undefined;env.Date={now:()=>now};
+ env.setTimeout=(fn,ms)=>{timers.set(++id,{fn,ms});return id};env.clearTimeout=id=>timers.delete(id);
+ env.setInterval=(fn,ms)=>{timers.set(++id,{fn,ms,interval:true});return id};env.clearInterval=id=>timers.delete(id);
  const client=createReaderEventsClient(env),stop=client.subscribe(()=>{});
  try {
   const source=f.sources[0];source.open();source.emit({type:"activity",device:"d",bootId:"b",seq:7});
-  const before=[...timers.keys()].find(id=>timers.get(id).ms===75000);source.ping();
-  assert.equal(timers.has(before),false);
-  [...timers.values()].find(t=>t.ms===75000).fn();assert.equal(source.closed,true);
+  const watchdog=[...timers.entries()].find(([,timer])=>timer.ms===25000);
+  assert.ok(watchdog);
+  source.ping();
+  assert.equal(timers.has(watchdog[0]),true);
+  now += 75000;watchdog[1].fn();assert.equal(source.closed,true);
+  assert.equal(timers.has(watchdog[0]),false);
   [...timers.values()].find(t=>t.ms===1000).fn();assert.equal(f.sources.length,2);
+  const secondWatchdog = [...timers.entries()].find(([,timer])=>timer.ms===25000 && timer.interval);
+  assert.ok(secondWatchdog);
+  now += 75000;secondWatchdog[1].fn();
+  assert.equal(timers.has(secondWatchdog[0]),false);
   assert.match(decodeURIComponent(f.sources[1].url),/"seq":7/);
  }finally{stop()}
 });
@@ -162,7 +172,7 @@ test("fallback late subscriber retains the fresh build identity across a same-bo
 });
 
 test("worker late subscriber retains current build identity and discards a previous boot identity",async()=>{
- const f=fixture(),self={};const context=vm.createContext({self,EventSource:f.EventSource,Map,Date,JSON,setTimeout:()=>1,clearTimeout:()=>{}});
+ const f=fixture(),self={};const context=vm.createContext({self,EventSource:f.EventSource,Map,Date,JSON,setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>1,clearInterval:()=>{}});
  vm.runInContext(await readFile(new URL("./reader-events-worker.js",import.meta.url),"utf8"),context);
  const port=()=>({messages:[],postMessage(p){this.messages.push(p)},start(){},close(){}});
  const first=port();self.onconnect({ports:[first]});first.onmessage({data:{kind:"subscribe"}});f.sources[0].open();

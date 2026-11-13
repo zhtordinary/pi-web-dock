@@ -1,7 +1,7 @@
 "use client";
 
-import { Fragment, useEffect, useId, useRef } from "react";
-import type { ButtonHTMLAttributes, ClipboardEvent, CSSProperties, HTMLAttributes, ReactNode, Ref } from "react";
+import { createContext, Fragment, useContext, useEffect, useId, useRef } from "react";
+import type { ButtonHTMLAttributes, ClipboardEvent, CSSProperties, HTMLAttributes, KeyboardEvent, ReactNode, Ref } from "react";
 
 type ConfigButtonVariant = "primary" | "secondary" | "danger" | "ghost";
 type ConfigButtonSize = "small" | "default";
@@ -68,6 +68,24 @@ export function ConfigPanelShell({
       </div>
     </div>
   );
+}
+
+export function activateConfigRowOnKeyDown(event: KeyboardEvent<HTMLElement>) {
+  if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    event.currentTarget.click();
+  }
+}
+
+export interface SettingsDetailNavigation {
+  openDetail: (title: string) => void;
+  closeDetail: () => void;
+}
+
+export const SettingsDetailNavigationContext = createContext<SettingsDetailNavigation | null>(null);
+
+export function useSettingsDetailNavigation(): SettingsDetailNavigation | null {
+  return useContext(SettingsDetailNavigationContext);
 }
 
 export function ConfigSplitView({ children }: { children: ReactNode }) {

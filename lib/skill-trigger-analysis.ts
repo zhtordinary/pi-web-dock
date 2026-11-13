@@ -12,13 +12,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { getAgentDir, createAgentSessionServices } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { SkillAnalysisFailure, SkillInfo, SkillTriggerMetadata, SkillTriggerMode } from "@/lib/api-types";
 import { extractAssistantText } from "@/lib/question-analysis";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { createReaderAgentSessionServices } from "@/lib/model-runtime";
 
 const STORE_VERSION = 2;
 const STORE_FILE_NAME = "skill-trigger-modes.json";
@@ -414,7 +415,7 @@ async function resolveAnalysisModel(cwd: string, agentDir: string): Promise<{ ru
 
 async function resolveAnalysisModelUnbounded(cwd: string, agentDir: string): Promise<{ runtime: CompletionRuntime; model: unknown }> {
   const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
-  const services = await createAgentSessionServices({
+  const services = await createReaderAgentSessionServices({
     cwd,
     agentDir,
     ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),

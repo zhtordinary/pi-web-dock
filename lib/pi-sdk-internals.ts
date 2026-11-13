@@ -121,6 +121,9 @@ export interface McpOAuthSettings {
   callbackPort?: number;
   callbackUrl?: string;
   scope?: string;
+  clientName?: string;
+  clientRegistration?: "auto" | "dcr" | "cimd";
+  authServerMetadataUrl?: URL;
 }
 
 /** The part of pi-mcp's `McpClient` that pi-web reads. */

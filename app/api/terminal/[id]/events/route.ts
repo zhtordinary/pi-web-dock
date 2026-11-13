@@ -1,4 +1,10 @@
 import { hasTerminal, subscribeTerminal, type TerminalEvent } from "@/lib/terminal-manager";
+import {
+  createReaderStreamWriter,
+  registerReaderStreamCloser,
+  READER_STREAM_HIGH_WATER_MARK_BYTES,
+  type ReaderStreamDiagnostic,
+} from "@/lib/reader-event-stream";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,46 +22,69 @@ export async function GET(
   let closeStream: (closeController: boolean) => void = () => {};
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const encoder = new TextEncoder();
+      const diagnostic: ReaderStreamDiagnostic = {
+        kind: "terminal",
+        sessionId: id,
+        holder: null,
+        openedAt: Date.now(),
+        connectedAt: null,
+        lastWriteAt: null,
+        droppedEvents: 0,
+        queuedBytes: 0,
+      };
+      let unregister = () => {};
       let closed = false;
       let heartbeat: ReturnType<typeof setInterval> | null = null;
       let unsubscribe: (() => void) | null = null;
-      const cleanup = (closeController: boolean) => {
+      let writer: ReturnType<typeof createReaderStreamWriter>;
+      const cleanup = (closeController: boolean | "error" = true) => {
         if (closed) return;
         closed = true;
         if (heartbeat) clearInterval(heartbeat);
         unsubscribe?.();
         req.signal.removeEventListener("abort", abort);
-        if (closeController) {
-          try { controller.close(); } catch { /* already closed */ }
-        }
+        try {
+          if (closeController === "error") controller.error(new Error("Reader terminal stream shutting down"));
+          else if (closeController) controller.close();
+        } catch { /* already closed */ }
+        finally { unregister(); }
       };
+      writer = createReaderStreamWriter(
+        controller,
+        diagnostic,
+        () => cleanup("error"),
+        () => cleanup(true),
+      );
       const abort = () => cleanup(true);
+      const write = (text: string) => {
+        writer.write(text);
+      };
       const send = (event: TerminalEvent) => {
         if (closed) return;
         try {
-          if ((controller.desiredSize ?? 0) <= 0) {
-            cleanup(true);
-            return;
-          }
           const eventId = event.type === "output" ? `id: ${event.offset}\n` : "";
-          controller.enqueue(encoder.encode(`${eventId}data: ${JSON.stringify(event)}\n\n`));
-          if (event.type === "exit" || event.type === "closed") cleanup(true);
+          write(`${eventId}data: ${JSON.stringify(event)}\n\n`);
+          if (event.type === "exit" || event.type === "closed") {
+            writer.flush();
+            cleanup(true);
+          }
         } catch {
           cleanup(false);
         }
       };
       closeStream = cleanup;
+      unregister = registerReaderStreamCloser(cleanup, diagnostic);
       const subscription = subscribeTerminal(id, send, after);
       if (!subscription) {
         cleanup(true);
         return;
       }
       unsubscribe = subscription.unsubscribe;
-      controller.enqueue(encoder.encode(":\n\n"));
+      write(":\n\n");
       send(subscription.output);
       if (subscription.exited) send({ type: "exit", exitCode: subscription.exitCode ?? 0 });
       if (closed) return;
+      if (!writer.flush() || closed) return;
       req.signal.addEventListener("abort", abort, { once: true });
       if (req.signal.aborted) {
         abort();
@@ -63,15 +92,14 @@ export async function GET(
       }
       heartbeat = setInterval(() => {
         try {
-          if ((controller.desiredSize ?? 0) <= 0) cleanup(true);
-          else if (!closed) controller.enqueue(encoder.encode(":\n\n"));
+          if (!closed) write(":\n\n");
         } catch { cleanup(false); }
       }, 30_000);
     },
     cancel() {
       closeStream(false);
     },
-  }, { highWaterMark: 256 * 1024, size: (chunk) => chunk.byteLength });
+  }, { highWaterMark: READER_STREAM_HIGH_WATER_MARK_BYTES, size: (chunk) => chunk.byteLength });
 
   return new Response(stream, {
     headers: {

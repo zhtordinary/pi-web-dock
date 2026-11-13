@@ -41,7 +41,7 @@ import { readMcpExtensionServers } from "./mcp-extension-registry";
 import { readMcpHostInactive, withMcpStatuses } from "./mcp-status";
 import { findWebPasswordField, resolvedConfigValues, WEB_PASSWORD_VARIABLE } from "./mcp-transport";
 import { samePath } from "./paths";
-import { hasParentDirectorySegment, isPathWithinRoots, resolveRealRoots } from "./path-security";
+import { hasParentDirectorySegment } from "./path-security";
 import { loadPiSdkInternals, type PiSdkInternals } from "./pi-sdk-internals";
 import { freshFolderTrustBreadth, getProjectTrustStatus, hasTrustRelevantEntries } from "./project-trust";
 
@@ -183,15 +183,7 @@ function readGlobalFile(agentDir: string): { info: McpConfigFileInfo; text?: str
   return { info, text: readResolvedFile(realPath, info, undefined) };
 }
 
-/**
- * The project file is whatever the repository committed, and may be read
- * before anyone trusted it. A link, in the file or in a folder above it, is
- * followed only when its real path stays inside `allowedRoots` (the folders
- * `/api/files` may read); a dangling one is refused rather than read as no
- * file. The same rule as the rest of the file access allow-list: a link is
- * authorized by where it resolves.
- */
-/** Where a project's `.pi/mcp.json` leads under the link rule, before anything is read from it. */
+/** Where a project's `.pi/mcp.json` leads, before anything is read from it. */
 export type ProjectMcpConfigLocation =
   | { kind: "found"; path: string; realPath: string }
   | { kind: "missing"; path: string }
@@ -213,13 +205,8 @@ function isSymbolicLink(path: string): boolean {
   }
 }
 
-/**
- * The project file under the link rule: its real path, a link in the file or
- * in `.pi/` above it included, must be inside `allowedRoots`, and a dangling
- * link is refused rather than taken for a missing file. Settings › MCP reads,
- * and `lib/mcp-config-file.ts` writes, only what this lets through.
- */
-export function locateProjectMcpConfig(cwd: string, allowedRoots: Set<string>): ProjectMcpConfigLocation {
+/** Resolve links without treating a dangling config link as a missing file. */
+export function locateProjectMcpConfig(cwd: string): ProjectMcpConfigLocation {
   const path = projectMcpConfigPath(cwd);
   if (hasParentDirectorySegment(path)) return { kind: "refused", path, reason: "unreadable", error: "the path has a .. segment" };
   let realPath: string;
@@ -230,21 +217,12 @@ export function locateProjectMcpConfig(cwd: string, allowedRoots: Set<string>): 
     if (errorCode(error) !== "ENOENT") return { kind: "refused", path, reason: "unreadable", error: errorMessage(error) };
     return { kind: "missing", path };
   }
-  if (!isPathWithinRoots(realPath, resolveRealRoots(allowedRoots))) {
-    return { kind: "refused", path, realPath, reason: "link-outside", error: "a symbolic link outside the folders Pi Web may read" };
-  }
   return { kind: "found", path, realPath };
 }
 
-/**
- * Where a project file that does not exist yet would be created, under the
- * same rule: inside the real `.pi/` folder when there is one, which must
- * resolve inside `allowedRoots` (a dangling `.pi` link is refused), else in a
- * `.pi/` the writer creates in the project folder's real path.
- */
+/** Resolve the project configuration directory before creating its file. */
 export function projectMcpConfigCreatePath(
   cwd: string,
-  allowedRoots: Set<string>,
 ): { ok: true; realPath: string } | { ok: false; reason: "link-dangling" | "link-outside" | "unreadable"; error: string } {
   const dir = join(cwd, CONFIG_DIR_NAME);
   if (hasParentDirectorySegment(dir)) return { ok: false, reason: "unreadable", error: "the path has a .. segment" };
@@ -260,14 +238,11 @@ export function projectMcpConfigCreatePath(
       return { ok: false, reason: "unreadable", error: errorMessage(cwdError) };
     }
   }
-  if (!isPathWithinRoots(realDir, resolveRealRoots(allowedRoots))) {
-    return { ok: false, reason: "link-outside", error: "a symbolic link outside the folders Pi Web may read" };
-  }
   return { ok: true, realPath: join(realDir, "mcp.json") };
 }
 
-function readProjectFile(cwd: string, allowedRoots: Set<string>): { info: McpConfigFileInfo; text?: string } {
-  const location = locateProjectMcpConfig(cwd, allowedRoots);
+function readProjectFile(cwd: string): { info: McpConfigFileInfo; text?: string } {
+  const location = locateProjectMcpConfig(cwd);
   const info: McpConfigFileInfo = { scope: "project", path: location.path, exists: false, problems: [] };
   if (location.kind === "missing") return { info };
   const realPath = location.realPath;
@@ -548,8 +523,8 @@ function refuseAsLoaderDoes(described: DescribedServer[]): void {
 
 export interface McpConfigReadOptions {
   agentDir: string;
-  /** The project to read `.pi/mcp.json` from; its file must resolve inside `allowedRoots`. */
-  project?: { cwd: string; allowedRoots: Set<string> };
+  /** The project whose `.pi/mcp.json` is read. */
+  project?: { cwd: string };
   /** The SDK's validator and value parsers; without them entries are listed unchecked. */
   internals?: McpConfigReadInternals;
   /**
@@ -576,7 +551,7 @@ export function readMcpServerConfigs(options: McpConfigReadOptions): McpConfigRe
   const files: McpConfigFileInfo[] = [];
   const described: DescribedServer[] = [];
   const sources = [readGlobalFile(options.agentDir)];
-  if (options.project) sources.push(readProjectFile(options.project.cwd, options.project.allowedRoots));
+  if (options.project) sources.push(readProjectFile(options.project.cwd));
   for (const { info, text } of sources) {
     files.push(info);
     if (text === undefined) continue;
@@ -651,13 +626,13 @@ export function readMcpServerEntry(options: {
   scope: McpScope;
   name: string;
   /** Required for a project entry. */
-  project?: { cwd: string; allowedRoots: Set<string> };
+  project?: { cwd: string };
 }): McpServerEntryRead {
   const { scope, name, project } = options;
   if (scope === "project" && !project) throw new Error("a project entry needs the project");
   const { info, text } = scope === "global" || !project
     ? readGlobalFile(options.agentDir)
-    : readProjectFile(project.cwd, project.allowedRoots);
+    : readProjectFile(project.cwd);
   const entries = text === undefined ? [] : parseConfigText(info, text);
   for (const problem of info.problems) {
     if (problem.reason !== "auto-enable-codemode-invalid") {
@@ -692,12 +667,11 @@ export interface ProjectMcpServers {
 export async function readProjectMcpServers(options: {
   agentDir: string;
   cwd: string;
-  allowedRoots: Set<string>;
 }): Promise<ProjectMcpServers> {
   const internals = await loadPiSdkInternals();
   const { files, servers } = readMcpServerConfigs({
     agentDir: options.agentDir,
-    project: { cwd: options.cwd, allowedRoots: options.allowedRoots },
+    project: { cwd: options.cwd },
     internals: internals.ok ? internals : undefined,
     projectUntrusted: !projectTrustedByDecision(options.cwd, options.agentDir),
   });
@@ -793,7 +767,7 @@ function withHostInactive(cwd: string | undefined): Pick<McpResponse, "hostInact
 
 export interface McpOverviewOptions {
   agentDir: string;
-  project?: { cwd: string; allowedRoots: Set<string>; knownFolders?: Set<string> };
+  project?: { cwd: string; knownFolders?: Set<string> };
   environment?: NodeJS.ProcessEnv;
 }
 
@@ -822,7 +796,7 @@ export async function readMcpOverview(options: McpOverviewOptions): Promise<McpR
     // much, or a link to nothing where the SDK looks would need trust later. The same checks, in the
     // same order, as trustFreshFolderAndWrite(), so the pane never offers a step the route refuses.
     if (trust && !trust.requiresTrust && trust.decision === null && trust.decisionError === undefined) {
-      const breadth = freshFolderTrustBreadth(project.cwd, { agentDir, knownFolders: project.knownFolders ?? project.allowedRoots });
+      const breadth = freshFolderTrustBreadth(project.cwd, { agentDir, knownFolders: project.knownFolders ?? [] });
       projectInfo.trustFolder = breadth
         ? { allowed: false, reason: "trust-too-broad", breadth }
         : hasTrustRelevantEntries(project.cwd)

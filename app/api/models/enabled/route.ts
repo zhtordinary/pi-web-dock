@@ -20,8 +20,7 @@ import {
   writeEnabledModels,
   type EnabledModelsView,
 } from "@/lib/enabled-models-runtime";
-import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { getModelRuntimeWithExtensions } from "@/lib/model-runtime";
 import { invalidateModelsCache } from "@/lib/models-cache";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +34,7 @@ interface RequestContext {
 }
 
 async function loadContext(cwd: string): Promise<RequestContext> {
-  const modelRuntime = await createModelRuntimeWithExtensions();
+  const modelRuntime = await getModelRuntimeWithExtensions();
   const agentDir = getAgentDir();
   const paths = { cwd, agentDir };
   return {
@@ -80,10 +79,6 @@ async function resolveCwd(raw: string | null): Promise<{ cwd: string } | { error
   }
   if (!cwdStat.isDirectory()) {
     return { error: Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 }) };
-  }
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-    return { error: Response.json({ error: "Access denied" }, { status: 403 }) };
   }
   return { cwd };
 }
@@ -197,9 +192,11 @@ export async function PUT(req: Request) {
     if (!edit.ok) {
       const error = edit.reason === "unverified-models"
         ? "Unmatched models may be temporarily unavailable; inspect the configuration before removing them"
-        : edit.reason === "unsafe-scope"
-          ? "The model scope may include unavailable models; the requested change was not saved"
-          : "At least one model must stay enabled";
+        : edit.reason === "unrestricted-scope"
+          ? "All models are enabled because enabledModels is not set; use model visibility controls instead of creating a partial scope"
+          : edit.reason === "unsafe-scope"
+            ? "The model scope may include unavailable models; the requested change was not saved"
+            : "At least one model must stay enabled";
       return Response.json({ error, reason: edit.reason }, { status: 409 });
     }
     if (edit.changed) {

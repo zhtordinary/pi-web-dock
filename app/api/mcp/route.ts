@@ -61,7 +61,7 @@ export const dynamic = "force-dynamic";
 // parses pasted text again with the importer the panel previewed it with
 // (`lib/mcp-add.ts`), and for a fresh folder trusts it in the same step.
 
-type Project = { cwd: string; allowedRoots: Set<string>; knownFolders: Set<string> };
+type Project = { cwd: string; knownFolders: Set<string> };
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -102,7 +102,7 @@ async function validateProject(value: unknown): Promise<Project | Refusal> {
   try {
     const result = await validateMcpProject(value);
     if (isMcpEntryRefusal(result)) return asRefusal(result);
-    return { ...result, knownFolders: new Set([...result.allowedRoots, ...await getKnownProjectRoots()]) };
+    return { ...result, knownFolders: await getKnownProjectRoots() };
   } catch (error) {
     return new Refusal(500, "internal", errorMessage(error));
   }
@@ -142,7 +142,7 @@ function writeTarget(scope: McpScope, project: Project | undefined, agentDir: st
   if (!project) return new Refusal(400, "invalid-request", "A project server needs the project's cwd");
   const refused = mcpProjectTrustRefusal(project.cwd, agentDir, "The project is not trusted, so its .pi/mcp.json is not changed");
   if (refused) return asRefusal(refused);
-  return { scope: "project", cwd: project.cwd, allowedRoots: project.allowedRoots };
+  return { scope: "project", cwd: project.cwd };
 }
 
 /** A writer refusal as the route answers it: 409 for a file state the user can fix, 500 for anything else. */
@@ -456,7 +456,7 @@ async function addServer(
   const { name, entry } = prepared;
 
   if (trustFolder && project) {
-    const target = { scope: "project" as const, cwd: project.cwd, allowedRoots: project.allowedRoots };
+    const target = { scope: "project" as const, cwd: project.cwd };
     const result = await trustFreshFolderAndWrite(
       project.cwd,
       agentDir,

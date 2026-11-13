@@ -4,6 +4,7 @@ import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getGlobalSettingsPath, readGlobalSettings, updateGlobalSettings } from "./global-settings-file";
 import {
+  getAgentDir,
   resolveModelScopeWithDiagnostics,
   SettingsManager,
   type ModelRuntime,
@@ -12,6 +13,7 @@ import {
   computeEnabledModelsState,
   validateProviderEntries,
   modelRefProvider,
+  removeProviderPatterns,
   renameModelPatterns,
   renameProviderPatterns,
   setModelsEnabled,
@@ -249,6 +251,18 @@ export class EnabledModelsConflictError extends Error {
 }
 
 /** Compare the scope under Pi's settings lock before replacing the field. */
+export async function removeProviderEnabledModels(
+  provider: string,
+  agentDir = getAgentDir(),
+): Promise<boolean> {
+  const settingsManager = SettingsManager.create(agentDir, agentDir, { projectTrusted: true });
+  const current = settingsManager.getGlobalSettings().enabledModels;
+  const next = removeProviderPatterns(current, provider);
+  if (next === current) return false;
+  await writeEnabledModels(settingsManager, next, { agentDir });
+  return true;
+}
+
 export async function writeEnabledModels(
   settingsManager: SettingsManager,
   patterns: string[] | undefined,

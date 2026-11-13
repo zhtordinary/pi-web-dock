@@ -238,9 +238,16 @@ export function FavoritesConfig({
         console.warn("[FavoritesConfig] failed to load plugins metadata:", pluginErr);
       }
 
-      // 4. If sessionId is available, load runtime registered slash commands
+      // 4. If sessionId is available, initialize cold runtimes before loading
+      // commands registered by extensions and prompt templates.
       if (sessionId) {
         try {
+          const runtimeRes = await fetch(apiPath(`agent/${sessionId}`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "initialize_runtime" }),
+          });
+          if (!runtimeRes.ok) throw new Error(`HTTP ${runtimeRes.status}`);
           const cmdRes = await fetch(apiPath(`agent/${sessionId}`), {
             method: "POST",
             headers: { "Content-Type": "application/json" },

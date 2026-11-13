@@ -84,6 +84,15 @@ test("context-injected sessions use the context icon without the fork glyph", ()
   assert.doesNotMatch(sessionItemSource, /session\.parentSessionId \|\| session\.contextSourceSessionId \|\|/);
 });
 
+test("subagent rows default to hidden and expose shared model/context-menu behavior", () => {
+  assert.match(source, /useSubagentVisibility/);
+  assert.match(source, /visibleSubagentSessions/);
+  assert.match(source, /sessionDisplayTitle\(session, 50\)/);
+  assert.match(source, /SessionListMeta session=\{session\}/);
+  assert.match(source, /onSubagentContextMenu=\{openSubagentContextMenu\}/);
+  assert.match(source, /setSubagentVisibility\(subagentContextMenu\.id/);
+});
+
 test("only Shift+click bypasses session deletion confirmation", () => {
   assert.match(
     sessionItemSource,

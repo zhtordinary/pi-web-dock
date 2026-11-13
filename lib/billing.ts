@@ -1,21 +1,23 @@
 import { createReadStream, existsSync, type Stats } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { readCompactionModel } from "./compaction-model";
-import { open, readdir, stat } from "node:fs/promises";
+import { lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { SIDE_ASK_CHILD, SIDE_ASK_NATIVE_CHILD } from "./side-ask-ownership";
+import { spawn } from "node:child_process";
 import type { ExtensionCostSummary, SessionCostSummary, SessionUsageTotals } from "./pi-types";
 import { discoverLegacyExtensionUsage, extensionAccountingRevision, EXTENSION_USAGE_ENTRY, readExtensionAccounting } from "./extension-usage-accounting";
 import type { SessionCompactionCost } from "./session-cost";
 import { isSessionRecapUsageEntry } from "./session-recap";
 import { imageGenerationOutputFromTask, imageGenerationOutputFromTool, readImageGenerationBilling, readImageGenerationOutput, readProviderCharge, providerCharge, type ImageGenerationBilling, type ImageGenerationCost, type ImageGenerationOutput, type ProviderCharge } from "./image-generation-cost";
 import { officialImageOutputTokenEstimate, officialImageProviderForModel } from "./official-image-pricing";
+import { canonicalOpenAIProviderId } from "./openai-provider-aliases";
 
-const execFileAsync = promisify(execFile);
 const PRICE_DATA_CACHE_TTL_MS = 60 * 60 * 1000;
-const PRICE_BATCH_SIZE = 128;
+const PRICE_PROCESS_TIMEOUT_MS = 30_000;
+const PRICE_PROCESS_MAX_OUTPUT = 16 * 1024 * 1024;
 const GATEWAY_PROVIDER_MARKERS = ["cpa", "sub2api", "cli-proxy-api", "cliproxy", "proxy-api"];
 const UNVERIFIED_GATEWAY_TIERS = new Set(["priority", "fast", "flex", "ultrafast"]);
 
@@ -261,7 +263,7 @@ import json
 import sys
 
 script_path = sys.argv[1]
-payload = json.loads(sys.argv[2])
+payload = json.loads(sys.stdin.read())
 spec = importlib.util.spec_from_file_location("pi_session_cost", script_path)
 if spec is None or spec.loader is None:
     raise RuntimeError("cannot load session cost script")
@@ -432,10 +434,69 @@ function isGatewayProvider(provider: string | undefined): boolean {
 function pricingInput(input: BillingUsageInput): BillingUsageInput {
   const gateway = isGatewayProvider(input.provider);
   const officialProvider = officialImageProviderForModel(input.provider, input.model);
-  const pricedInput = officialProvider ? { ...input, provider: officialProvider } : input;
+  const canonicalProvider = canonicalOpenAIProviderId(input.provider);
+  const pricedInput = officialProvider
+    ? { ...input, provider: officialProvider }
+    : canonicalProvider !== input.provider
+      ? { ...input, provider: canonicalProvider }
+      : input;
   if (!gateway || !input.serviceTier || !UNVERIFIED_GATEWAY_TIERS.has(input.serviceTier)) return pricedInput;
   // Gateway priority billing has no verified Reader tariff; keep the known API-equivalent base estimate.
   return { ...pricedInput, serviceTier: undefined };
+}
+
+function runPriceProcess(scriptPath: string, payload: readonly BillingUsageInput[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("python3", ["-c", PRICE_ADAPTER, scriptPath], {
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 250);
+    }, PRICE_PROCESS_TIMEOUT_MS);
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      if (error) reject(error);
+      else resolve(stdout);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      child.kill("SIGTERM");
+      finish(error instanceof Error ? error : new Error(String(error)));
+    };
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+      if (Buffer.byteLength(stdout, "utf8") > PRICE_PROCESS_MAX_OUTPUT) {
+        child.kill("SIGTERM");
+        finish(new Error("pricing process output exceeded limit"));
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      if (stderr.length < 4096) stderr += chunk.toString().slice(0, 4096 - stderr.length);
+    });
+    child.stdin.once("error", fail);
+    child.once("error", fail);
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      if (code === 0 && !signal && !timedOut) finish();
+      else finish(new Error(timedOut ? "pricing process timed out" : `pricing process exited (${code ?? signal ?? "unknown"})${stderr ? `: ${stderr.trim()}` : ""}`));
+    });
+    try {
+      child.stdin.end(JSON.stringify(payload));
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 async function priceEstimatedTokenUsages(
@@ -446,33 +507,16 @@ async function priceEstimatedTokenUsages(
   if (normalized.length === 0) return [];
   if (!scriptPath) return normalized.map(unavailablePricing);
 
-  const result: PricedBillingUsage[] = [];
-  for (let offset = 0; offset < normalized.length; offset += PRICE_BATCH_SIZE) {
-    const batch = normalized.slice(offset, offset + PRICE_BATCH_SIZE);
-    const pricingBatch = batch.map(pricingInput);
-    try {
-      const { stdout } = await execFileAsync("python3", [
-        "-c",
-        PRICE_ADAPTER,
-        scriptPath,
-        JSON.stringify(pricingBatch),
-      ], {
-        env: { ...process.env, PYTHONIOENCODING: "utf-8" },
-        timeout: 30_000,
-        maxBuffer: 256 * 1024,
-      });
-      const parsed: unknown = JSON.parse(String(stdout).trim());
-      if (!Array.isArray(parsed) || parsed.length !== batch.length) {
-        result.push(...batch.map(unavailablePricing));
-        continue;
-      }
-      result.push(...batch.map((input, index) => parsePricedUsage(parsed[index], input)));
-    } catch (error) {
-      console.warn("[pi-web] genai-prices unavailable:", error instanceof Error ? error.message : String(error));
-      result.push(...batch.map(unavailablePricing));
-    }
+  const pricingBatch = normalized.map(pricingInput);
+  try {
+    const stdout = await runPriceProcess(scriptPath, pricingBatch);
+    const parsed: unknown = JSON.parse(stdout.trim());
+    if (!Array.isArray(parsed) || parsed.length !== normalized.length) return normalized.map(unavailablePricing);
+    return normalized.map((input, index) => parsePricedUsage(parsed[index], input));
+  } catch (error) {
+    console.warn("[pi-web] genai-prices unavailable:", error instanceof Error ? error.message : String(error));
+    return normalized.map(unavailablePricing);
   }
-  return result;
 }
 
 /** Confirmed supplier amounts bypass estimates, even when tokens or the price engine are unavailable. */
@@ -530,10 +574,32 @@ function childSessionRoot(filePath: string): string | null {
   return filePath.endsWith(".jsonl") ? filePath.slice(0, -".jsonl".length) : null;
 }
 
+/** Active and archived session files can refer to the same persisted child. */
+export function sessionFilePathAliases(filePath: string): string[] {
+  const resolved = resolve(filePath);
+  const agentRoot = resolve(getAgentDir());
+  for (const [sourceRoot, targetRoot] of [
+    [join(agentRoot, "sessions"), join(agentRoot, "archived_sessions")],
+    [join(agentRoot, "archived_sessions"), join(agentRoot, "sessions")],
+  ]) {
+    const within = relative(sourceRoot, resolved);
+    if (!within || isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) continue;
+    const mirror = join(targetRoot, within);
+    return mirror === resolved ? [resolved] : [resolved, mirror];
+  }
+  return [resolved];
+}
+
+function childSessionRoots(filePath: string): string[] {
+  return [...new Set(sessionFilePathAliases(filePath)
+    .map(childSessionRoot)
+    .filter((root): root is string => root !== null))];
+}
+
 /**
- * Discover only the persisted child-session tree owned by this parent file.
- * Shared subagent artifacts and sessions elsewhere on disk are intentionally
- * outside this cost relationship.
+ * Discover the persisted child-session trees owned by this parent file in both
+ * active and archived storage. Shared subagent artifacts and sessions elsewhere
+ * on disk are intentionally outside this cost relationship.
  */
 async function isCanonicalSessionFile(filePath: string): Promise<boolean> {
   const file = await open(filePath, "r").catch(() => null);
@@ -553,10 +619,46 @@ async function isCanonicalSessionFile(filePath: string): Promise<boolean> {
   }
 }
 
+type SideAskChildReference = { childPath: string; sessionId: string; parentSessionPath: string };
+const sideAskReferenceCache = new Map<string, { signature: string; references: SideAskChildReference[] }>();
+
+function fileSignature(info: Stats): string {
+  return `${info.dev}\0${info.ino}\0${info.ctimeMs}\0${info.mtimeMs}\0${info.size}`;
+}
+
+async function sideAskChildReferences(filePath: string): Promise<SideAskChildReference[]> {
+  const signature = fileSignature(await stat(filePath));
+  const cached = sideAskReferenceCache.get(filePath);
+  if (cached?.signature === signature) {
+    sideAskReferenceCache.delete(filePath);
+    sideAskReferenceCache.set(filePath, cached);
+    return cached.references;
+  }
+  const references: SideAskChildReference[] = [];
+  for await (const packet of readAccountingEntries(filePath)) {
+    if (packet.kind !== "entry") continue;
+    const entry = packet.value;
+    if (entry.type !== "custom" || (entry.customType !== SIDE_ASK_CHILD && entry.customType !== SIDE_ASK_NATIVE_CHILD)
+      || !isRecord(entry.data)) continue;
+    const { version, childPath, sessionId, parentSessionPath } = entry.data;
+    if (version === 1 && typeof childPath === "string" && childPath && !isAbsolute(childPath)
+      && typeof sessionId === "string" && sessionId && typeof parentSessionPath === "string") {
+      references.push({ childPath, sessionId, parentSessionPath });
+    }
+  }
+  if (signature === fileSignature(await stat(filePath))) {
+    sideAskReferenceCache.delete(filePath);
+    sideAskReferenceCache.set(filePath, { signature, references });
+    if (sideAskReferenceCache.size > 500) sideAskReferenceCache.delete(sideAskReferenceCache.keys().next().value!);
+  }
+  return references;
+}
+
 export async function findChildSessionPaths(filePath: string): Promise<string[]> {
-  const root = childSessionRoot(filePath);
-  if (!root) return [];
+  const roots = childSessionRoots(filePath);
+  if (roots.length === 0) return [];
   const result: string[] = [];
+  const seenSessionIds = new Set<string>();
   const walk = async (directory: string): Promise<void> => {
     let entries;
     try {
@@ -569,19 +671,50 @@ export async function findChildSessionPaths(filePath: string): Promise<string[]>
       const entryPath = join(directory, entry.name);
       if (entry.isDirectory()) await walk(entryPath);
       else if (entry.isFile() && entry.name.endsWith(".jsonl") && await isCanonicalSessionFile(entryPath)) {
+        const info = await stat(entryPath).catch(() => null);
+        const header = info ? await sessionHeader(entryPath, info) : undefined;
+        if (!header || seenSessionIds.has(header.id)) continue;
+        seenSessionIds.add(header.id);
         result.push(entryPath);
       }
     }
   };
-  await walk(root);
+  for (const root of roots) await walk(root);
+  // Native Side Ask children live in the SDK session directory, not under the
+  // parent's transcript. Only follow recorded, header-verified session links.
+  const sessionRoot = await realpath(join(getAgentDir(), "sessions")).catch(() => null);
+  if (!sessionRoot) return result.sort();
+  const parentPath = resolve(filePath);
+  const found = new Set([parentPath, ...result]);
+  const pending = [parentPath];
+  while (pending.length) {
+    const source = pending.pop()!;
+    try {
+      for (const { childPath, sessionId, parentSessionPath } of await sideAskChildReferences(source)) {
+        const path = resolve(sessionRoot, childPath);
+        const within = relative(sessionRoot, path);
+        if (!within || isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`) || !path.endsWith(".jsonl") || found.has(path)) continue;
+        const info = await lstat(path).catch(() => null);
+        if (!info?.isFile()) continue;
+        const actual = await realpath(path).catch(() => null);
+        if (!actual || actual !== path) continue;
+        const header = await sessionHeader(path, info);
+        if (header?.id !== sessionId || header.parentSessionPath !== parentSessionPath || seenSessionIds.has(header.id)) continue;
+        seenSessionIds.add(header.id);
+        found.add(path);
+        result.push(path);
+        pending.push(path);
+      }
+    } catch { /* Missing source transcripts have no verifiable links. */ }
+  }
   return result.sort();
 }
 
 const SESSION_HEADER_CACHE_LIMIT = 500;
-const sessionHeaderCache = new Map<string, { signature: string; id: string; cwd: string }>();
+const sessionHeaderCache = new Map<string, { signature: string; id: string; cwd: string; parentSessionPath?: string }>();
 
-async function sessionHeader(filePath: string, info: Stats): Promise<{ id: string; cwd: string } | undefined> {
-  const signature = `${info.dev}\0${info.ino}\0${info.ctimeMs}\0${info.mtimeMs}\0${info.size}`;
+async function sessionHeader(filePath: string, info: Stats): Promise<{ id: string; cwd: string; parentSessionPath?: string } | undefined> {
+  const signature = fileSignature(info);
   const cached = sessionHeaderCache.get(filePath);
   if (cached?.signature === signature) {
     sessionHeaderCache.delete(filePath);
@@ -598,7 +731,8 @@ async function sessionHeader(filePath: string, info: Stats): Promise<{ id: strin
     if (newline < 0 && bytesRead === buffer.length) return undefined;
     const header: unknown = JSON.parse(newline < 0 ? text : text.slice(0, newline));
     if (!isRecord(header) || header.type !== "session" || typeof header.id !== "string" || !header.id.trim()) return undefined;
-    const value = { signature, id: header.id.trim(), cwd: typeof header.cwd === "string" ? header.cwd : "" };
+    const value = { signature, id: header.id.trim(), cwd: typeof header.cwd === "string" ? header.cwd : "",
+      ...(typeof header.parentSession === "string" ? { parentSessionPath: header.parentSession } : {}) };
     sessionHeaderCache.delete(filePath);
     sessionHeaderCache.set(filePath, value);
     if (sessionHeaderCache.size > SESSION_HEADER_CACHE_LIMIT) sessionHeaderCache.delete(sessionHeaderCache.keys().next().value!);
@@ -767,6 +901,37 @@ function billingServiceTier(...sources: unknown[]): string {
   return "";
 }
 
+type AccountingEntry = { kind: "entry"; value: Record<string, unknown> } | { kind: "enter" } | { kind: "leave" };
+
+/** Side Ask wrappers carry the original SDK accounting records, not an additional aggregate charge. */
+async function* readAccountingEntries(filePath: string): AsyncGenerator<AccountingEntry> {
+  const wrappers = new Set(["quick_ask", "quick_ask_step", "quick_ask_outcome", "reader.side_ask_outcome"]);
+  for await (const line of readJsonlLines(filePath)) {
+    if (!line.trim()) continue;
+    let value: unknown;
+    try { value = JSON.parse(line) as unknown; } catch { continue; }
+    if (!isRecord(value)) continue;
+    const data = isRecord(value.data) ? value.data : undefined;
+    if (value.type !== "custom" || typeof value.customType !== "string" || !wrappers.has(value.customType)
+      || !Array.isArray(data?.nativeEntries)) {
+      yield { kind: "entry", value };
+      continue;
+    }
+    const native = data.nativeEntries.filter(isRecord);
+    const assistants = native.filter((entry) => entry.type === "message" && isRecord(entry.message)
+      && entry.message.role === "assistant" && isRecord(entry.message.usage));
+    if (!assistants.length) yield { kind: "entry", value };
+    yield { kind: "enter" };
+    for (const entry of native) {
+      if (assistants.length === 1 && entry === assistants[0] && isRecord(entry.message)
+        && !isRecord(entry.message.usageEvent) && isRecord(data.usageEvent)) {
+        yield { kind: "entry", value: { ...entry, message: { ...entry.message, usageEvent: data.usageEvent } } };
+      } else yield { kind: "entry", value: entry };
+    }
+    yield { kind: "leave" };
+  }
+}
+
 /** Extract billable canonical Pi records without pricing or text heuristics. */
 export async function extractReaderUsageRecords(filePath: string): Promise<ReaderUsageRecord[]> {
   const result: ReaderUsageRecord[] = [];
@@ -782,16 +947,16 @@ export async function extractReaderUsageRecords(filePath: string): Promise<Reade
   let currentProvider = "";
   let currentModel = "";
   let firstRecord = true;
+  const scopes: Array<{ provider: string; model: string }> = [];
 
-  for await (const line of readJsonlLines(filePath)) {
-    if (!line.trim()) continue;
-    let entry: unknown;
-    try {
-      entry = JSON.parse(line) as unknown;
-    } catch {
+  for await (const packet of readAccountingEntries(filePath)) {
+    if (packet.kind === "enter") { scopes.push({ provider: currentProvider, model: currentModel }); continue; }
+    if (packet.kind === "leave") {
+      const previous = scopes.pop();
+      if (previous) { currentProvider = previous.provider; currentModel = previous.model; }
       continue;
     }
-    if (!isRecord(entry)) continue;
+    const entry = packet.value;
     if (firstRecord) {
       firstRecord = false;
       if (entry.type !== "session" || typeof entry.id !== "string" || !entry.id.trim()) {
@@ -940,7 +1105,7 @@ export async function extractReaderUsageRecords(filePath: string): Promise<Reade
     if (outputs.length) record.imageOutputs = outputs;
   }
   result.push(...await readExtensionAccounting(sessionId, sessionCwd, extensionEvents, legacyTypes, descriptors, sessionTimestamp));
-  return result;
+  return uniqueReaderUsageRecordGroups([result])[0];
 }
 
 async function readCompactionBillingInputs(filePath: string): Promise<CompactionBillingInput[]> {

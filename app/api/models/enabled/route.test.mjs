@@ -22,14 +22,31 @@ process.env.USERPROFILE = root;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.env.PI_OFFLINE = "1";
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, interopDefault: true });
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 const { PUT } = await jiti.import("./route.ts");
-allowFileRoot(cwd);
 after(async () => {
   for (const [key, value] of previous) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
   await rm(root, { recursive: true, force: true });
+});
+
+test("unrestricted model disable writes a negated pattern without creating a partial scope", async () => {
+  const settingsPath = join(agentDir, "settings.json");
+  await writeFile(settingsPath, JSON.stringify({ keep: true }));
+  const response = await PUT(new Request("http://localhost/api/models/enabled", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ op: "models", cwd, refs: ["fixture/one"], enabled: false }),
+  }));
+  assert.equal(response.status, 200);
+  const view = await response.json();
+  const provider = view.providers.find((item) => item.id === "fixture");
+  assert.equal(provider.models.find((item) => item.id === "one").enabled, false);
+  assert.equal(provider.models.find((item) => item.id === "two").enabled, true);
+  assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+    enabledModels: ["!{[f]ixture/one,@(one)}"],
+    keep: true,
+  });
 });
 
 test("direct model edits reject an unsafe wildcard without changing settings", async () => {

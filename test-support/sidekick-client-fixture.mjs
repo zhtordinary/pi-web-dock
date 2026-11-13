@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { stripTypeScriptTypes } from "node:module";
 import vm from "node:vm";
 import { localizeQuickAskError } from "../lib/quick-ask-observer.ts";
+import { isQuickAskRunActive } from "../lib/quick-ask-status.ts";
 
 /** Load production state transitions and callbacks, without mounting React or substituting their decisions. */
 export function loadSidekickHelpers(source, context) {
   context.localizeQuickAskError = localizeQuickAskError;
+  context.isQuickAskRunActive = isQuickAskRunActive;
   const pure = source.indexOf("export function restoreSidekickDraft(");
   if (pure >= 0) {
     const end = source.indexOf("\nconst sidekickActionButtonStyle", pure);

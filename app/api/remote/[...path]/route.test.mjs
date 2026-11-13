@@ -389,6 +389,24 @@ test("GET forwards SSE stream with content-type", async () => {
 });
 
 
+test("GET forwards stream diagnostics through the peer path without dropping its query contract", async () => {
+  let captured = "";
+  const mock = mockFetch((url) => {
+    captured = url;
+    return jsonResponse({ schemaVersion: 1, coverage: { readOnly: true }, streams: [] });
+  });
+  try {
+    const res = await GET(new Request("http://x/api/remote/reader/stream-diagnostics?peer=air", {
+      headers: { accept: "application/json" },
+    }), { params: Promise.resolve({ path: ["reader", "stream-diagnostics"] }) });
+    assert.equal(res.status, 200);
+    assert.equal(captured, "http://air.local:30141/api/reader/stream-diagnostics");
+  } finally {
+    mock.restore();
+  }
+});
+
+
 test("terminal lifecycle routes preserve the configured peer", async () => {
   const id = "a".repeat(32);
   const mock = mockFetch(() => jsonResponse({ ok: true }));

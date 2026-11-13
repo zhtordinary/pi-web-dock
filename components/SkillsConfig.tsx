@@ -8,6 +8,8 @@ function apiFor(peer: string | undefined, path: string): string {
 
 import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { reloadAllAgentSessions } from "@/lib/agent-client";
+import { resolveLocalFilePath } from "@/lib/file-links";
+import { getFileDirectory } from "@/lib/file-paths";
 import { Settings2, ExternalLink, Sparkles, Copy, ChevronDown, Star } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
@@ -35,7 +37,7 @@ import { ConfigPanelRefreshButton, useConfigSidebarResize } from "./ConfigPanelS
 import { FrontmatterCard } from "./FrontmatterCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { ReaderFloatingSelect } from "./ReaderFloatingSelect";
-import { ConfigButton, ConfigFooter, ConfigScopeTag } from "./SettingsUi";
+import { activateConfigRowOnKeyDown, ConfigButton, ConfigFooter, ConfigScopeTag, useSettingsDetailNavigation } from "./SettingsUi";
 import type { SlashFavoriteCategory } from "@/lib/slash-favorite-state";
 import { DEFAULT_SLASH_FAVORITE_CATEGORY_ID, DEFAULT_SLASH_FAVORITE_CATEGORY_NAME, slashFavoriteCategoryLabel } from "@/lib/slash-display";
 
@@ -1333,7 +1335,7 @@ function SkillDetail({
           ) : docContent ? (
             <MarkdownBody
               className="skill-instructions"
-              cwd={[skill.baseDir, ...documentPath.split("/").slice(0, -1)].join("/")}
+              cwd={getFileDirectory(resolveLocalFilePath(documentPath, skill.baseDir) ?? skill.filePath)}
               sessionId={sessionId ?? undefined}
               remotePeer={remotePeer}
               onOpenFile={onOpenFile}
@@ -2105,7 +2107,10 @@ function SkillGroupList({
               return (
                 <div
                   key={skill.filePath}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onSelect(skill)}
+                  onKeyDown={activateConfigRowOnKeyDown}
                   className="config-sidebar-item config-resource-item skills-sidebar-item"
                   style={{
                     position: "relative",
@@ -2414,6 +2419,7 @@ export function SkillsConfig({
   const api = (path: string) => apiFor(remotePeerRef.current, path);
   const isMobile = useIsMobile();
   const { t } = useI18n();
+  const navigation = useSettingsDetailNavigation();
   const sidebarResizer = useConfigSidebarResize();
   useEffect(() => {
     notifyEmbeddedModalState(true);
@@ -3224,6 +3230,7 @@ export function SkillsConfig({
               onChange={(scope) => {
                 setViewScope(scope);
                 setAddMode(false);
+                navigation?.closeDetail();
               }}
             />
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
@@ -3355,11 +3362,11 @@ export function SkillsConfig({
         )}
 
         {/* Body */}
-        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
+        <div className="settings-phone-split" style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
           {/* Left: skill list */}
           <div
             ref={sidebarResizer.panelRef}
-            className="config-sidebar config-resource-sidebar"
+            className="config-sidebar config-resource-sidebar settings-phone-list"
             style={{
               width: isMobile ? "100%" : "var(--config-sidebar-width, 240px)",
               maxHeight: isMobile ? "40vh" : undefined,
@@ -3489,6 +3496,7 @@ export function SkillsConfig({
                     setSelected(skill.filePath);
                     setAddMode(false);
                     setSaveError(null);
+                    navigation?.openDetail(skill.name);
                   }}
                   onUseSkill={onUseSkill}
                 />
@@ -3501,8 +3509,9 @@ export function SkillsConfig({
                 flexShrink: 0,
               }}
             >
-              <div
-                onClick={() => setAddMode(true)}
+              <button
+                type="button"
+                onClick={() => { setAddMode(true); navigation?.openDetail(t("i18n.addSkill")); }}
                 className="config-list-action-button"
                 style={{
                   display: "flex",
@@ -3533,7 +3542,7 @@ export function SkillsConfig({
                   <line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
                  {t("i18n.addSkill")}
-              </div>
+              </button>
             </div>
           </div>
 
@@ -3546,7 +3555,7 @@ export function SkillsConfig({
           )}
 
           {/* Right: detail or add panel */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "var(--config-detail-padding-top) 20px 20px" }}>
+          <div className="settings-phone-detail" style={{ flex: 1, overflowY: "auto", padding: "var(--config-detail-padding-top) 20px 20px" }}>
             {addMode ? (
               <AddSkillPanel
                 cwd={cwd}

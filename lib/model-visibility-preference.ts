@@ -22,6 +22,15 @@ export function normalizeCollapsedProviderNames(value: unknown): string[] {
   return [...new Set(value.filter((name): name is string => typeof name === "string" && name.trim().length > 0))];
 }
 
+/** Hide providers from picker alternatives, but keep the current selection visible. */
+export function filterHiddenProviderNames<T extends string>(
+  names: readonly T[],
+  hiddenProviders: ReadonlySet<string>,
+  selectedProvider?: string,
+): T[] {
+  return names.filter((name) => !hiddenProviders.has(name) || name === selectedProvider);
+}
+
 // 内存缓存：models.json 折叠字段的镜像。模块级单例，跨组件共享。
 let cached: string[] = [];
 let loaded = false;

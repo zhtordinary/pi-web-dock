@@ -1,10 +1,12 @@
 import { statSync } from "node:fs";
 import { readCompactionModel } from "./compaction-model";
-import { calculateContextTokens, estimateTokens, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext as piBuildSessionContext, calculateContextTokens, estimateTokens, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { CompactionContextInfo, ContextUsage } from "./pi-types";
 import type { SessionEntry } from "./types";
 import { getModelsConfigPath } from "./models-config-store";
+import { installOpenAIProviderAliases } from "./openai-provider-aliases";
+import { getSessionReadAgentContext, getSessionReadBranch, getSessionReadSnapshot } from "./session-read-cache";
 
 let readOnlyModelRuntime: Promise<ModelRuntime> | undefined;
 let readOnlyModelRuntimeLoadedAt = 0;
@@ -27,7 +29,10 @@ export function getReadOnlyModelRuntime(): Promise<ModelRuntime> {
   }
   if (!readOnlyModelRuntime) {
     readOnlyModelRuntimeLoadedAt = Date.now();
-    readOnlyModelRuntime = ModelRuntime.create({ refreshOnCreate: false }).catch((error) => {
+    readOnlyModelRuntime = ModelRuntime.create({ refreshOnCreate: false }).then((runtime) => {
+      installOpenAIProviderAliases(runtime);
+      return runtime;
+    }).catch((error) => {
       readOnlyModelRuntime = undefined;
       readOnlyModelRuntimeLoadedAt = 0;
       throw error;
@@ -101,6 +106,32 @@ export function getCompactionContextInfo(
   }
 
   return result;
+}
+
+/** Read a persisted session's selected branch context without creating an AgentSession. */
+export async function readSessionContextUsageFromFile(filePath: string, leafId?: string | null): Promise<ContextUsage | null> {
+  try {
+    const snapshot = getSessionReadSnapshot(filePath);
+    const selectedLeaf = leafId === undefined ? snapshot.leafId : leafId;
+    const context = leafId === undefined
+      ? getSessionReadAgentContext(snapshot)
+      : piBuildSessionContext(snapshot.entries as never, selectedLeaf);
+    if (!context.model) return null;
+    const model = (await getReadOnlyModelRuntime()).getModel(context.model.provider, context.model.modelId);
+    if (!model) return null;
+    const branch = leafId === undefined
+      ? getSessionReadBranch(snapshot)
+      : selectedLeaf === null ? [] : snapshot.manager.getBranch(selectedLeaf);
+    return estimateSessionContextUsage(
+      // SAFETY: the read cache/SDK uses the persisted AgentMessage wire shape consumed by the estimator.
+      context.messages as unknown as AgentMessage[],
+      // SAFETY: the read cache/SDK branch uses the persisted SessionEntry wire shape consumed by the estimator.
+      branch as unknown as SessionEntry[],
+      model.contextWindow,
+    );
+  } catch {
+    return null;
+  }
 }
 
 /** Estimate current active-branch context usage without creating an AgentSession. */

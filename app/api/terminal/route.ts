@@ -1,7 +1,6 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
 import { NextResponse } from "next/server";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { createTerminal } from "@/lib/terminal-manager";
 
 export const dynamic = "force-dynamic";
@@ -19,10 +18,6 @@ export async function POST(req: Request) {
     const cwd = resolve(body.cwd);
     if (!(await stat(cwd)).isDirectory()) {
       return NextResponse.json({ error: "cwd must be a directory" }, { status: 400 });
-    }
-    const roots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(cwd, roots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
     const id = createTerminal(
       cwd,

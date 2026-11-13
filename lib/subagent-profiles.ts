@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { ResourceSettingsError } from "./resource-config-file";
@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { stringify as stringifyYaml } from "yaml";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { parseFrontmatter } from "./frontmatter";
+import { parseReaderNativeProfile, parseUnifiedSubagentDefaults } from "./subagent-profile-reader";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
 import { readBuiltInSubagentOverride } from "./subagent-settings";
@@ -57,10 +58,11 @@ export const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: [...BUILTIN_TOOLS],
     enabled: true,
     defaultContext: "fresh",
-    defaultAsync: false,
-    inheritProjectContext: false,
-    inheritGlobalContext: false,
-    inheritSkills: false,
+    defaultAsync: true,
+    inheritProjectContext: true,
+    inheritGlobalContext: true,
+    inheritSkills: true,
+    reader: { loadSkills: true, loadExtensions: true, codemode: "inherit", mcp: "on", inheritContext: false, runInBackground: true },
     scope: "builtin",
     builtinKind: "reader",
   },
@@ -72,10 +74,11 @@ export const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: [...READ_ONLY_TOOLS],
     enabled: true,
     defaultContext: "fresh",
-    defaultAsync: false,
+    defaultAsync: true,
     inheritProjectContext: false,
     inheritGlobalContext: false,
-    inheritSkills: false,
+    inheritSkills: true,
+    reader: { loadSkills: true, loadExtensions: true, codemode: "inherit", mcp: "on", inheritContext: false, runInBackground: true },
     scope: "builtin",
     builtinKind: "reader",
   },
@@ -87,10 +90,11 @@ export const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: [...READ_ONLY_TOOLS],
     enabled: true,
     defaultContext: "fresh",
-    defaultAsync: false,
+    defaultAsync: true,
     inheritProjectContext: false,
     inheritGlobalContext: false,
-    inheritSkills: false,
+    inheritSkills: true,
+    reader: { loadSkills: true, loadExtensions: true, codemode: "inherit", mcp: "on", inheritContext: false, runInBackground: true },
     scope: "builtin",
     builtinKind: "reader",
   },
@@ -322,23 +326,21 @@ function scanProfileDir(dir: string, scope: AgentScope, cwd: string, nativeSetti
         const systemPromptMode = data?.systemPromptMode === "append" || data?.systemPromptMode === "replace"
           ? data.systemPromptMode
           : undefined;
-        const legacyInheritContext = optionalBoolean(data?.inherit_context);
-        const defaultContext = data?.defaultContext === "fork" || data?.defaultContext === "fresh"
-          ? data.defaultContext
-          : legacyInheritContext === true ? "fork" : "fresh";
-        const defaultAsync = optionalBoolean(data?.async) ?? cleanBoolean(data?.run_in_background, false);
+        const { defaultContext, defaultAsync } = parseUnifiedSubagentDefaults(data);
         const inheritProjectContext = optionalBoolean(data?.inheritProjectContext ?? data?.inherit_project_context) ?? false;
         const inheritGlobalContext = optionalBoolean(data?.inheritGlobalContext ?? data?.inherit_global_context) ?? false;
-        const inheritSkills = optionalBoolean(data?.inheritSkills ?? data?.inherit_skills)
-          ?? cleanBoolean(data?.load_skills, false);
-        const acceptanceRole = data?.acceptanceRole === "read-only" || data?.acceptanceRole === "writer"
-          ? data.acceptanceRole
-          : undefined;
         const runnerType = data?.runner && typeof data.runner === "object" && !Array.isArray(data.runner)
           ? (data.runner as Record<string, unknown>).type
           : undefined;
         const runtimeKind = scope === "runtime"
           ? runnerType === "external-cli" ? "external-cli" : runnerType === "external-job" ? "external-job" : "native"
+          : undefined;
+        const inheritSkills = runtimeKind === "native"
+          ? true
+          : optionalBoolean(data?.inheritSkills ?? data?.inherit_skills)
+            ?? cleanBoolean(data?.load_skills, true);
+        const acceptanceRole = data?.acceptanceRole === "read-only" || data?.acceptanceRole === "writer"
+          ? data.acceptanceRole
           : undefined;
         const rawModel = cleanString(data?.model);
         const rawThinking = isValidThinking(thinking) ? thinking : undefined;
@@ -346,6 +348,7 @@ function scanProfileDir(dir: string, scope: AgentScope, cwd: string, nativeSetti
           ? nativeProjection(name, rawModel, rawThinking, nativeSettings)
           : {};
         const external = scope === "runtime" && runtimeKind !== "native";
+        const reader = parseReaderNativeProfile(data, runtimeKind === "native");
 
         profiles.push({
           name,
@@ -361,6 +364,7 @@ function scanProfileDir(dir: string, scope: AgentScope, cwd: string, nativeSetti
           filePath: fullPath,
           ...(runtimeKind ? { runtimeKind } : {}),
           ...(external ? {} : native),
+          ...(reader ? { reader } : {}),
           ...(!external && scope !== "runtime" && rawModel ? { model: rawModel, modelId: splitModel(rawModel).id, modelProvider: splitModel(rawModel).provider, modelSource: "profile" as const } : {}),
           ...(!external && scope !== "runtime" && rawThinking ? { thinking: rawThinking } : {}),
           ...(systemPromptMode ? { systemPromptMode } : {}),
@@ -449,6 +453,42 @@ function assertProjectPathWithinCwd(cwd: string, target: string): void {
   }
 }
 
+function readCopySource(cwd: string, source: unknown): Record<string, unknown> {
+  if (!isRecord(source) || typeof source.name !== "string") throw new Error("Invalid agent copy source");
+  const name = validateAgentName(source.name);
+  if (source.scope === "builtin") {
+    if (!BUILTIN_PROFILES.some((profile) => profile.name.toLowerCase() === name.toLowerCase())) throw new Error("Agent copy source not found");
+    return {};
+  }
+  const dir = source.scope === "global" || source.scope === "project"
+    ? getProfileDirectory(cwd, source.scope)
+    : source.scope === "workspace" ? join(resolve(cwd), ".agents", "agents")
+    : source.scope === "runtime" ? getPackageBuiltinDir()
+    : undefined;
+  if (!dir) throw new Error("Invalid agent copy source scope");
+  const filePath = join(dir, `${name}.md`);
+  if (source.scope === "project" || source.scope === "workspace") assertProjectPathWithinCwd(cwd, filePath);
+  if (!existsSync(filePath) || !lstatSync(filePath).isFile()) throw new Error("Agent copy source not found");
+  const fd = openSync(filePath, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  let content: string;
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > PROJECT_SETTINGS_MAX_BYTES) throw new Error("Agent copy source is not a bounded regular file");
+    const bytes = Buffer.alloc(PROJECT_SETTINGS_MAX_BYTES + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const count = readSync(fd, bytes, length, bytes.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    if (length > PROJECT_SETTINGS_MAX_BYTES) throw new Error("Agent copy source exceeds the size limit");
+    content = bytes.subarray(0, length).toString("utf8");
+  } finally { closeSync(fd); }
+  const { data } = parseFrontmatter(content);
+  if (!data && /^(?:\uFEFF)?---[ \t]*(?:\r\n|\n|\r)/.test(content)) throw new Error("Agent copy source has invalid frontmatter");
+  return data ?? {};
+}
+
 function saveSubagentProfileUnlocked(
   cwd: string,
   scope: "global" | "project",
@@ -471,7 +511,10 @@ function saveSubagentProfileUnlocked(
   const description = profile.description.trim() || name;
   const systemPrompt = profile.systemPrompt.trim();
   const model = profile.model?.trim() || undefined;
-  let existingFrontmatter: Record<string, unknown> = {};
+  if (profile.copyFrom && existsSync(dir) && readdirSync(dir).some((entry) => entry.toLowerCase() === `${name}.md`.toLowerCase())) {
+    throw new Error("Agent copy target already exists");
+  }
+  let existingFrontmatter: Record<string, unknown> = profile.copyFrom ? readCopySource(cwd, profile.copyFrom) : {};
   if (existsSync(filePath)) {
     try {
       existingFrontmatter = parseFrontmatter(readFileSync(filePath, "utf8")).data ?? {};
@@ -483,10 +526,7 @@ function saveSubagentProfileUnlocked(
     ? Object.prototype.hasOwnProperty.call(existingFrontmatter, "tools")
     : true);
   const existingSystemPromptMode = existingFrontmatter.systemPromptMode;
-  const existingDefaultContext = existingFrontmatter.defaultContext === "fork" || existingFrontmatter.defaultContext === "fresh"
-    ? existingFrontmatter.defaultContext
-    : undefined;
-  const existingDefaultAsync = optionalBoolean(existingFrontmatter.async);
+  const existingUnifiedDefaults = parseUnifiedSubagentDefaults(existingFrontmatter);
   const existingProjectContext = optionalBoolean(existingFrontmatter.inheritProjectContext ?? existingFrontmatter.inherit_project_context);
   const existingGlobalContext = optionalBoolean(existingFrontmatter.inheritGlobalContext ?? existingFrontmatter.inherit_global_context);
   const existingSkills = optionalBoolean(existingFrontmatter.inheritSkills ?? existingFrontmatter.inherit_skills);
@@ -495,9 +535,21 @@ function saveSubagentProfileUnlocked(
     runInBackground?: boolean;
     loadSkills?: boolean;
   };
-  const legacyContext = legacyProfile.inheritContext ?? optionalBoolean(existingFrontmatter.inherit_context);
-  const legacyAsync = legacyProfile.runInBackground ?? optionalBoolean(existingFrontmatter.run_in_background);
+  const legacyContext = legacyProfile.inheritContext;
+  const legacyAsync = legacyProfile.runInBackground;
   const legacySkills = legacyProfile.loadSkills ?? optionalBoolean(existingFrontmatter.load_skills);
+  if (profile.reader !== undefined && !isRecord(profile.reader)) throw new Error("Reader options must be an object");
+  if (profile.reader?.maxTurns !== undefined && (!Number.isSafeInteger(profile.reader.maxTurns) || profile.reader.maxTurns < 1)) {
+    throw new Error("maxTurns must be a positive safe integer");
+  }
+  const reader = profile.reader ?? parseReaderNativeProfile(existingFrontmatter);
+  if (reader?.codemode !== undefined && !["inherit", "on", "off"].includes(reader.codemode)) throw new Error("Invalid Reader Code mode");
+  if (reader?.mcp !== undefined && !["on", "off"].includes(reader.mcp)) throw new Error("Invalid Reader MCP mode");
+  const denied = new Set(parseTools(existingFrontmatter.disallowed_tools, []));
+  const hasTools = (toolsExplicit ? tools : [...BUILTIN_TOOLS]).some((tool) => BUILTIN_TOOLS.some((builtin) => builtin === tool) && !denied.has(tool));
+  if (reader && !hasTools && !reader.loadSkills && !reader.loadExtensions && (reader.codemode === "on" || reader.mcp === "on")) {
+    throw new Error("Code mode and MCP require a tool, skill, or extension");
+  }
   const frontmatter: Record<string, unknown> = {
     ...existingFrontmatter,
     name,
@@ -505,8 +557,10 @@ function saveSubagentProfileUnlocked(
     display_name: displayName,
     enabled: profile.enabled,
     systemPromptMode: profile.systemPromptMode ?? (existingSystemPromptMode === "append" || existingSystemPromptMode === "replace" ? existingSystemPromptMode : "replace"),
-    defaultContext: profile.defaultContext ?? existingDefaultContext ?? (legacyContext ? "fork" : "fresh"),
-    async: profile.defaultAsync ?? existingDefaultAsync ?? legacyAsync ?? false,
+    defaultContext: profile.defaultContext ?? (legacyContext === undefined
+      ? existingUnifiedDefaults.defaultContext
+      : legacyContext ? "fork" : "fresh"),
+    async: profile.defaultAsync ?? (legacyAsync === undefined ? existingUnifiedDefaults.defaultAsync : legacyAsync),
     inheritProjectContext: profile.inheritProjectContext ?? existingProjectContext ?? false,
     inheritGlobalContext: profile.inheritGlobalContext ?? existingGlobalContext ?? false,
     inheritSkills: profile.inheritSkills ?? existingSkills ?? legacySkills ?? false,
@@ -519,14 +573,26 @@ function saveSubagentProfileUnlocked(
   if (profile.thinking) frontmatter.thinking = profile.thinking;
   else delete frontmatter.thinking;
   if (profile.acceptanceRole) frontmatter.acceptanceRole = profile.acceptanceRole;
+  if (reader) {
+    const savedReader: Record<string, unknown> = { ...(isRecord(existingFrontmatter.reader) ? existingFrontmatter.reader : {}), ...reader };
+    if (profile.reader && reader.maxTurns === undefined) delete savedReader.maxTurns;
+    if (profile.reader && reader.promptMode === undefined) delete savedReader.promptMode;
+    // Context inheritance and background mode are profile-wide settings. Keep their
+    // old nested Reader spellings readable, but never write a second source of truth.
+    delete savedReader.inheritContext;
+    delete savedReader.runInBackground;
+    frontmatter.reader = savedReader;
+    // Reader-native legacy resource keys are migrated into the namespaced projection;
+    // context and background remain in the profile-wide fields above.
+    delete frontmatter.load_skills;
+    delete frontmatter.load_extensions;
+    delete frontmatter.inherit_context;
+    delete frontmatter.run_in_background;
+    delete frontmatter.max_turns;
+  }
   // pi-subagents 0.68.0 removed fallbackModels and rejects agents that declare it.
   delete frontmatter.fallbackModels;
   delete frontmatter.fallback_models;
-  delete frontmatter.load_skills;
-  delete frontmatter.load_extensions;
-  delete frontmatter.inherit_context;
-  delete frontmatter.run_in_background;
-  delete frontmatter.max_turns;
 
   const yaml = stringifyYaml(frontmatter, { lineWidth: 1000 }).trimEnd();
   const fileContent = `---\n${yaml}\n---\n\n${systemPrompt}\n`;
@@ -538,6 +604,7 @@ function saveSubagentProfileUnlocked(
   delete removed.fallback_models;
   delete removed.modelOverride;
   delete removed.thinkingOverride;
+  delete removed.copyFrom;
 
   return {
     ...removed,

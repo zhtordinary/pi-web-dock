@@ -84,7 +84,21 @@ The worktree graph, the sidebar worktree menu, and **By worktree** grouping all 
 
 Creating a physical checkout is a separate, explicit operation: use **New worktree...** in the worktree menu and provide a branch name. A DevSpace, task, or other externally-created checkout is an ordinary Git worktree to Pi Web: it may open it, start a session there, and group its sessions; the graph's New session action never creates, renames, or removes it.
 
-The Git graph inspector's **Associated sessions** list includes visible, non-archived sessions whose `cwd` matches the selected worktree path, plus sessions whose successful tool history confirms they created that worktree. Each Session ID appears once. Rows show the session title and short Session ID, with activity status when available. Click a row to open that session directly. When the graph is opened from an active session, it selects that session's matching worktree, including a linked worktree identified by a verified creation record. A worktree with no associated sessions shows an explicit empty state.
+The Git graph inspector's **Associated sessions** list includes visible, non-archived sessions whose `cwd` matches the selected worktree path, sessions whose successful tool history confirms they created that worktree, and sessions with a verified structured `pi-web:worktree-binding` record. Subagent sessions are projected onto their owning main session, including nested subagents, so child transcripts do not create a separate row; orphaned or cyclic subagent metadata is omitted when no main session can be resolved. Each main Session ID appears once; a row may carry more than one relation (`cwd`, `creator`, or `task-root`). Rows show the session title, short Session ID, relation labels, and activity status when available. Click a row to open that session directly. When the graph is opened from an active session, it selects that session's matching worktree, including a linked worktree identified by a verified creation record or structured binding. A worktree with no associated sessions shows an explicit empty state.
+
+A structured binding is an append-only native session entry with this shape:
+
+```json
+{
+  "version": 1,
+  "action": "bind",
+  "relation": "task-root",
+  "projectRoot": "/repo",
+  "worktreePath": "/repo/.worktrees/task"
+}
+```
+
+`relation` is `task-root` for an explicit task ownership binding or `creator` for a session that owns the worktree creation operation. Reader validates the project root and the currently registered Git worktree before projecting the record. A later `action: "release"` for the same relation and path removes that binding from the projection. The trusted local `POST /api/worktrees/bind` endpoint writes this record to an existing session; new sessions created from the worktree graph can also carry the binding during session creation. Legacy successful `git worktree add` history remains a read-only fallback, so existing sessions continue to be visible while producers adopt the structured record.
 
 ### Reading worktree labels
 

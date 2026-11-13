@@ -29,6 +29,10 @@ export interface SessionContextMenuProps {
   // Subprojects
   subprojects?: NonNullable<SessionActivityResponse["subprojects"]>;
   onMoveToSubproject?: (item: SessionActivityItem, subprojectId: string | null) => Promise<boolean>;
+  // Subagents
+  hasSubagents?: boolean;
+  subagentsVisible?: boolean;
+  onToggleSubagents?: () => void;
   // Favorite
   onFavorite?: () => Promise<boolean> | void;
   onUnfavorite?: () => Promise<boolean> | void;
@@ -104,6 +108,9 @@ export function SessionContextMenu({
   onClose,
   subprojects = [],
   onMoveToSubproject,
+  hasSubagents = false,
+  subagentsVisible = false,
+  onToggleSubagents,
   onFavorite,
   onUnfavorite,
   onSetCategory,
@@ -417,7 +424,22 @@ export function SessionContextMenu({
 
         <div role="separator" aria-orientation="horizontal" style={separatorStyle} />
 
-        {/* 6. 隐藏 / 取消隐藏 */}
+        {/* 6. 子 Agent 与隐藏 */}
+        {hasSubagents && onToggleSubagents && (
+          <button
+            className="reader-context-menu-item"
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onToggleSubagents();
+            }}
+            style={contextMenuItemStyle}
+          >
+            {subagentsVisible ? <EyeOff size={14} strokeWidth={1.8} aria-hidden="true" /> : <Eye size={14} strokeWidth={1.8} aria-hidden="true" />}
+            <span>{subagentsVisible ? t("sidebar.hideSubagents") : t("sidebar.showSubagents")}</span>
+          </button>
+        )}
         {onUnhide ? (
           <button
             className="reader-context-menu-item"

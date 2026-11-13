@@ -88,7 +88,7 @@ export function createControlPlane(deps: ControlPlaneDependencies) {
     }
     const cwd = body.cwd === undefined && body.scope === "global" ? deps.globalCwd() : text(body.cwd, "cwd", 2000);
     if (!isAbsolute(cwd) || resolve(cwd) !== cwd) throw new ControlPlaneError("invalid_request", "cwd must be an absolute normalized directory");
-    if (!(await deps.authorizeCwd(cwd))) throw new ControlPlaneError("cwd_denied", "The directory is outside Reader's existing allowed roots", 403);
+    if (!(await deps.authorizeCwd(cwd))) throw new ControlPlaneError("cwd_denied", "The directory is not available", 403);
     return { area, scope: body.scope, cwd };
   }
   function snapshot(target: SettingsTarget, value: SettingsSnapshot) {

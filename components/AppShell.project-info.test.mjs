@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const worktreeShell = await readFile(new URL("./app-shell-worktree.tsx", import.meta.url), "utf8");
 const english = await readFile(new URL("../lib/i18n/messages/en.ts", import.meta.url), "utf8");
 const chinese = await readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8");
 const traditionalChinese = await readFile(new URL("../lib/i18n/messages/zh-TW.ts", import.meta.url), "utf8");
@@ -43,7 +44,7 @@ test("project info labels exist in every bundled Reader locale", () => {
 
 test("worktree graph highlights the session cwd before its shared project root", () => {
   assert.match(appShell, /const worktreeGraphCurrentPath = remoteSession\?\.sessionInfo\?\.cwd[\s\S]*?selectedSession\?\.cwd[\s\S]*?selectedSession\?\.projectRoot/);
-  assert.match(appShell, /currentWorktreePath=\{worktreeGraphSessionPath \?\? worktreeGraphCurrentPath\}/);
+  assert.match(worktreeShell, /currentWorktreePath=\{worktreeGraphSessionPath \?\? worktreeGraphCurrentPath\}/);
   assert.match(appShell, /currentSessionId=\{worktreeGraphSessionId \?\? topBarSessionId\}/);
 });
 

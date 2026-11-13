@@ -523,6 +523,7 @@ interface MarkdownTreeNode {
   value?: string;
   children?: MarkdownTreeNode[];
   data?: { hName?: string };
+  position?: { start: { line: number }; end: { line: number } };
 }
 
 const LINE_ENDING = /[ \t]*(?:\r\n|\r|\n)[ \t]*/;
@@ -573,6 +574,39 @@ export const markdownUserRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = 
   remarkCurrencySafeMath,
   remarkWindowsFileLinks,
   remarkKeepLineBreaks,
+];
+
+// Top-level extension text can be a terminal diagram; list and quote prefixes are not indentation.
+function remarkCustomTextLayout() {
+  return (tree: MarkdownTreeNode, file: { value: unknown }) => {
+    keepLineBreaks(tree);
+    const lines = String(file.value).split(/\r\n|\r|\n/);
+    for (const paragraph of tree.children ?? []) {
+      if (paragraph.type !== "paragraph" || !paragraph.position || opensRawTextElement(paragraph)) continue;
+      let line = paragraph.position.start.line - 1;
+      const indent = (): MarkdownTreeNode[] => {
+        const whitespace = lines[line]?.match(/^[ \t]+/)?.[0];
+        return whitespace ? [{ type: "text", value: whitespace }] : [];
+      };
+      const firstIndent = indent();
+      const restore = (node: MarkdownTreeNode): void => {
+        if (!node.children) return;
+        node.children = node.children.flatMap((child) => {
+          if (child.type === "lineBreak") { line++; return [child, ...indent()]; }
+          if (child.children) restore(child);
+          else if (child.position) line += child.position.end.line - child.position.start.line;
+          return [child];
+        });
+      };
+      restore(paragraph);
+      paragraph.children = [...firstIndent, ...(paragraph.children ?? [])];
+    }
+  };
+}
+
+export const markdownCustomTextRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
+  ...(markdownUserRemarkPlugins ?? []).slice(0, -1),
+  remarkCustomTextLayout,
 ];
 
 export const markdownLiteralUserRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [

@@ -32,7 +32,7 @@ function harness() {
   const executable = stripTypeScriptTypes(routeSource.replace(/^import .*;\n/gm, "").replace(/^export /gm, ""));
   const route = new Function("deps", `const { getAgentDir, readFileSync, writePrivateFileAtomicSync, join, resolve, dirname, mkdirSync, rmSync, stat, getAllowedFileRoots, isExistingFilePathAllowed, getRpcSessionByFile, loadImageGenerationPackage, imageGenerationQuote } = deps;\n${executable}\nreturn { GET, POST };`)({
     getAgentDir: () => "/agent", join: (...parts) => parts.join("/"), resolve: (path) => path, dirname: (path) => path.slice(0, path.lastIndexOf("/")),
-    mkdirSync() {}, rmSync: (path) => { delete files[path]; }, stat: async () => ({ isDirectory: () => true }),
+    mkdirSync() {}, rmSync: (path) => { delete files[path]; }, stat: async (path) => { if (path === "/missing") throw new Error("missing"); return { isDirectory: () => true }; },
     getAllowedFileRoots: async () => new Set(["/project"]), isExistingFilePathAllowed: (path) => path === "/project",
     readFileSync: (path) => JSON.stringify(files[path] ?? {}), writePrivateFileAtomicSync: (path, value) => { files[path] = JSON.parse(value); },
     loadImageGenerationPackage: () => { if (unavailable) throw new Error("image package unavailable"); return contract; },
@@ -106,9 +106,11 @@ test("generation switch and provider/model persistence preserve shared defaults 
   assert.equal((await post(h.route, { action: "setModel", provider: "missing", modelId: "fixture-model" })).status, 400);
 });
 
-test("project output writes use the package-selected file only after project authorization", async () => {
+test("project output writes use the package-selected file for an existing project", async () => {
   const h = harness();
-  assert.equal((await post(h.route, { action: "setOutputDir", outputDir: "./images", cwd: "/outside", scope: "project" })).status, 403);
+  assert.equal((await post(h.route, { action: "setOutputDir", outputDir: "./images", cwd: "/missing", scope: "project" })).status, 400);
+  assert.equal((await post(h.route, { action: "setOutputDir", outputDir: "./images", cwd: "/outside", scope: "project" })).status, 200);
+  assert.equal(h.files["/outside/.pi/image-generation.json"].outputDir, "./images");
   assert.equal((await post(h.route, { action: "setOutputDir", outputDir: "./images", cwd: "/project", scope: "project" })).status, 200);
   assert.equal(h.files["/project/.pi/image-generation.json"].outputDir, "./images");
   assert.equal((await post(h.route, { action: "clearProjectOutputDir", cwd: "/project" })).status, 200);
@@ -153,7 +155,7 @@ test("Reader retains session write admission while delegating all capability int
   assert.match(routeSource, /generation\.resolveEffectiveConfig/);
   assert.match(routeSource, /generation\.generationPanelCapabilities/);
   assert.doesNotMatch(routeSource, /const eff = \{ \.\.\.fileCfg/);
-  assert.match(routeSource, /isExistingFilePathAllowed\(resolved, allowedRoots\)/);
+  assert.match(routeSource, /cwdStat\.isDirectory\(\)/);
 });
 
 

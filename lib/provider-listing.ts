@@ -23,6 +23,16 @@ const OAUTH_DISPLAY_NAMES: Record<string, string> = {
   "github-copilot": "GitHub Copilot",
 };
 
+/**
+ * `openai` dual-auth is replaced by the `openai-subscription` and `openai-api`
+ * aliases, which keep the two credentials apart. Offering it as a new login
+ * again would present one OpenAI account twice; an already stored `openai`
+ * credential stays listed so it can still be inspected and removed.
+ */
+const ALIASED_PROVIDER_IDS = new Set(["openai"]);
+/** Keep legacy Codex usable for stored accounts without offering new logins. */
+const HIDDEN_NEW_OAUTH_PROVIDER_IDS = new Set(["openai-codex"]);
+
 export interface ProviderListingInput {
   id: string;
   /** Provider display name (`provider.name`). */
@@ -87,6 +97,7 @@ export function buildApiKeyProviderList(
     if (provider.status.source && CUSTOM_PROVIDER_SOURCES.has(provider.status.source)) continue;
 
     const configured = provider.status.configured && provider.credentialType !== "oauth";
+    if (ALIASED_PROVIDER_IDS.has(provider.id) && !configured) continue;
     result.push({
       id: provider.id,
       displayName: provider.name,
@@ -106,11 +117,14 @@ export function buildOAuthProviderList(
   const result: OAuthProviderListing[] = [];
   for (const provider of dedupeById(providers)) {
     if (!provider.hasOAuth) continue;
+    const loggedIn = provider.credentialType === "oauth";
+    if (ALIASED_PROVIDER_IDS.has(provider.id) && !loggedIn) continue;
+    if (HIDDEN_NEW_OAUTH_PROVIDER_IDS.has(provider.id) && !loggedIn) continue;
     result.push({
       id: provider.id,
       name: OAUTH_DISPLAY_NAMES[provider.id] ?? provider.oauthName ?? provider.name,
       usesCallbackServer: false,
-      loggedIn: provider.credentialType === "oauth",
+      loggedIn,
       supportsApiKey: provider.hasApiKeyLogin,
     });
   }

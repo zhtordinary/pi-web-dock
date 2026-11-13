@@ -1,4 +1,13 @@
 import type { BlockingExtensionUiRequest, ExtensionUiRequest } from "./types";
+interface SessionCompletionIdentity {
+  deviceId?: string | null;
+  sessionId?: string | null;
+  runId?: string | null;
+}
+
+function hasSessionCompletionIdentity(identity: SessionCompletionIdentity | null | undefined): identity is { deviceId: string; sessionId: string; runId: string } {
+  return Boolean(identity?.deviceId?.trim() && identity?.sessionId?.trim() && identity?.runId?.trim());
+}
 
 interface WindowNotificationLike {
   onclick: Notification["onclick"];
@@ -20,6 +29,7 @@ export interface BrowserNotificationOptions {
   sessionUrl: string;
   onClick: () => void;
   tag?: string;
+  identity?: SessionCompletionIdentity;
 }
 
 export type NotificationDelivery = "service-worker" | "window" | null;
@@ -70,8 +80,15 @@ export async function showBrowserNotification(
   options: BrowserNotificationOptions,
   environment: BrowserNotificationEnvironment = getBrowserEnvironment(),
 ): Promise<NotificationDelivery> {
+  const shownAt = Date.now();
+  const notificationData = {
+    url: options.sessionUrl,
+    shownAt,
+    ...(hasSessionCompletionIdentity(options.identity) ? options.identity : {}),
+  };
   const notificationOptions: NotificationOptions = {
     body: options.body,
+    data: notificationData,
     ...(options.tag ? { tag: options.tag, renotify: true } : {}),
   };
 
@@ -79,10 +96,7 @@ export async function showBrowserNotification(
     try {
       const registration = await environment.getServiceWorkerRegistration();
       if (registration) {
-        await registration.showNotification(options.title, {
-          ...notificationOptions,
-          data: { url: options.sessionUrl },
-        });
+        await registration.showNotification(options.title, notificationOptions);
         return "service-worker";
       }
     } catch {

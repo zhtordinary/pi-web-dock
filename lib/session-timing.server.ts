@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { findChildSessionPaths } from "./billing";
+import { findChildSessionPaths, sessionFilePathAliases } from "./billing";
 import {
   analyzeTurns,
   computeSessionTiming,
@@ -18,6 +18,27 @@ const READER_SUBAGENT_TOOL = "Agent";
 const READER_SUBAGENT_NOTIFICATION = "pi-web:subagent-notification";
 const PI_SUBAGENTS_TOOL = "subagent";
 const PI_SUBAGENTS_NOTIFICATION = "subagent-notify";
+const NON_LAUNCHING_SUBAGENT_ACTIONS = new Set([
+  "children.list",
+  "command.cancel",
+  "command.status",
+  "debug.run",
+  "dismiss",
+  "doctor",
+  "get",
+  "guide",
+  "interrupt",
+  "list",
+  "models",
+  "project.status",
+  "status",
+  "stop",
+  "validate",
+  "watchdog.check",
+  "watchdog.configure",
+  "watchdog.recommend-model",
+  "watchdog.status",
+]);
 /** pi-subagents stores each run under `<parent child directory>/<run id>/run-<n>/session.jsonl`. */
 const RUN_DIRECTORY = /^run-\d+$/;
 const CHILD_RECORD_CACHE_LIMIT = 256;
@@ -166,18 +187,39 @@ function subagentRunKeys(details: Record<string, unknown>): string[] {
   return [...(runId ? [`run:${runId}`] : []), ...(replacement ? [`run:${replacement}`] : []), ...files.map((file) => `file:${resolve(file)}`)];
 }
 
-/** A failed call, or a list, status, capability or steering request answered in management mode, starts no run. */
-function startsNoRun(message: TimingMessage, keys: readonly string[]): boolean {
-  return keys.length === 0 && (message.isError === true || objectValue(message.details)?.mode === "management");
+function subagentCallActions(messages: readonly TimingMessage[]): Map<string, string | undefined> {
+  const actions = new Map<string, string | undefined>();
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const value of message.content) {
+      const call = objectValue(value);
+      if (call?.type !== "toolCall") continue;
+      const toolCallId = stringValue(call.toolCallId) ?? stringValue(call.id);
+      const name = stringValue(call.toolName) ?? stringValue(call.name);
+      if (!toolCallId || name !== PI_SUBAGENTS_TOOL) continue;
+      actions.set(toolCallId, stringValue(objectValue(call.arguments ?? call.input)?.action));
+    }
+  }
+  return actions;
 }
 
-function childLaunches(messages: readonly TimingMessage[]): Array<{ toolCallId: string; messageIndex: number; launchAt?: number; resume?: string }> {
-  const launches: Array<{ toolCallId: string; messageIndex: number; launchAt?: number; resume?: string }> = [];
+/** A management action or a failed call does not start a child run. */
+function startsNoRun(message: TimingMessage, keys: readonly string[], action?: string): boolean {
+  const details = objectValue(message.details) ?? {};
+  if (action && (NON_LAUNCHING_SUBAGENT_ACTIONS.has(action)
+    || (action === "steer" && !stringValue(objectValue(details.steering)?.replacementRunId)))) return true;
+  return keys.length === 0 && (message.isError === true || details.mode === "management");
+}
+
+function childLaunches(messages: readonly TimingMessage[]): Array<{ toolCallId: string; messageIndex: number; launchAt?: number; resume?: string; action?: string }> {
+  const launches: Array<{ toolCallId: string; messageIndex: number; launchAt?: number; resume?: string; action?: string }> = [];
+  const actions = subagentCallActions(messages);
   const idle = new Set<string>();
   for (const message of messages) {
     if (message.role !== "toolResult" || message.toolName !== PI_SUBAGENTS_TOOL) continue;
     const toolCallId = stringValue(message.toolCallId);
-    if (toolCallId && startsNoRun(message, subagentRunKeys(objectValue(message.details) ?? {}))) idle.add(toolCallId);
+    const action = toolCallId ? actions.get(toolCallId) : undefined;
+    if (toolCallId && startsNoRun(message, subagentRunKeys(objectValue(message.details) ?? {}), action)) idle.add(toolCallId);
   }
   messages.forEach((message, messageIndex) => {
     if (message.role !== "assistant" || !Array.isArray(message.content)) return;
@@ -191,7 +233,9 @@ function childLaunches(messages: readonly TimingMessage[]): Array<{ toolCallId: 
       const name = stringValue(call.toolName) ?? stringValue(call.name);
       if (!toolCallId || idle.has(toolCallId) || (name !== PI_SUBAGENTS_TOOL && name !== READER_SUBAGENT_TOOL)) continue;
       const resume = name === READER_SUBAGENT_TOOL ? stringValue(objectValue(call.arguments ?? call.input)?.resume) : undefined;
-      launches.push({ toolCallId, messageIndex, ...(launchAt === undefined ? {} : { launchAt }), ...(resume ? { resume } : {}) });
+      const action = name === PI_SUBAGENTS_TOOL ? actions.get(toolCallId) : undefined;
+      if (name === PI_SUBAGENTS_TOOL && action && NON_LAUNCHING_SUBAGENT_ACTIONS.has(action)) continue;
+      launches.push({ toolCallId, messageIndex, ...(launchAt === undefined ? {} : { launchAt }), ...(resume ? { resume } : {}), ...(action ? { action } : {}) });
     }
   });
   return launches;
@@ -200,6 +244,7 @@ function childLaunches(messages: readonly TimingMessage[]): Array<{ toolCallId: 
 /** Subagent runs an agent started (launch results) or heard back from (completion notices). */
 function childReferences(messages: readonly TimingMessage[]): ChildReference[] {
   const launches = childLaunches(messages);
+  const actions = subagentCallActions(messages);
   const launchTimes = new Map(launches.map((item) => [item.toolCallId, item.launchAt]));
   const references: ChildReference[] = launches.flatMap((item) => item.resume
     ? [{ keys: [`session:${item.resume}`], toolCallId: item.toolCallId, messageIndex: item.messageIndex, ...(item.launchAt === undefined ? {} : { launchAt: item.launchAt }) }]
@@ -207,10 +252,11 @@ function childReferences(messages: readonly TimingMessage[]): ChildReference[] {
   messages.forEach((message, messageIndex) => {
     const details = objectValue(message.details) ?? {};
     const toolCallId = message.role === "toolResult" ? stringValue(message.toolCallId) : undefined;
+    const action = toolCallId ? actions.get(toolCallId) : undefined;
     const launchAt = toolCallId ? launchTimes.get(toolCallId) : undefined;
     if (message.role === "toolResult" && message.toolName === PI_SUBAGENTS_TOOL) {
       const keys = subagentRunKeys(details);
-      if (startsNoRun(message, keys)) return;
+      if (startsNoRun(message, keys, action)) return;
       references.push({ keys, ...(toolCallId ? { toolCallId } : {}), messageIndex, ...(launchAt === undefined ? {} : { launchAt }) });
     } else if (message.role === "custom" && message.customType === PI_SUBAGENTS_NOTIFICATION) {
       const notifiedAt = parseTimestamp(message.timestamp) ?? parseTimestamp(message.entryTimestamp);
@@ -249,8 +295,8 @@ function childReferences(messages: readonly TimingMessage[]): ChildReference[] {
 }
 
 /**
- * Load the viewed branch's timing with every subagent run it started. Only session files under the
- * parent's own child directory are read; a reference elsewhere is treated as a missing record.
+ * Load the viewed branch's timing with every subagent run it started. Child files may be in the
+ * active or archived mirror of the parent's own child directory; a reference elsewhere is missing.
  */
 export async function loadSessionTiming(request: SessionTimingRequest): Promise<SessionTimingInfo> {
   const forkedFrom = stringValue(request.header?.parentSession);
@@ -261,8 +307,12 @@ export async function loadSessionTiming(request: SessionTimingRequest): Promise<
   const records = request.filePath ? await Promise.all((await findChildSessionPaths(request.filePath)).map(readChildRecord)) : [];
   const recordsByKey = new Map<string, ChildRecord[]>();
   for (const record of records) {
-    const keys = [`file:${record.path}`, ...(record.runId ? [`run:${record.runId}`] : []), ...(record.sessionId ? [`session:${record.sessionId}`] : [])];
-    for (const key of keys) recordsByKey.set(key, [...(recordsByKey.get(key) ?? []), record]);
+    const keys = [
+      ...sessionFilePathAliases(record.path).map((path) => `file:${path}`),
+      ...(record.runId ? [`run:${record.runId}`] : []),
+      ...(record.sessionId ? [`session:${record.sessionId}`] : []),
+    ];
+    for (const key of new Set(keys)) recordsByKey.set(key, [...(recordsByKey.get(key) ?? []), record]);
   }
 
   const children: ChildTimingSource[] = [];

@@ -7,6 +7,10 @@
 // Call sites previously repeated the same 5-line fetch block 13× in
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
+import { apiPathForPeer } from "./file-api.ts";
+
+export const SESSION_RESOURCES_RELOADED_EVENT = "reader:session-resources-reloaded";
+
 export class AgentCommandError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -31,6 +35,7 @@ export function isPromptRejectedError(error: unknown): error is AgentCommandErro
   return error instanceof AgentCommandError
     && error.accepted === false
     && (["prompt_rejected", "session_runtime_owned", "session_archived", "request_denied"].includes(error.code ?? "")
+      || (error.code?.startsWith("history_edit_") && error.code !== "history_edit_unknown")
       || isSessionMissingError(error));
 }
 
@@ -47,9 +52,7 @@ export async function sendAgentCommand<T = unknown>(
   command: Record<string, unknown>,
   remotePeer?: string,
 ): Promise<T> {
-  const url = remotePeer
-    ? `/api/remote/agent/${encodeURIComponent(sessionId)}?peer=${remotePeer}`
-    : `/api/agent/${encodeURIComponent(sessionId)}`;
+  const url = apiPathForPeer(remotePeer, `agent/${encodeURIComponent(sessionId)}`);
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -82,9 +85,7 @@ export interface ReloadAllAgentSessionsResult {
 }
 
 export async function reloadAllAgentSessions(remotePeer?: string): Promise<ReloadAllAgentSessionsResult> {
-  const url = remotePeer
-    ? `/api/remote/agent/reload-all?peer=${remotePeer}`
-    : "/api/agent/reload-all";
+  const url = apiPathForPeer(remotePeer, "agent/reload-all");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

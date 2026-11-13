@@ -4,13 +4,13 @@ import { isAbsolute, resolve } from "node:path";
 import { getAgentDir, type McpServerConfig } from "@earendil-works/pi-coding-agent";
 import type { McpErrorResponse, McpRefusalReason, McpScope } from "./api-types";
 import { isMcpDisabledByOperator, MCP_DISABLE_VARIABLE } from "./builtin-extensions";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
 import { mcpEntryConfigKey } from "./mcp-config-key";
 import { findMcpExtensionServer } from "./mcp-extension-registry";
 import { readMcpServerConfigs, readMcpServerEntry } from "./mcp-config-read";
 import { findWebPasswordField } from "./mcp-transport";
 import { loadPiSdkInternals, type PiSdkInternals } from "./pi-sdk-internals";
 import { getProjectTrustStatus } from "./project-trust";
+import { hasParentDirectorySegment } from "./path-security";
 import { hasJsonContentType, isApiRequestAllowed } from "./request-security";
 
 // The checks a route makes before it connects one `mcp.json` entry outside any
@@ -19,14 +19,14 @@ import { hasJsonContentType, isApiRequestAllowed } from "./request-security";
 // run a `!command` value, so each re-checks everything a session's start
 // would: the request is Pi Web's own, MCP is not off, the entry is read from
 // its file (never a config from the browser) and valid, it does not reference
-// PI_WEB_PASSWORD, and a project entry's folder is allowed and trusted.
+// PI_WEB_PASSWORD, and a project entry's folder is trusted.
 
 export interface McpEntryRefusal {
   status: number;
   body: McpErrorResponse;
 }
 
-export type McpRequestProject = { cwd: string; allowedRoots: Set<string> };
+export type McpRequestProject = { cwd: string };
 
 /** An entry a route may connect, as its file holds it. */
 export interface McpConnectableEntry {
@@ -44,8 +44,7 @@ export interface McpConnectableEntry {
   config: McpServerConfig;
   /**
    * The folder the connection runs in: the panel's project when it has one,
-   * else the home folder (the CLI would use its own working directory). The
-   * server picks the fallback, so it is not checked against the allowed roots.
+   * else the home folder (the CLI would use its own working directory).
    */
   cwd: string;
 }
@@ -71,20 +70,12 @@ export function isMcpEntryRefusal(value: unknown): value is McpEntryRefusal {
   return isRecord(value) && typeof value.status === "number" && isRecord(value.body);
 }
 
-/**
- * The folder a request names as its project, checked alike by every route
- * that takes one for Settings › MCP or the trust dialog (`/api/mcp`, its Test
- * and sign-in, `/api/project-trust`): absolute (400 `cwd-invalid`), inside the
- * allowed roots as given — a `..` is refused, not collapsed (403
- * `cwd-denied`) — and only then a directory (400 `cwd-not-directory`), so a
- * folder outside the roots gets the same answer whether or not it exists.
- */
+/** Validate the existing absolute project directory shared by MCP and trust routes. */
 export async function validateMcpProject(value: unknown): Promise<McpRequestProject | McpEntryRefusal> {
   if (typeof value !== "string" || !value.trim() || !isAbsolute(value)) {
     return mcpEntryRefusal(400, "cwd-invalid", "cwd must be an absolute path");
   }
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(value, allowedRoots)) return mcpEntryRefusal(403, "cwd-denied", "Access denied");
+  if (hasParentDirectorySegment(value)) return mcpEntryRefusal(403, "cwd-denied", "Access denied");
   const cwd = resolve(value);
   let directory = false;
   try {
@@ -93,7 +84,7 @@ export async function validateMcpProject(value: unknown): Promise<McpRequestProj
     // Removed since the check.
   }
   if (!directory) return mcpEntryRefusal(400, "cwd-not-directory", "cwd must be a directory");
-  return { cwd, allowedRoots };
+  return { cwd };
 }
 
 /**

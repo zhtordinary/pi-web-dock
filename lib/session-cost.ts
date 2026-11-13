@@ -60,7 +60,7 @@ export interface SessionCompactionCost {
 
 export function sessionCostPresentation(
   summary: Pick<SessionCostSummary, "status" | "pendingUsageCount" | "missingPriceModels"> | null | undefined,
-  extensions: readonly Pick<ExtensionCostSummary, "id" | "pendingUsageCount">[] = [],
+  extensions: readonly (Pick<ExtensionCostSummary, "id" | "pendingUsageCount"> & Partial<Pick<ExtensionCostSummary, "status">>)[] = [],
 ) {
   const total = summary?.pendingUsageCount ?? 0;
   const reported = extensions.reduce((count, item) =>
@@ -70,7 +70,8 @@ export function sessionCostPresentation(
   return {
     pendingUsageCount,
     recordedOnly: quiet > 0,
-    onlySuggesterPending: quiet > 0 && pendingUsageCount === 0 && (summary?.missingPriceModels.length ?? 0) === 0,
+    onlySuggesterPending: quiet > 0 && pendingUsageCount === 0 && (summary?.missingPriceModels.length ?? 0) === 0
+      && extensions.every((item) => item.id === "pi-prompt-suggester" || item.status === "calculated"),
   };
 }
 

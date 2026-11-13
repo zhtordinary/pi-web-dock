@@ -20,7 +20,7 @@ import {
 
 // Only explicit writes (or deliberate System-panel initialization) may create a runtime.
 const RUNTIME_START_COMMANDS = new Set([
-  "initialize_runtime", "prompt", "steer", "follow_up", "peer_message",
+  "initialize_runtime", "prompt", "edit_history", "steer", "follow_up", "peer_message",
   "set_tools", "set_model", "set_thinking_level", "set_fast_mode", "set_unattended", "set_session_name", "set_auto_retry",
   "retry_continue", "retry_continue_only", "compact", "navigate_tree", "fork", "clone", "reload", "bash",
   "analyze_question", "analyze_question_draft", "rewrite_question", "rewrite_ste100",
@@ -60,9 +60,10 @@ export async function POST(
       validateSessionToolSelection(toolNames);
     }
 
-    // MCP/managed writes are deliberately live-only. The ordinary Reader UI
-    // keeps its historical reopen behavior, but a control request carrying an
-    // idempotency contract must never turn a read/control race into a wake.
+    // Managed (MCP) control carries an explicit intent and idempotency contract.
+    // For a message it starts a persisted session's runtime exactly like the UI
+    // does when a person opens the session and sends one; commands that act on
+    // a running runtime still need one. See handleManagedControl.
     const existing = getRpcSession(id);
     if (managedControl) {
       if (!isApiRequestAllowed(req)) return NextResponse.json({ code: "request_denied", accepted: false, runtimeStartAttempted: false, writeSideEffects: false }, { status: 403 });
@@ -147,7 +148,7 @@ export async function POST(
       await assertRpcSessionRuntimeBinding(existing);
       if (body.type === "initialize_runtime") await existing.waitUntilReady?.();
       const result = await existing.send(command);
-      promptAccepted = body.type === "prompt";
+      promptAccepted = body.type === "prompt" || body.type === "edit_history";
       return NextResponse.json({ success: true, data: result });
     }
 
@@ -167,7 +168,7 @@ export async function POST(
     });
     if (body.type === "initialize_runtime") await session.waitUntilReady?.();
     const result = await session.send(command);
-    promptAccepted = body.type === "prompt";
+    promptAccepted = body.type === "prompt" || body.type === "edit_history";
 
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
@@ -188,6 +189,9 @@ export async function POST(
       ...(commandType === "prompt" && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
+      ...(commandType === "edit_history" && !promptAccepted
+        ? { code: error && typeof error === "object" && "code" in error ? String(error.code) : "prompt_rejected", accepted: false }
+        : {}),
       ...(commandType === "retry_continue_only"
         ? { code: error && typeof error === "object" && "code" in error ? String(error.code) : "retry_rejected", accepted: false }
         : {}),
@@ -198,7 +202,11 @@ export async function POST(
   }
 }
 
-const MANAGED_CONTROL_TYPES = new Set(["prompt", "continue", "steer", "follow_up", "abort", "stop", "clear_queue", "set_model", "set_tools", "answer_question"]);
+const MANAGED_CONTROL_TYPES = new Set(["prompt", "continue", "steer", "follow_up", "abort", "stop", "clear_queue", "set_model", "set_tools", "answer_question", "initialize_runtime"]);
+// The managed commands Reader may start a persisted session's runtime for. They
+// are the same commands the UI starts one with when a person opens the session
+// and sends a message; the rest act on a running runtime and need one already.
+const MANAGED_RUNTIME_START_TYPES = new Set(["prompt", "continue", "steer", "follow_up", "initialize_runtime"]);
 
 function optionalBoundedControlText(value: unknown, name: string, maxLength: number): string | undefined {
   if (value === undefined) return undefined;
@@ -211,7 +219,7 @@ function optionalBoundedControlText(value: unknown, name: string, maxLength: num
 async function handleManagedControl(
   sessionId: string,
   body: Record<string, unknown>,
-  existing: ReturnType<typeof getRpcSession>,
+  liveRuntime: ReturnType<typeof getRpcSession>,
 ): Promise<Response> {
   const requestedType = typeof body.type === "string" ? body.type : "";
   if (!MANAGED_CONTROL_TYPES.has(requestedType)) {
@@ -255,9 +263,10 @@ async function handleManagedControl(
       mimeType: img.mimeType as string,
     }));
   }
-  if (!existing?.isAlive()) {
+  const live = liveRuntime?.isAlive() === true;
+  if (!live && !MANAGED_RUNTIME_START_TYPES.has(requestedType)) {
     return NextResponse.json({
-      error: "Reader runtime is not live; managed control will not wake or rehydrate it",
+      error: `Reader has no running runtime for this session, so ${requestedType} has nothing to act on; prompt, continue, steer, follow_up and initialize_runtime start it like opening the session in the UI`,
       code: "runtime_not_live",
       accepted: false,
       runtimeStartAttempted: false,
@@ -269,11 +278,57 @@ async function handleManagedControl(
   if (body.deviceId !== undefined && body.deviceId !== localDeviceId) {
     return NextResponse.json({ error: "deviceId does not match this Reader host", code: "device_mismatch", accepted: false }, { status: 409 });
   }
-  if (body.cwd !== undefined && (typeof body.cwd !== "string" || !samePath(body.cwd, existing.cwd))) {
+  if (liveRuntime && live && body.cwd !== undefined && (typeof body.cwd !== "string" || !samePath(body.cwd, liveRuntime.cwd))) {
     return NextResponse.json({ error: "cwd does not match the live Reader runtime", code: "cwd_mismatch", accepted: false }, { status: 409 });
   }
 
   try {
+    let runtime = liveRuntime;
+    if (!live) {
+      // Same as opening a persisted session in the UI: the runtime is started
+      // from the persisted session. A dry-run only reports that it would be.
+      if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
+        return NextResponse.json({ code: "invalid_dry_run", accepted: false, writeSideEffects: false }, { status: 400 });
+      }
+      if (body.dryRun !== false) {
+        if (!(await resolveSessionPath(sessionId))) return sessionMissingResponse();
+        return NextResponse.json({
+          success: true,
+          accepted: false,
+          outcome: "dry_run",
+          sideEffect: "none",
+          target: { deviceId: localDeviceId, sessionId },
+          runtimeLive: false,
+          wouldStartRuntime: true,
+          runtimeStartAttempted: false,
+          writeSideEffects: false,
+        });
+      }
+      // Never start a runtime for a write that would be refused for lack of
+      // confirmation, reason or idempotency key.
+      const startAuthorization = managedWriteAuthorization(body);
+      if ("response" in startAuthorization) return startAuthorization.response;
+      const filePath = await resolveSessionPath(sessionId);
+      if (!filePath) return sessionMissingResponse();
+      try {
+        runtime = (await startRpcSession(sessionId, filePath, undefined)).session;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        return NextResponse.json({
+          error: redactLiveValue(error instanceof Error ? error.message : String(error)),
+          code: ["session_runtime_owned", "session_archived"].includes(code) ? code : "runtime_start_failed",
+          accepted: false,
+          runtimeStartAttempted: true,
+          writeSideEffects: "unknown",
+          ...(error && typeof error === "object" && "owner" in error ? { owner: error.owner } : {}),
+        }, { status: ["session_runtime_owned", "session_archived"].includes(code) ? 409 : 500 });
+      }
+      if (body.cwd !== undefined && (typeof body.cwd !== "string" || !samePath(body.cwd, runtime.cwd))) {
+        return NextResponse.json({ error: "cwd does not match the Reader runtime", code: "cwd_mismatch", accepted: false, runtimeStartAttempted: true }, { status: 409 });
+      }
+    }
+    if (!runtime) throw new Error("Reader runtime is unavailable");
+    const existing = runtime;
     await assertRpcSessionRuntimeBinding(existing);
     const identity = existing.getLiveRuntimeIdentity();
     const expectedBootId = optionalBoundedControlText(body.expectedBootId, "expectedBootId", 128);
@@ -334,15 +389,9 @@ async function handleManagedControl(
         writeSideEffects: false,
       });
     }
-    if (body.confirm !== true) {
-      return NextResponse.json({ error: "confirm=true is required for a managed write", code: "confirmation_required", accepted: false }, { status: 403 });
-    }
-    const confirmationReason = optionalBoundedControlText(body.confirmationReason, "confirmationReason", 500);
-    if (!confirmationReason || !confirmationReason.trim()) {
-      return NextResponse.json({ error: "confirmationReason is required for a managed write", code: "confirmation_reason_required", accepted: false }, { status: 400 });
-    }
-    const idempotencyKey = validateControlIdempotencyKey(body.idempotencyKey);
-    const clientRequestFingerprint = validateControlFingerprint(body.requestFingerprint);
+    const authorization = managedWriteAuthorization(body);
+    if ("response" in authorization) return authorization.response;
+    const { confirmationReason, idempotencyKey, clientRequestFingerprint } = authorization;
     const operation = requestedType === "continue" ? "prompt" : requestedType === "stop" ? "abort" : requestedType;
     const commandFingerprint: Record<string, unknown> = { ...body, type: operation };
     for (const key of [
@@ -391,7 +440,7 @@ async function handleManagedControl(
     const receipt = reserved.receipt;
     // Popup answers resolve an existing UI request; they do not enter the model
     // admission queue. Their result and terminal receipt are owned below.
-    if (operation !== "clear_queue" && operation !== "answer_question" && !setting) existing.bindControlReceipt(receipt.receiptId, operation, { bootId: expectedBootId, revision: expectedRevision });
+    if (operation !== "clear_queue" && operation !== "initialize_runtime" && operation !== "answer_question" && !setting) existing.bindControlReceipt(receipt.receiptId, operation, { bootId: expectedBootId, revision: expectedRevision });
     let commandAcknowledged = false;
     try {
       let command: Record<string, unknown>;
@@ -422,13 +471,17 @@ async function handleManagedControl(
       command.readerControlReceiptId = receipt.receiptId;
       command.readerControlExpectedBootId = expectedBootId;
       command.readerControlExpectedRevision = expectedRevision;
-      const result = setting
+      // initialize_runtime only makes the runtime exist (started above for a
+      // persisted session) and reports its identity; it sends no command.
+      const result = operation === "initialize_runtime"
+        ? await initializeManagedRuntime(existing)
+        : setting
         ? await existing.sendManagedSetting(command, { bootId: expectedBootId!, revision: expectedRevision! })
         : await existing.send(command);
       commandAcknowledged = true;
       const safeResult = redactLiveValue(result);
       let updatedReceipt: Awaited<ReturnType<typeof updateControlReceipt>> = null;
-      if (operation === "clear_queue" || operation === "answer_question" || setting) {
+      if (operation === "clear_queue" || operation === "initialize_runtime" || operation === "answer_question" || setting) {
         updatedReceipt = await updateControlReceipt(receipt.receiptId, {
           outcome: "completed",
           completedAt: new Date().toISOString(),
@@ -448,7 +501,7 @@ async function handleManagedControl(
       // agent_end/prompt lifecycle can record aborted + targetStopped=true;
       // updateControlReceipt preserves that terminal fact if it raced us.
       if (!updatedReceipt) throw new Error("Reserved control receipt disappeared after acknowledgement");
-      return NextResponse.json({ success: true, accepted: true, outcome: operation === "clear_queue" || setting ? updatedReceipt.outcome : "accepted", data: safeResult, receipt: publicControlReceipt(updatedReceipt), runtimeStartAttempted: false, writeSideEffects: true });
+      return NextResponse.json({ success: true, accepted: true, outcome: operation === "clear_queue" || operation === "initialize_runtime" || setting ? updatedReceipt.outcome : "accepted", data: safeResult, receipt: publicControlReceipt(updatedReceipt), runtimeStartAttempted: !live, writeSideEffects: true });
     } catch (error) {
       // A failed admission must not block later queue mutations indefinitely.
       const message = String(redactLiveValue(error instanceof Error ? error.message : String(error)));
@@ -492,6 +545,40 @@ async function handleManagedControl(
   } catch (error) {
     return NextResponse.json({ error: redactLiveValue(error instanceof Error ? error.message : String(error)), code: "managed_control_rejected", accepted: false }, { status: 400 });
   }
+}
+
+function sessionMissingResponse(): Response {
+  return NextResponse.json({
+    error: "Session not found",
+    code: "session_missing",
+    reason: "session_missing",
+    accepted: false,
+    runtimeStartAttempted: false,
+    writeSideEffects: false,
+  }, { status: 404 });
+}
+
+async function initializeManagedRuntime(runtime: NonNullable<ReturnType<typeof getRpcSession>>) {
+  await runtime.waitUntilReady?.();
+  const identity = runtime.getLiveRuntimeIdentity();
+  const queue = runtime.getQueueIdentity();
+  return { initialized: true, bootId: identity.bootId, revision: identity.revision, queueRevision: queue.revision, queueCounts: queue.counts };
+}
+
+/** The explicit-intent fields every real managed write must carry. */
+function managedWriteAuthorization(body: Record<string, unknown>):
+  | { response: Response }
+  | { confirmationReason: string; idempotencyKey: string; clientRequestFingerprint: string | undefined } {
+  if (body.confirm !== true) {
+    return { response: NextResponse.json({ error: "confirm=true is required for a managed write", code: "confirmation_required", accepted: false }, { status: 403 }) };
+  }
+  const confirmationReason = optionalBoundedControlText(body.confirmationReason, "confirmationReason", 500);
+  if (!confirmationReason || !confirmationReason.trim()) {
+    return { response: NextResponse.json({ error: "confirmationReason is required for a managed write", code: "confirmation_reason_required", accepted: false }, { status: 400 }) };
+  }
+  const idempotencyKey = validateControlIdempotencyKey(body.idempotencyKey);
+  const clientRequestFingerprint = validateControlFingerprint(body.requestFingerprint);
+  return { confirmationReason, idempotencyKey, clientRequestFingerprint };
 }
 
 function managedReservationResponse(reserved: Awaited<ReturnType<typeof reserveControlReceipt>>): Response {

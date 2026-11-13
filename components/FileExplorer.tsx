@@ -45,7 +45,8 @@ interface FileEntry {
   isDir: boolean;
   size: number;
   modified: string;
-  /** Where a directory link leads when that is outside the browsable roots. */
+  isSymlink?: boolean;
+  /** Link approval returned by older peer versions. */
   outsideLinkTarget?: string;
   /** That target contains the project or the home folder. */
   outsideLinkEncloses?: boolean;
@@ -58,6 +59,7 @@ interface FileNode {
   size: number;
   children?: FileNode[];
   loaded?: boolean;
+  isSymlink?: boolean;
   outsideLinkTarget?: string;
   outsideLinkEncloses?: boolean;
 }
@@ -85,6 +87,8 @@ interface Props {
   changesCollapsed: boolean;
   /** Eye-button state: true while any hiding rule is active (default). */
   onHiddenChange?: (hiddenActive: boolean) => void;
+  /** Filter settings panel open state. */
+  onFilterSettingsOpenChange?: (open: boolean) => void;
   /** Shares the loaded project filter with search and composer callers. */
   onFilterChange?: (filter: ExplorerFilterSettings) => void;
 }
@@ -95,6 +99,8 @@ export interface FileExplorerHandle {
   openUploadPicker: (directory?: string) => void;
   openCreate: (kind: CreateKind, directory?: string) => void;
   openFilterSettings: () => void;
+  toggleFilterSettings: () => void;
+  closeFilterSettings: () => void;
   navigateFile: (direction: FileNavigationDirection) => Promise<boolean>;
   expandToPath: (targetDir: string) => void;
   /** Eye button: reveal/restore all hidden entries (see impl). */
@@ -246,6 +252,7 @@ async function fetchEntries(dirPath: string, filter: ExplorerFilterSettings, pee
     size: e.size,
     children: e.isDir ? [] : undefined,
     loaded: !e.isDir,
+    isSymlink: e.isSymlink,
     outsideLinkTarget: e.outsideLinkTarget,
     outsideLinkEncloses: e.outsideLinkEncloses,
   }));
@@ -878,7 +885,7 @@ export function TreeNode({
           gap: 4,
           paddingLeft: confirmingDelete ? 8 : 8 + depth * 14,
           paddingRight: 8,
-          height: 24,
+          height: "var(--file-tree-row-height)",
           cursor: confirmingDelete ? "default" : "pointer",
           background: (typeof isDropTarget !== "undefined" && isDropTarget) ? "color-mix(in srgb, var(--accent) 16%, transparent)" : confirmingDelete ? "rgba(239,68,68,0.08)" : located ? "rgba(37,99,235,0.16)" : hovered ? "var(--bg-hover)" : "transparent",
           boxShadow: confirmingDelete ? "inset 3px 0 0 #ef4444" : located ? "inset 3px 0 0 #3b82f6, 0 0 0 1px rgba(59,130,246,0.28), 0 0 8px rgba(59,130,246,0.18)" : undefined,
@@ -925,7 +932,7 @@ export function TreeNode({
               title={t("files.deleteConfirm", { name: node.name })}
               aria-label={t("files.deleteConfirm", { name: node.name })}
               onClick={(event) => { event.stopPropagation(); confirmingDelete.onConfirm(); }}
-              style={{ height: 22, padding: "0 8px", border: 0, borderRadius: 4, background: "#ef4444", color: "#fff", cursor: confirmingDelete.busy ? "wait" : "pointer", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}
+              style={{ height: "calc(var(--file-tree-row-height) - 2px)", padding: "0 8px", border: 0, borderRadius: 4, background: "#ef4444", color: "#fff", cursor: confirmingDelete.busy ? "wait" : "pointer", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}
             >
               {confirmingDelete.busy ? t("files.deleting") : t("sidebar.confirm")}
             </button>
@@ -934,7 +941,7 @@ export function TreeNode({
               autoFocus
               disabled={confirmingDelete.busy}
               onClick={(event) => { event.stopPropagation(); confirmingDelete.onCancel(); }}
-              style={{ height: 22, padding: "0 8px", border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--text-muted)", cursor: confirmingDelete.busy ? "wait" : "pointer", fontSize: 11, whiteSpace: "nowrap" }}
+              style={{ height: "calc(var(--file-tree-row-height) - 2px)", padding: "0 8px", border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--text-muted)", cursor: confirmingDelete.busy ? "wait" : "pointer", fontSize: 11, whiteSpace: "nowrap" }}
             >
               {t("files.cancel")}
             </button>
@@ -991,7 +998,7 @@ export function TreeNode({
             title={t("files.insertPath")}
             style={{
               position: "absolute",
-              right: !node.isDir ? 52 : 28,
+              right: !node.isDir ? "calc(4px + var(--file-tree-action-step) + var(--file-tree-action-step))" : "calc(4px + var(--file-tree-action-step))",
               top: "50%",
               transform: "translateY(-50%)",
               display: "flex",
@@ -999,7 +1006,7 @@ export function TreeNode({
               justifyContent: "center",
               gap: 4,
               padding: "0 8px",
-              height: 20,
+              height: "var(--file-tree-action-size)",
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
               borderRadius: 4,
@@ -1022,7 +1029,7 @@ export function TreeNode({
             title={t("files.download")}
             style={{
               position: "absolute",
-              right: 28,
+              right: "calc(4px + var(--file-tree-action-step))",
               top: "50%",
               transform: "translateY(-50%)",
               display: "flex",
@@ -1030,7 +1037,9 @@ export function TreeNode({
               justifyContent: "center",
               gap: 4,
               padding: "0 5px",
-              height: 20,
+              minWidth: "var(--file-tree-action-size)",
+              height: "var(--file-tree-action-size)",
+              boxSizing: "border-box",
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
               borderRadius: 4,
@@ -1066,8 +1075,8 @@ export function TreeNode({
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              width: 20,
-              height: 20,
+              width: "var(--file-tree-action-size)",
+              height: "var(--file-tree-action-size)",
               padding: 0,
               background: "var(--bg-panel)",
               border: "1px solid var(--border)",
@@ -1370,7 +1379,7 @@ function ChangeRow({
         gap: 6,
         paddingLeft: 10,
         paddingRight: 10,
-        height: 26,
+        height: "var(--file-change-row-height)",
         cursor: "pointer",
         background: hovered ? "var(--bg-hover)" : "transparent",
         borderRadius: 4,
@@ -1429,6 +1438,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onUploadBusyChange,
   changesCollapsed,
   onHiddenChange,
+  onFilterSettingsOpenChange,
   onFilterChange,
 }, ref) {
   const { t, locale } = useI18n();
@@ -1531,6 +1541,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [filterReady, setFilterReady] = useState(false);
   const [filterScope, setFilterScope] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsOpenRef = useRef(settingsOpen);
+  settingsOpenRef.current = settingsOpen;
   const [draftCustomText, setDraftCustomText] = useState("");
   const [fileDragActive, setFileDragActive] = useState(false);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
@@ -1551,6 +1563,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   useEffect(() => {
     onHiddenChange?.(hiddenActive);
   }, [hiddenActive, onHiddenChange]);
+
+  useEffect(() => {
+    onFilterSettingsOpenChange?.(settingsOpen);
+  }, [onFilterSettingsOpenChange, settingsOpen]);
 
   useEffect(() => {
     onFilterChange?.(filter);
@@ -1642,6 +1658,39 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     }).catch(() => { /* keep local state; next load re-reads the file */ });
     setTreeRefreshKey((k) => k + 1);
   }, [api, cwd]);
+
+  const closeFilterSettings = useCallback(() => {
+    const nextCustomNames = parseCustomNamesText(draftCustomText);
+    const hasCustomChanged = JSON.stringify(nextCustomNames) !== JSON.stringify(filter.customNames);
+    if (hasCustomChanged) {
+      applyFilter({ ...filter, customNames: nextCustomNames });
+    }
+    setSettingsOpen(false);
+  }, [applyFilter, draftCustomText, filter]);
+
+  const openFilterSettings = useCallback(() => {
+    setDraftCustomText(customNamesToText(filter.customNames));
+    setSettingsOpen(true);
+  }, [filter.customNames]);
+
+  const toggleFilterSettings = useCallback(() => {
+    if (settingsOpenRef.current) {
+      closeFilterSettings();
+    } else {
+      openFilterSettings();
+    }
+  }, [closeFilterSettings, openFilterSettings]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeFilterSettings();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [closeFilterSettings, settingsOpen]);
 
   const handleRequestDelete = useCallback((node: FileNode) => {
     if (deleteRequestRef.current || currentWorkspaceRef.current.cwd !== cwd || currentWorkspaceRef.current.peer !== remotePeer) return;
@@ -1954,7 +2003,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const findFirstFile = useCallback(async function findFirstFileIn(nodes: FileNode[]): Promise<FileNode | null> {
     for (const node of nodes) {
       if (!node.isDir) return node;
-      if (node.outsideLinkTarget) continue;
+      if (node.outsideLinkTarget || node.isSymlink) continue;
       const children = await ensureDirectoryChildren(node);
       const file = await findFirstFileIn(children);
       if (file) return file;
@@ -1979,7 +2028,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           onOpenFile(node.fullPath, node.name, { reuseActiveTab: true });
           return true;
         }
-        if (!node.outsideLinkTarget) {
+        if (!node.outsideLinkTarget && !node.isSymlink) {
           const file = await findFirstFile([node]);
           if (file) {
             locateFile(file.fullPath);
@@ -2169,10 +2218,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     openCreate(kind, directory = cwd) {
       requestCreate(kind, directory);
     },
-    openFilterSettings() {
-      setDraftCustomText(customNamesToText(filter.customNames));
-      setSettingsOpen(true);
-    },
+    openFilterSettings,
+    toggleFilterSettings,
+    closeFilterSettings,
     /** Eye button: one click shows every hidden entry (dotfiles, custom names,
      *  folders, extensions) without writing to the persisted per-project file
      *  (config survives in the file and is restored on the second click). */
@@ -2192,7 +2240,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     locateFile,
   // ponytail: settings edits while the eye-override is active POST partial config;
   // the next eye click restores the snapshot (and the persisted file with it).
-  }), [applyFilter, cwd, expandPath, filter, hiddenActive, locateFile, navigateFile, requestCreate, requestUpload]);
+  }), [applyFilter, closeFilterSettings, cwd, expandPath, filter, hiddenActive, locateFile, navigateFile, openFilterSettings, requestCreate, requestUpload, toggleFilterSettings]);
 
   useEffect(() => {
     onUploadBusyChange?.(uploadBusy);
@@ -2207,6 +2255,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
     // Reset workspace-derived UI when cwd or owning peer changes, not on refreshKey bumps.
     if (workspaceChanged) {
+      setSettingsOpen(false);
       setRoots([]);
       setLoading(true);
       setError(null);
@@ -2665,7 +2714,15 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         <div style={{ padding: "10px 10px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{t("explorerFilter.title")}</div>
-            <button type="button" onClick={() => setSettingsOpen(false)} style={{ border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 12 }}>{t("settings.saveAndClose")}</button>
+            <button
+              type="button"
+              onClick={closeFilterSettings}
+              style={{ border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 12 }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
+            >
+              {t("settings.saveAndClose")}
+            </button>
           </div>
           <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 6 }}>{t("files.sortBy")}</div>
           <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
@@ -2769,7 +2826,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={() => { setDraftCustomText(""); applyFilter(DEFAULT_EXPLORER_FILTER); }} style={{ height: 28, padding: "0 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>{t("explorerFilter.restoreDefaults")}</button>
-            <button type="button" onClick={() => { applyFilter({ ...filter, customNames: parseCustomNamesText(draftCustomText) }); setSettingsOpen(false); }} style={{ height: 28, padding: "0 10px", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 11 }}>{t("explorerFilter.done")}</button>
+            <button type="button" onClick={closeFilterSettings} style={{ height: 28, padding: "0 10px", borderRadius: 6, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 11 }}>{t("explorerFilter.done")}</button>
           </div>
           <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("explorerFilter.gitIgnoredHint")}</div>
         </div>

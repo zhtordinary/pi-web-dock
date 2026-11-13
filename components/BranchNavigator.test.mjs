@@ -137,7 +137,7 @@ test("findLatestLeafId falls back to timeline order for equal or invalid timesta
 
 // Regression cases introduced by upstream v0.10.0, retained with Reader cases.
 
-const { BranchNavigator, buildActivePath, hasSessionBranches } = await jiti.import("./BranchNavigator.tsx");
+const { BranchNavigator, BranchNavigatorPanel, buildActivePath, hasSessionBranches } = await jiti.import("./BranchNavigator.tsx");
 
 const React = await jiti.import("react");
 
@@ -148,15 +148,15 @@ const { I18nProvider } = await jiti.import("@/hooks/useI18n.tsx");
 const { enLocale } = await jiti.import("@/lib/i18n/messages/en.ts");
 
 
-test("renders the inline branch panel through document.body", () => {
-  const inlineStart = branchNavigatorSource.indexOf("if (inline) {");
-  const inlineEnd = branchNavigatorSource.indexOf("\n  return (", inlineStart);
-  assert.ok(inlineStart >= 0 && inlineEnd > inlineStart);
-  const inlineSource = branchNavigatorSource.slice(inlineStart, inlineEnd);
-  assert.match(branchNavigatorSource, /import \{ createPortal \} from "react-dom";/);
-  assert.match(inlineSource, /typeof document !== "undefined" && createPortal\(/);
-  assert.match(inlineSource, /position: "fixed"/);
-  assert.match(inlineSource, /document\.body/);
+test("inline branch trigger leaves the panel to the shared top-panel host", () => {
+  assert.doesNotMatch(branchNavigatorSource, /createPortal/);
+  assert.match(branchNavigatorSource, /export function BranchNavigatorPanel/);
+  assert.match(branchNavigatorSource, /maxHeight: "min\(600px, 75dvh\)"/);
+  assert.match(branchNavigatorSource, /overflow: "auto"/);
+  assert.doesNotMatch(branchNavigatorSource, /height: "min\(600px, 75dvh\)"/);
+  assert.doesNotMatch(branchNavigatorSource, /minHeight: 220/);
+  assert.match(branchNavigatorSource, /aria-haspopup=\"dialog\"/);
+  assert.equal(typeof BranchNavigatorPanel, "function");
 });
 
 test("hasSessionBranches distinguishes linear sessions from branched sessions", () => {

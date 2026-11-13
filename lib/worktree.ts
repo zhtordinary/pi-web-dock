@@ -3,7 +3,6 @@ import { existsSync, lstatSync, mkdirSync, realpathSync } from "fs";
 import { stat as statAsync } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
-import { allowFileRoot } from "./allowed-roots";
 import { samePath, toNativePath } from "./paths";
 import { getGitRemoteUrls } from "./git-changes";
 import { selectGitHubRepository } from "./git-github";
@@ -712,9 +711,25 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
     throw new Error(extractGitError(error));
   }
 
-  allowFileRoot(worktreePath);
   invalidateProjectCache();
   return { path: worktreePath, branch: trimmed };
+}
+
+/** Capture a linked worktree's owning checkout before its directory is moved. */
+export async function linkedWorktreeForTrash(path: string): Promise<{ cwd: string; path: string } | null> {
+  const project = await resolveProject(path);
+  if (!project.isWorktree || !project.isTopLevel) return null;
+  const worktrees = await listWorktrees(path);
+  const target = findWorktreeByPath(worktrees, realPathOrSelf(path));
+  const main = worktrees.find((item) => item.isMain);
+  return target && !target.isMain && main ? { cwd: main.path, path: target.path } : null;
+}
+
+/** Remove only the captured Git registration after its directory reached the trash. */
+export async function unregisterTrashedWorktree(target: { cwd: string; path: string }): Promise<void> {
+  if (lstatSync(target.path, { throwIfNoEntry: false })) throw new Error("Worktree path was recreated; Git registration was kept");
+  await git(target.cwd, ["worktree", "remove", "--", target.path]);
+  invalidateProjectCache();
 }
 
 export async function removeWorktree(cwd: string, worktreePath: string, force = false): Promise<void> {

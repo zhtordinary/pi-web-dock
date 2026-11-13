@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { copyFile, mkdir, mkdtemp, readFile, realpath, symlink, utimes, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-
-const require = createRequire(import.meta.url);
+import { currentPiPackage } from "./current-pi-package.mjs";
 const fixtureRoot = resolve(new URL("../test-fixtures/shared-pricing/", import.meta.url).pathname);
 const ENV_KEYS = ["HOME", "XDG_CACHE_HOME", "PI_CONVERSATION_COST_SCRIPT", "PI_GENAI_PRICES_CLI", "PI_GENAI_PRICES_NODE", "PI_CODING_AGENT_DIR"];
 
@@ -51,16 +49,7 @@ export async function createSealedPublicInputEnvironment(label = "test") {
     scriptPath: process.env.PI_CONVERSATION_COST_SCRIPT,
     cliPath: process.env.PI_GENAI_PRICES_CLI,
     async linkInstalledPiSubagents(targetAgentDir = agentDir) {
-      const packageEntry = require.resolve("pi-subagents");
-      let packageRoot = dirname(packageEntry);
-      while (packageRoot !== dirname(packageRoot)) {
-        try {
-          const metadata = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
-          if (metadata.name === "pi-subagents") break;
-        } catch {}
-        packageRoot = dirname(packageRoot);
-      }
-      assert.equal(JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")).version, "0.74.0");
+      const { packageRoot } = currentPiPackage("pi-subagents");
       const packageDir = join(targetAgentDir, "npm", "node_modules");
       await mkdir(packageDir, { recursive: true });
       const target = join(packageDir, "pi-subagents");
@@ -78,23 +67,15 @@ export async function createSealedPublicInputEnvironment(label = "test") {
   };
 }
 
-export async function loadPinnedNativeDiscovery() {
-  const packageEntry = require.resolve("pi-subagents");
-  let packageRoot = dirname(packageEntry);
-  while (packageRoot !== dirname(packageRoot)) {
-    try {
-      const metadata = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
-      if (metadata.name === "pi-subagents") break;
-    } catch {}
-    packageRoot = dirname(packageRoot);
-  }
-  assert.equal(JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")).version, "0.74.0");
-  const nativePath = join(packageRoot, "src/agents/agents.js");
-  assert.equal(await sha256(nativePath), "064427925d9ef53f985f00452d4e6dfb02ff3906950ee4752f5380489c41e895");
+export async function loadCurrentNativeDiscovery() {
+  const snapshot = currentPiPackage("pi-subagents");
+  const nativePath = join(snapshot.packageRoot, "src/agents/agents.js");
+  const fingerprint = await sha256(nativePath);
   const native = await import(pathToFileURL(nativePath).href);
   assert.equal(typeof native.discoverAgents, "function");
   assert.equal(typeof native.clearAgentDiscoveryCache, "function");
-  return { native, packageRoot, nativePath, packageVersion: "0.74.0" };
+  console.log(`Current ${snapshot.name}@${snapshot.version}: native discovery sha256=${fingerprint}`);
+  return { native, ...snapshot, nativePath, fingerprint };
 }
 
 export { fixtureRoot };

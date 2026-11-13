@@ -44,8 +44,8 @@ try {
   }
   browser = await chromium.launch({ headless: true });
   const failures = [], screenshots = [], writes = [];
-  for (const width of [1280, 641, 640, 390]) {
-    const context = await browser.newContext({ viewport: { width, height: 900 } });
+  for (const width of [1280, 768, 641, 640, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: 900 }, locale: "zh-CN" });
     const page = await context.newPage(); page.setDefaultTimeout(30000);
     let suggestion = null;
     const state = () => ({ isStreaming: false, isPromptRunning: false, autoCompactionEnabled: true,
@@ -112,11 +112,13 @@ try {
           await textarea.fill("继续"); await textarea.press(key);
           assert.equal(await textarea.inputValue(), suggestion, `${width}: ${key} accepts the suggestion`);
         }
-        if (width === 390) {
+        if ([768, 390].includes(width)) {
           await textarea.fill("");
           await textarea.focus();
           await page.keyboard.insertText(" ");
-          assert.equal(await textarea.inputValue(), suggestion, "mobile insertText space accepts the suggestion without keydown");
+          assert.equal(await textarea.inputValue(), suggestion, "tablet/mobile insertText space accepts the suggestion without keydown");
+        }
+        if (width === 390) {
           await textarea.fill("继续");
           await page.keyboard.insertText(" ");
           assert.equal(await textarea.inputValue(), suggestion, "mobile space accepts a matching prefix");
@@ -141,11 +143,15 @@ try {
           const visibleText = await page.locator("body").innerText();
           assert.doesNotMatch(visibleText, /用量待对账/, "suggester unknown usage stays out of the user-facing cost view");
           const costPanel = page.locator(".session-info-popover");
+          const pluginRow = costPanel.getByRole("button", { name: "插件费用", exact: true });
           const costText = await costPanel.innerText();
           assert.doesNotMatch(costText, /已记录|已記錄|Recorded/);
           assert.doesNotMatch(costText, /≥\$/, "only suggester unknown usage stays out of the pending lower-bound display");
           assert.match(costText, /父会话费用/);
-          assert.match(costText, /pi-prompt-suggester 费用/);
+          assert.match(await pluginRow.locator("..").innerText(), /\$1\.2300/);
+          assert.match(await pluginRow.getAttribute("title"), /实际费用可能更高/);
+          await pluginRow.click();
+          assert.match(await costPanel.innerText(), /pi-prompt-suggester 费用/);
           screenshots.push({ width, kind: "cost", png: (await costPanel.screenshot()).toString("base64") });
           const mixedCost = { ...quietCost, pendingUsageCount: 2 };
           costBody = { ...mixedCost, totalCost: mixedCost, parentCost: mixedCost,
@@ -154,10 +160,26 @@ try {
           await stats.waitFor({ state: "visible" });
           await page.waitForFunction(() => document.querySelector('button[aria-label="会话信息"]')?.title.includes("1 条用量待对账"));
           await stats.click();
-          const mixedText = await page.locator("body").innerText();
+          assert.match(await pluginRow.locator("..").innerText(), /≥\$/, "other pending usage keeps the plugin lower bound");
+          await pluginRow.click();
+          const mixedText = await costPanel.innerText();
           assert.match(mixedText, /1 条用量待对账/, "other extensions retain their pending-usage warning");
-          assert.match(mixedText, /≥\$/, "other pending usage retains the lower-bound amount");
           assert.doesNotMatch(mixedText, /2 条用量待对账/);
+          const otherUnavailable = { ...quietCost, amount: null, status: "unavailable", pendingUsageCount: 0, pendingUsageModels: [] };
+          costBody = { ...quietCost, totalCost: quietCost, parentCost: quietCost,
+            extensionCosts: [{ ...quietCost, id: "pi-prompt-suggester" }, { ...otherUnavailable, id: "fixture-extension" }] };
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await stats.waitFor({ state: "visible" });
+          await page.waitForFunction(() => document.querySelector('button[aria-label="会话信息"]')?.textContent?.includes("≥$"));
+          await stats.click();
+          assert.match(await pluginRow.locator("..").innerText(), /≥\$/, "an unavailable unrelated extension keeps the plugin lower bound");
+          costBody = { ...quietCost, totalCost: quietCost, parentCost: quietCost, recapCost: otherUnavailable,
+            extensionCosts: [{ ...quietCost, id: "pi-prompt-suggester" }] };
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await stats.waitFor({ state: "visible" });
+          await page.waitForFunction(() => document.querySelector('button[aria-label="会话信息"]')?.textContent?.includes("$1.23"));
+          await stats.click();
+          assert.match(await pluginRow.locator("..").innerText(), /≥\$/, "an unavailable recap keeps the plugin lower bound");
           const unknownOnly = { ...quietCost, amount: null, status: "unavailable" };
           costBody = { ...unknownOnly, totalCost: unknownOnly, parentCost: unknownOnly,
             extensionCosts: [{ ...unknownOnly, id: "pi-prompt-suggester" }] };
@@ -166,6 +188,10 @@ try {
           await page.waitForFunction(() => document.querySelector('button[aria-label="会话信息"]')?.textContent?.includes("—"));
           assert.doesNotMatch(await stats.innerText(), /已记录|已記錄|Recorded/);
           assert.doesNotMatch(await stats.innerText(), /\$0/, "unknown-only usage is not presented as free");
+          await stats.click();
+          const unknownPluginText = await pluginRow.locator("..").innerText();
+          assert.match(unknownPluginText, /—/, "unknown-only plugin cost remains unknown");
+          assert.doesNotMatch(unknownPluginText, /\$0/, "unknown-only plugin cost is not presented as free");
         }
       }
     }

@@ -237,10 +237,6 @@ export function useContinueController({
     const errText = last.msg.errorMessage ?? null;
 
     if (last.kind === "overflow") {
-      if (!flowActiveRef.current) {
-        setUi({ kind: "awaiting", errorText: errText });
-        return;
-      }
       if (compactedKeyRef.current !== key) {
         compactedKeyRef.current = key;
         optsRef.current.onCompact();

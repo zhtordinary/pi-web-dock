@@ -1,7 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { ChevronDown, ChevronUp, CornerDownLeft, X, GitFork, Trash2 } from "lucide-react";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine, stripAnsi, TUI_CURSOR_MARKER } from "@/lib/ansi";
@@ -22,6 +22,7 @@ import { buildActivePath, findLatestLeafId, formatSideBranchTitle } from "./Bran
 import { SIDEKICK_RIGHT_PANEL_TARGET_ID, SidekickDrawer } from "./SidekickDrawer";
 import { flushSideAskPromotions, queueSideAskPromotion } from "@/lib/side-ask-promotion";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { sessionDraftKey } from "@/lib/draft-store";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { NoticeShelf } from "./NoticeShelf";
@@ -33,6 +34,8 @@ import { QuoteAnnotationModal } from "./QuoteAnnotationModal";
 import { TranscriptHighlights, type QuoteHighlight } from "./TranscriptHighlights";
 import { EMBEDDED_QUOTE_ANNOTATION_EVENT, EMBEDDED_QUOTE_ANNOTATION_RESULT_EVENT, EMBEDDED_QUOTE_ANNOTATION_CLOSE_EVENT, EMBEDDED_QUOTE_ANNOTATION_DELETE_EVENT } from "@/lib/embedded-modal";
 import { useAgentSession, type SessionForkResult } from "@/hooks/useAgentSession";
+import { selectHasStreamingContent, selectIsStreaming, selectStreamingMessage, useStreamingSelector } from "@/hooks/useStreamingSelector";
+import type { StreamingStore } from "@/lib/streaming-message";
 import { fetchSessionHistory } from "@/lib/session-history-controller";
 import { readHistoryEditMessage, type HistoryEditIntent } from "@/lib/history-edit-message";
 import { historySearchSegment, type LocatedHistoryMatch } from "@/lib/history-search-segment";
@@ -50,6 +53,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { ImageGenerationCost } from "@/lib/image-generation-cost";
 import type { RuntimeInspection } from "@/lib/runtime-inspection";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { getFileName } from "@/lib/file-paths";
@@ -64,6 +68,7 @@ import {
   isForeignNativeModalOwner,
 } from "@/lib/extension-dialog-keyboard";
 import type { AppUpdateResponse } from "@/lib/api-types";
+import type { WorktreeBindingDraft } from "@/lib/worktree-bindings";
 import type { QuestionAnalysisJobView, QuestionDraftView } from "@/lib/question-analysis-jobs";
 import {
   getMessageRowKey,
@@ -78,6 +83,7 @@ interface Props {
   newSessionCwd: string | null;
   newSessionSubprojectId?: string | null;
   newSessionContextSourceId?: string | null;
+  newSessionWorktreeBinding?: WorktreeBindingDraft | null;
   newSessionPrefill?: string | null;
   newSessionDraftKey: string | null;
   onAgentEnd?: (serverRunId?: string) => void;
@@ -104,6 +110,8 @@ interface Props {
   sessionStatsRefreshRef?: { current: (() => Promise<void>) | null };
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string) => void;
+  /** Optional QA probe for counting production component renders. */
+  renderProbe?: (component: "ChatWindow" | "MessageView" | "StreamingReply", entryId?: string, streaming?: boolean) => void;
   /** Search term to locate inside the loaded conversation (from session search). */
   highlightTerm?: string | null;
   /** Completion sound state + controls, owned by AppShell so tasks finishing in
@@ -590,7 +598,8 @@ function HistorySearchContent({ content, match, label }: { content: HistoryConte
   );
 }
 
-export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionSubprojectId, newSessionContextSourceId, newSessionPrefill, newSessionDraftKey, onAgentEnd, onAgentError, onAttentionNeeded, onSessionCreated, onSessionForked, restoreMessage, onRestoreMessageApplied, modelsRefreshKey, chatInputRef, onChatInputReady, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onRuntimeInspectionChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, sessionStatsRefreshRef, onOpenSettings, onContextUsageChange, onOpenFile, background = false, onSessionReady, highlightTerm = null, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, canPlaySound: canPlaySoundProp = () => false, unlockAudio, remotePeer, deviceName, statusSoundOwner = "chat", suppressStatusSounds = false, sidekickOpen, sidekickRightPanelOpen = false, onToggleSidekick, onCloseSidekickRightPanel, onSidekickCountChange, quoteSelectionEnabled: quoteSelectionEnabledProp, onSelectionToolbarChange }: Props) {
+export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionSubprojectId, newSessionContextSourceId, newSessionWorktreeBinding, newSessionPrefill, newSessionDraftKey, onAgentEnd, onAgentError, onAttentionNeeded, onSessionCreated, onSessionForked, restoreMessage, onRestoreMessageApplied, modelsRefreshKey, chatInputRef, onChatInputReady, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onRuntimeInspectionChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, sessionStatsRefreshRef, onOpenSettings, onContextUsageChange, onOpenFile, renderProbe, background = false, onSessionReady, highlightTerm = null, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, canPlaySound: canPlaySoundProp = () => false, unlockAudio, remotePeer, deviceName, statusSoundOwner = "chat", suppressStatusSounds = false, sidekickOpen, sidekickRightPanelOpen = false, onToggleSidekick, onCloseSidekickRightPanel, onSidekickCountChange, quoteSelectionEnabled: quoteSelectionEnabledProp, onSelectionToolbarChange }: Props) {
+  renderProbe?.("ChatWindow");
   const { t } = useI18n();
   useChatAppearance();
   // Reader: wait/error sounds stay local to the ChatWindow instance (deduped
@@ -669,7 +678,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
   retryDisplayScopeRef.current = retryDisplayScope(session?.id ?? "", remotePeer ?? null);
   const [retryHidden, setRetryHidden] = useState<{ scope: string; ids: Set<string> } | null>(null);
   const {
-    data, activeLeafId, loading, error, history, reader, retrySessionRead, questionAnalysisJobs, questionDraftViews, streamState,
+    data, activeLeafId, loading, error, history, reader, retrySessionRead, questionAnalysisJobs, questionDraftViews, streamingStore,
     systemTools,
     agentRunning, sessionStatePending, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel, fastMode,
     handleFastModeChange,
@@ -679,7 +688,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     messageCosts,
     imageGenerationCosts,
     compactionCosts, compactionContexts,
-    slashCommands, slashCommandsLoading, queuedMessages,
+    slashCommands, slashCommandsLoading, slashCommandsReloadKey, queuedMessages,
     notices, addNotice, setNoticesHovered, dismissNotices, hasUnconfirmedPrompt, extensionDialog, waitingExtensionDialogCount, extensionCustomUi, waitingExtensionCustomUiCount, extensionStatuses, extensionWidgets, editorSuggestion, respondToExtensionUi, sendExtensionCustomInput, closeExtensionCustomUi,
     isAutoModelSelection,
     defaultModel, savedDefaultThinkingLevel, editEntryId, cancelEdit,
@@ -689,7 +698,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef, promptAnchorActive,
     handleSend: handleSessionSend, handleFork, handleNavigate, handleLeafChange: handleSessionLeafChange, handleModelChange, ensureSession,
-    handleEditContent: handleSessionEditContent, handleSetDefaultModel, handleSetDefaultThinkingLevel,
+    handleEditContent: handleSessionEditContent, restoreLegacyHistoryEdit, handleSetDefaultModel, handleSetDefaultThinkingLevel,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleAutoCompactionChange,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -697,7 +706,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     showScrollToBottom, scrollToBottom, scrollToMessage,
     follow, setFollow, viewport,
   } = useAgentSession({
-    session, sessionRunning, background, newSessionCwd, newSessionSubprojectId, newSessionContextSourceId, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAgentError: wrappedOnAgentError, onAttentionNeeded, onSessionCreated, onSessionReady: background ? onSessionReady : undefined, onSessionForked,
+    session, sessionRunning, background, newSessionCwd, newSessionSubprojectId, newSessionContextSourceId, newSessionWorktreeBinding, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAgentError: wrappedOnAgentError, onAttentionNeeded, onSessionCreated, onSessionReady: background ? onSessionReady : undefined, onSessionForked,
     modelsRefreshKey, chatInputRef, onSystemPromptChange, onSystemToolsChange, onRuntimeInspectionChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen, sessionStatsRefreshRef,
     remotePeer, onOpenSettings,
     onRetryContinueStarted: ({ sessionId, peer, entryId }) => {
@@ -709,6 +718,10 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
 
   });
 
+  const composerDraftKey = useMemo(
+    () => session?.id ? sessionDraftKey(session.id, remotePeer) : newSessionDraftKey ?? undefined,
+    [session?.id, remotePeer, newSessionDraftKey],
+  );
   historyControllerRef.current = reader;
   const historyScopeReady = Boolean(history.requestedScope?.sessionId);
   const transcript = history.transcript;
@@ -790,11 +803,13 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
   // steer/follow_up handlers only apply to prompts and compaction.
   const parentPromptBusy = agentRunning || isCompacting;
   const parentAgentBusy = parentPromptBusy || bashRunning;
+  const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
+  const hasStoreStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
   const sessionBusy = Boolean(
     sessionRunning
       || agentRunning
       || bashRunning
-      || streamState.isStreaming
+      || isStreaming
       || isCompacting
   );
   const isTailAborted = useMemo(() => {
@@ -975,18 +990,13 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
         return page.kind === "content" ? page : null;
       }, isCurrent, intent);
       if (!isCurrent()) return;
-      if (intent?.sideBranchAnchor) {
-        if (!chatInputRef?.current?.replaceMessage(original)) {
-          addNotice({ type: "error", message: "The complete message could not be restored; the draft and branch were kept unchanged" });
-          return;
-        }
-        if (await handleCreateSideBranch(intent.sideBranchAnchor, typeof original.content === "string" ? original.content : original.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"), entryId) === false) return;
-      } else if (handleSessionEditContent(original, entryId, resetToRoot)) setActiveSideTabId("main");
-      else addNotice({ type: "error", message: "The complete message could not be restored; the draft and branch were kept unchanged" });
+      if (!handleSessionEditContent(original, entryId, resetToRoot)) {
+        addNotice({ type: "error", message: "The complete message could not be restored; the draft and branch were kept unchanged" });
+      }
     } catch (error) {
       if (isCurrent()) addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
     }
-  }, [addNotice, chatInputRef, handleCreateSideBranch, handleSessionEditContent]);
+  }, [addNotice, handleSessionEditContent]);
 
   const handleBranchLeafChange = useCallback((leafId: string | null) => {
     if (sessionBusy || !session?.id || !leafId) return;
@@ -1552,7 +1562,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
 
 
   // Stable Map identity: `messages` doesn't change during streaming updates
-  // (the streaming message lives in streamState), so memoized MessageViews
+  // (the streaming message lives in streamingStore), so memoized MessageViews
   // skip re-rendering on every message_update event. An inline `new Map()`
   // here used to defeat MessageView's memo() on each streamed chunk.
   const toolResultsMap = useMemo(() => {
@@ -1615,11 +1625,11 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     return { turnUsageByAssistantIndex: result, turnResourcesByAssistantIndex: resources };
   }, [messages, entryIds, messageCosts, sessionBusy, systemTools]);
 
-  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  const isEmptyNew = isNew && messages.length === 0 && !isStreaming && !sessionBusy;
   useScrollbarVisibility(scrollContainerRef, Boolean(session?.id) || !isEmptyNew);
   const projectPath = session?.projectRoot ?? session?.cwd ?? newSessionCwd;
   const projectName = projectPath ? getFileName(projectPath) || projectPath : null;
-  const hasStreamingContent = Boolean(atLiveTail && streamState.streamingMessage?.content.length);
+  const hasStreamingContent = Boolean(atLiveTail && hasStoreStreamingContent);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const streamingMessageRef = useRef<HTMLDivElement | null>(null);
   const promptAnchorSpacerRef = useRef<HTMLDivElement | null>(null);
@@ -1716,9 +1726,10 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     scrollUserMsgToTop,
   ]);
 
-  useLayoutEffect(() => {
+  const updatePromptAnchor = useCallback(() => {
     promptAnchorUpdateRef.current?.();
-  }, [streamState.streamingMessage]);
+  }, []);
+  useLayoutEffect(updatePromptAnchor, [isStreaming, hasStreamingContent, updatePromptAnchor]);
 
   const availableThinkingLevels = displayModelValue
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -2193,12 +2204,14 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
       onRecallQueue={handleRecallQueue}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
+      slashCommandsReloadKey={slashCommandsReloadKey}
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
-      draftKey={session?.id ?? newSessionDraftKey ?? undefined}
+      draftKey={composerDraftKey}
+      onLegacyDraftRecovered={restoreLegacyHistoryEdit}
       cwd={session?.cwd ?? newSessionCwd}
       remotePeer={remotePeer}
     />
@@ -2479,7 +2492,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
                   }
                   // A live assistant owns the current turn's timestamp. During
                   // gaps before its first snapshot, keep the last persisted time.
-                  if (showTimestamp && streamState.isStreaming && hasStreamingContent && streamState.streamingMessage) {
+                  if (showTimestamp && isStreaming && hasStreamingContent) {
                     showTimestamp = false;
                   }
                 }
@@ -2494,6 +2507,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
                   <MessageView
                     key={getMessageRowKey(`${keyPrefix}-view`, occurrenceId(msg) ?? entryIds[idx], idx)}
                     message={msg}
+                    renderProbe={renderProbe}
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
                     cwd={messageCwd}
@@ -2704,7 +2718,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
                       rendered.push(renderMessage(segment.index, {
                         messageOverride: segment.message,
                         writtenFiles,
-                        recoverTruncation: endIdx === messages.length && !sessionBusy && !streamState.isStreaming && !hasAssistantAnswer(segment.message),
+                        recoverTruncation: endIdx === messages.length && !sessionBusy && !isStreaming && !hasAssistantAnswer(segment.message),
                         responseDurationMs,
                         modelWaitPercent: responseDurationMs === undefined ? undefined : (modelWaitPercent ?? null),
                       }));
@@ -2759,7 +2773,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
 
                 idx = endIdx;
               }
-              if (currentActiveSideTab && !hasRenderedBranchDivider && !streamState.isStreaming) {
+              if (currentActiveSideTab && !hasRenderedBranchDivider && !isStreaming) {
                 rendered.push(
                   <div
                     key="branch-divider-pending"
@@ -2810,21 +2824,21 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
                 </>
               );
             })()}
-            {streamState.isStreaming && hasStreamingContent && streamState.streamingMessage && (() => {
-              const streamingMessage = streamState.streamingMessage as AssistantMessage;
-              const split = splitFinalAssistantBlocks(streamingMessage);
-              const searchableMessage = split.processBlocks.length > 0 && split.answerBlocks.length > 0
-                ? withAssistantBlocks(streamingMessage, split.answerBlocks)
-                : streamingMessage;
-              const view = <MessageView message={searchableMessage} isStreaming showTimestamp={true} toolResults={toolResultsMap} modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} sessionId={session?.id ?? sessionIdRef.current ?? undefined} remotePeer={remotePeer} imageGenerationCosts={imageGenerationCosts} />;
-              return (
-                <div ref={streamingMessageRef} data-chat-message-row="true">
-                  {split.processBlocks.length > 0 && split.answerBlocks.length === 0
-                    ? <div data-session-search-exclude="true">{view}</div>
-                    : view}
-                </div>
-              );
-            })()}
+            {isStreaming && hasStreamingContent && (
+              <StreamingReply
+                store={streamingStore}
+                onCommit={updatePromptAnchor}
+                toolResults={toolResultsMap}
+                modelNames={modelNames}
+                cwd={messageCwd}
+                onOpenFile={onOpenFile}
+                sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+                remotePeer={remotePeer}
+                imageGenerationCosts={imageGenerationCosts}
+                messageRef={streamingMessageRef}
+                renderProbe={renderProbe}
+              />
+            )}
 
             {agentRunning && !hasStreamingContent && (agentPhase || isCompacting) && (
               <div className="py-2 text-[13px] text-text-muted">
@@ -2840,6 +2854,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
 
             {pendingBash && (
               <MessageView
+                renderProbe={renderProbe}
                 message={{
                   role: "bashExecution",
                   command: pendingBash.command,
@@ -2864,7 +2879,8 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
             messages={messages}
             entryIds={entryIds}
             scopeKey={`${remotePeer ?? "local"}:${session?.id ?? sessionIdRef.current ?? "draft"}:${activeLeafId ?? "root"}`}
-            streamingMessage={atLiveTail ? streamState.streamingMessage : null}
+            streamingStore={streamingStore}
+            atLiveTail={atLiveTail}
             scrollContainer={scrollContainerRef}
             messageRefs={messageRefs}
             streamingMessageRef={streamingMessageRef}
@@ -3045,6 +3061,63 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     </div>
   );
 }
+
+const StreamingReply = memo(function StreamingReply({
+  store,
+  onCommit,
+  toolResults,
+  modelNames,
+  cwd,
+  onOpenFile,
+  sessionId,
+  remotePeer,
+  imageGenerationCosts,
+  messageRef,
+  renderProbe,
+}: {
+  store: StreamingStore;
+  onCommit: () => void;
+  toolResults: Map<string, ToolResultMessage>;
+  modelNames: Record<string, string>;
+  cwd?: string;
+  onOpenFile?: (filePath: string) => void;
+  sessionId?: string;
+  remotePeer?: string;
+  imageGenerationCosts: readonly ImageGenerationCost[];
+  messageRef: React.RefObject<HTMLDivElement | null>;
+  renderProbe?: (component: "ChatWindow" | "MessageView" | "StreamingReply", entryId?: string, streaming?: boolean) => void;
+}) {
+  renderProbe?.("StreamingReply");
+  const message = useStreamingSelector(store, selectStreamingMessage);
+  useLayoutEffect(onCommit, [message, onCommit]);
+  if (!message) return null;
+  const split = splitFinalAssistantBlocks(message);
+  const searchableMessage = split.processBlocks.length > 0 && split.answerBlocks.length > 0
+    ? withAssistantBlocks(message, split.answerBlocks)
+    : message;
+  const view = (
+    <MessageView
+      message={searchableMessage}
+      renderProbe={renderProbe}
+      isStreaming
+      showTimestamp={true}
+      toolResults={toolResults}
+      modelNames={modelNames}
+      cwd={cwd}
+      onOpenFile={onOpenFile}
+      sessionId={sessionId}
+      remotePeer={remotePeer}
+      imageGenerationCosts={imageGenerationCosts}
+    />
+  );
+  return (
+    <div ref={messageRef} data-chat-message-row="true">
+      {split.processBlocks.length > 0 && split.answerBlocks.length === 0
+        ? <div data-session-search-exclude="true">{view}</div>
+        : view}
+    </div>
+  );
+});
 
 type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 
@@ -3441,7 +3514,7 @@ function ExtensionDialog({
           }}
         >
           <span style={{ fontSize: 11, fontWeight: 650, color: "var(--accent)", flexShrink: 0 }}>
-            {t("chat.extensionPending")}
+            {t("chat.extensionPending")}{request.sideAskRunId ? ` · ${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}` : ""}
           </span>
           <span style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
             {parsedTitle.title}
@@ -3462,7 +3535,7 @@ function ExtensionDialog({
         ref={dialogSurfaceRef}
         role="dialog"
         aria-modal="true"
-        aria-label={parsedTitle.title || request.title}
+        aria-label={`${request.sideAskRunId ? `${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}: ` : ""}${parsedTitle.title || request.title}`}
         className="extension-dialog-surface"
         style={{
           position: "relative",
@@ -3505,7 +3578,7 @@ function ExtensionDialog({
             }}
           >
             <span style={{ fontSize: 12, fontWeight: 650, color: "var(--text-muted)" }}>
-              {t("chat.extensionRequest")}
+              {t("chat.extensionRequest")}{request.sideAskRunId ? ` · ${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}` : ""}
             </span>
             {parsedTitle.badge && (
               <span
@@ -4259,7 +4332,7 @@ function ExtensionCustomPanel({
           />
         )}
         <div className="extension-custom-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
-          <div className="extension-custom-header-title" style={{ minWidth: 0, color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat.extensionPanel")}</div>
+          <div className="extension-custom-header-title" style={{ minWidth: 0, color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat.extensionPanel")}{request.sideAskRunId ? ` · ${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}` : ""}</div>
           <div className="extension-custom-header-actions" style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <ExtensionWaitingCount count={waitingCount} />
             <div role="group" aria-label={t("chat.extensionNavigation")} style={{ display: "flex", alignItems: "center", gap: 4 }}>

@@ -35,6 +35,18 @@ test("floating menus use the viewport height rather than clipping a short option
   assert.match(floatingSource, /overflowY: "auto"/);
 });
 
+test("activity rows share subagent visibility, model titles, and child status projection", () => {
+  assert.match(source, /useSubagentVisibility/);
+  assert.match(source, /filterVisibleSubagentItems/);
+  assert.match(source, /sessionTitle\(item\)/);
+  assert.match(source, /sessionModelLabel\(modelValue\)/);
+  assert.match(source, /title=\{modelValue \?\? modelLabel\}/);
+  assert.match(source, /hasSubagents=\{hasSubagentChildren\(/);
+  assert.match(source, /visibleSubagentParentIds\.has\(item\.session\.id\)/);
+  assert.match(source, /hasSubagentChild\(activityItems \?\? \[\], hit\.id/);
+  assert.match(source, /visibleSearchResults = filterSearchResults[\s\S]*?isVisibleSubagentSession/);
+});
+
 test("keeps panel and activity-sidebar empty states behind data loading", () => {
   assert.equal(
     (source.match(/!activity\.loading && activity\.data && activity\.groups\.length === 0/g) ?? []).length,

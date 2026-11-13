@@ -158,3 +158,32 @@ export function streamReducer(
       return state;
   }
 }
+
+/**
+ * Live assistant state lives outside React so a token update only wakes the
+ * components that subscribe to it. Listeners run synchronously; React batches
+ * updates that arrive before its next commit.
+ */
+export interface StreamingStore {
+  getState(): StreamingState;
+  dispatch(action: StreamAction): void;
+  subscribe(listener: () => void): () => void;
+}
+
+export function createStreamingStore(): StreamingStore {
+  let state = INITIAL_STREAMING_STATE;
+  const listeners = new Set<() => void>();
+  return {
+    getState: () => state,
+    dispatch(action) {
+      const next = streamReducer(state, action);
+      if (next === state) return;
+      state = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}

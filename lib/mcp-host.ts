@@ -426,6 +426,7 @@ class ConnectAttempt {
    * the request, and scripts and `tool_search` wait for their servers.
    */
   readonly declaresTools: boolean;
+  readonly hasDynamicSummary: boolean;
   /**
    * The host let it go (unregistered it, or the session ended): whatever its
    * transports do afterwards is the extension closing them, not news.
@@ -444,6 +445,7 @@ class ConnectAttempt {
   constructor(readonly configKey: string, readonly scope: McpScope, readonly target: StatusTarget, config: McpServerConfig) {
     this.declaresTools = (config.exposure ?? "codemode") === "direct"
       || Object.values(config.toolExposure ?? {}).includes("direct");
+    this.hasDynamicSummary = !config.description?.trim();
   }
 
   markStarted(): void {
@@ -515,6 +517,7 @@ interface DesiredServer {
 /** One load of the host extension; a reload binds a new one. */
 class HostInstance {
   private ctx: ExtensionContext | undefined;
+  private sessionIdentity: { id: string; cwd: string } | undefined;
   private active = false;
   /** Disposed: its session is closing, or a reload replaced it. Nothing it hears afterwards is recorded. */
   private disposed = false;
@@ -547,6 +550,7 @@ class HostInstance {
     pi.on("session_start", (_event, ctx) => {
       if (this.disposed) return;
       this.ctx = ctx;
+      this.sessionIdentity = { id: sessionIdOf(ctx), cwd: ctx.cwd };
       // The built-in MCP extension may be switched off (-builtin:mcp) or replaced by one that
       // registers /mcp (several are named mcp:1, mcp:2, …); such an extension would connect
       // these servers its own way, so the host hands it nothing.
@@ -700,14 +704,14 @@ class HostInstance {
     return synced;
   }
 
-  async prepareForPrompt(signal: AbortSignal, wait: boolean): Promise<void> {
+  async prepareForPrompt(signal: AbortSignal, wait: boolean, summaryNamespaces?: ReadonlySet<string>): Promise<void> {
     this.clearIdle();
     // The wrapper prepares only prompts sent while no run is going, so none is running
     // now; this also recovers from a run whose agent_end never arrived.
     this.runActive = false;
     this.preparing += 1;
     try {
-      await this.waitForServers(signal, wait);
+      await this.waitForServers(signal, wait, summaryNamespaces);
     } finally {
       this.preparing -= 1;
       // Started now in case the prompt starts no run; agent_start stops it if one does.
@@ -715,12 +719,19 @@ class HostInstance {
     }
   }
 
-  private async waitForServers(signal: AbortSignal, wait: boolean): Promise<void> {
+  private async waitForServers(signal: AbortSignal, wait: boolean, summaryNamespaces?: ReadonlySet<string>): Promise<void> {
     const stopped = aborted(signal);
     await Promise.race([this.sync(), stopped]);
     if (signal.aborted || !wait) return;
+    const needsSummary = (name: string) => summaryNamespaces?.has(`mcp__${name.replace(/-/g, "_")}`);
+    if (summaryNamespaces?.size) {
+      for (const entry of this.extensionEntries()) {
+        if (!entry.config.description?.trim() && needsSummary(entry.name)) this.attemptFor(entry);
+      }
+    }
     const connecting = [...this.attempts.values(), ...this.extensionAttempts.values()]
-      .filter((attempt) => attempt.declaresTools && !attempt.settled && !attempt.waited);
+      .filter((attempt) => (attempt.declaresTools || (attempt.hasDynamicSummary && needsSummary(attempt.target.name)))
+        && !attempt.settled && !attempt.waited);
     if (connecting.length === 0) return;
     const deadline = delay(this.options.promptWaitMs);
     const timedOut = await Promise.race([
@@ -839,7 +850,7 @@ class HostInstance {
   private letGoOfAll(): void {
     for (const attempt of this.attempts.values()) this.letGo(attempt);
     for (const attempt of this.extensionAttempts.values()) this.letGo(attempt);
-    if (this.ctx) forgetMcpExtensionServers(sessionIdOf(this.ctx), this.ctx.cwd);
+    if (this.sessionIdentity) forgetMcpExtensionServers(this.sessionIdentity.id, this.sessionIdentity.cwd);
     for (const { target, status } of this.problemReports.values()) forgetMcpStatus(target, target.configKey, status);
     this.problemReports.clear();
   }
@@ -1146,8 +1157,8 @@ export class McpHost {
    * connecting, unless `wait` is false (the built-in `/mcp`, which starts no
    * run but acts on the registered servers; `mcpPromptPreparation()`).
    */
-  prepareForPrompt(signal: AbortSignal, options: { wait?: boolean } = {}): Promise<void> {
-    return this.current?.prepareForPrompt(signal, options.wait ?? true) ?? Promise.resolve();
+  prepareForPrompt(signal: AbortSignal, options: { wait?: boolean; summaryNamespaces?: ReadonlySet<string> } = {}): Promise<void> {
+    return this.current?.prepareForPrompt(signal, options.wait ?? true, options.summaryNamespaces) ?? Promise.resolve();
   }
 
   serverStates(): McpHostServerStatus[] {

@@ -45,8 +45,8 @@ for (const api of ["openai-responses", "openai-completions"]) {
       let executedTools = 0;
       const agent = new Agent({ sessionId: h.manager.getSessionId(),
         initialState: { model, messages: h.manager.buildSessionContext().messages, systemPrompt: "Stable synthetic instructions", tools: [{
-          name: "fixture-tool", description: "Declared but never executable in Side Ask", parameters: { type: "object", properties: {} },
-          execute: async () => { executedTools++; throw new Error("Side Ask must not execute tools"); },
+          name: "fixture-tool", description: "Declared by a fixture host without an execution session", parameters: { type: "object", properties: {} },
+          execute: async () => { executedTools++; throw new Error("This fixture must not execute tools"); },
         }] }, convertToLlm,
         streamFn: (_model, context, options) => {
           const stream = new AssistantMessageEventStream();

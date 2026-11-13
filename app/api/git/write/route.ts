@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { NextRequest, NextResponse } from "next/server";
-import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
+import { isWindowsAbsolutePath } from "@/lib/paths";
 import { GitWriteError, runGitWrite, withGitWriteLock, type GitWriteAction } from "@/lib/git-write";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
@@ -39,10 +39,6 @@ export async function POST(request: NextRequest) {
     }
     if (!action) return NextResponse.json({ error: "Unsupported Git write action" }, { status: 400 });
 
-    const allowedRoots = await getAllowedFileRoots("write");
-    if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
     let stat: fs.Stats;
     try {
       stat = fs.statSync(cwd);

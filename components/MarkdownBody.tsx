@@ -7,7 +7,7 @@ import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } 
 import { fileApiPath } from "@/lib/file-api";
 import { startEmbeddedImagePreview, type EmbeddedImagePreviewLifecycle } from "@/lib/embedded-modal";
 import { useI18n } from "@/hooks/useI18n";
-import { isExternalMarkdownHref, markdownDocumentRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, markdownLiteralUserRemarkPlugins, normalizeDisplayMath, remarkDedupeImages } from "@/lib/markdown";
+import { isExternalMarkdownHref, markdownCustomTextRemarkPlugins, markdownDocumentRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, markdownLiteralUserRemarkPlugins, normalizeDisplayMath, remarkDedupeImages } from "@/lib/markdown";
 import { scrollToMarkdownAnchor } from "@/lib/scroll-to-heading";
 import { copyText } from "@/lib/clipboard";
 import { imageGenerationCostsForFile, type ImageGenerationCost as ImageCost } from "@/lib/image-generation-cost";
@@ -224,14 +224,16 @@ interface MarkdownBodyProps {
   imageGenerationCosts?: readonly ImageCost[];
   /** Render every user-entered line ending as a visible break. */
   keepLineBreaks?: boolean;
+  /** Preserve terminal-style indentation in extension messages. */
+  keepTextLayout?: boolean;
   /** Show user-entered HTML as text rather than interpreting it. */
   literalHtml?: boolean;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, sessionId, remotePeer, onOpenFile, onNavigateLink, dedupeImages, imageGenerationCosts, keepLineBreaks, literalHtml }: MarkdownBodyProps) {
+export function MarkdownBody({ children, className, isStreaming, cwd, sessionId, remotePeer, onOpenFile, onNavigateLink, dedupeImages, imageGenerationCosts, keepLineBreaks, keepTextLayout, literalHtml }: MarkdownBodyProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
-  const baseRemarkPlugins = literalHtml ? markdownLiteralUserRemarkPlugins : keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins;
+  const baseRemarkPlugins = literalHtml ? markdownLiteralUserRemarkPlugins : keepTextLayout ? markdownCustomTextRemarkPlugins : keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins;
   const remarkPlugins = useMemo(
     () => dedupeImages ? [...(baseRemarkPlugins ?? []), remarkDedupeImages] : baseRemarkPlugins,
     [baseRemarkPlugins, dedupeImages],

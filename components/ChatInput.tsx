@@ -1,7 +1,7 @@
 "use client";
 
 import { QueueRecoveryPanel } from "./QueueRecoveryPanel";
-import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
+import React, { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import { ChevronDown, Info, Paperclip, Search, Star, X, Zap } from "lucide-react";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
@@ -10,17 +10,23 @@ import type { SkillsResponse } from "@/lib/api-types";
 import { CUSTOM_PROMPTS_CHANGED_EVENT } from "@/lib/custom-prompt-types";
 import type { CustomPrompt, CustomPromptEditValue } from "@/lib/custom-prompt-types";
 import type { TextContent, UserMessage } from "@/lib/types";
-import type { QuestionAnalysisMode, QuestionAnalysisPromptMetadata, QuestionAnalysisResult, QuestionRewriteResult } from "@/lib/question-analysis";
+import type { QuestionAnalysisMode, QuestionAnalysisPromptMetadata, QuestionRewriteResult } from "@/lib/question-analysis";
 import {
   clearDraft,
+  draftKeyIdentity,
   getDraft,
+  historyDraftKey,
+  legacyHistoryDraftKey,
   mergeRestoredSubmissionDraft,
   mergeRestoredSubmissionText,
   rekeyDraft as rekeyStoredDraft,
   setDraft,
   setRecalledDraft,
   isRecalledDraftDurable,
+  sameDraftKey,
+  type DraftKey,
   type ChatDraftImage,
+  type HistoryEditDraft,
 } from "@/lib/draft-store";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
@@ -52,13 +58,7 @@ import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { apiPathForPeer, fileApiPath } from "@/lib/file-api";
 import { EMBEDDED_SLASH_DETAILS_CLOSE_EVENT, EMBEDDED_SLASH_DETAILS_EVENT, prepareEmbeddedModal } from "@/lib/embedded-modal";
 import { SlashCommandDetailsSurface } from "./SlashCommandDetailsSurface";
-import {
-  COLLAPSED_PROVIDERS_CHANGED_EVENT,
-  COLLAPSED_PROVIDERS_REQUEST_EVENT,
-  COLLAPSED_PROVIDERS_SYNC_EVENT,
-  readCollapsedProviderNames,
-  writeCollapsedProviderNames,
-} from "@/lib/model-visibility-preference";
+import { useHiddenModelProviders } from "@/hooks/useHiddenModelProviders";
 import type { ModelErrorInfo } from "@/lib/models-cache";
 import type { FastModeSelection, FastModeStatus } from "@/lib/fast-mode";
 import { getThinkingChoices, type ThinkingSelection } from "@/lib/thinking-level";
@@ -77,139 +77,16 @@ interface ModelOption {
   name: string;
 }
 
-type DraftAnalysisState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "ready"; result: QuestionAnalysisResult }
-  | { status: "error"; message: string };
+import {
+  createDraftPromptRequestController,
+  resetDraftPromptRequest,
+  stripTrailingTerms,
+  type DraftAnalysisState,
+  type DraftRewriteState,
+} from "./chat-input-draft-prompts";
 
-type DraftRewriteState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "ready"; result: QuestionRewriteResult }
-  | { status: "error"; message: string };
-
-interface DraftPromptRequestControllerOptions {
-  requestIdRef: { current: number };
-  resolveSessionId: () => Promise<string>;
-  send: (sessionId: string, payload: Record<string, unknown>) => Promise<unknown>;
-  setAnalysis: React.Dispatch<React.SetStateAction<DraftAnalysisState>>;
-  setRewrite: React.Dispatch<React.SetStateAction<DraftRewriteState>>;
-  setSte100: React.Dispatch<React.SetStateAction<DraftRewriteState>>;
-  noResultMessage: string;
-  failedMessage: string;
-}
-
-export function resetDraftPromptRequest(
-  requestIdRef: { current: number },
-  setAnalysis: React.Dispatch<React.SetStateAction<DraftAnalysisState>>,
-  setRewrite: React.Dispatch<React.SetStateAction<DraftRewriteState>>,
-  setSte100: React.Dispatch<React.SetStateAction<DraftRewriteState>>,
-): void {
-  requestIdRef.current += 1;
-  setAnalysis({ status: "idle" });
-  setRewrite({ status: "idle" });
-  setSte100({ status: "idle" });
-}
-
-export function createDraftPromptRequestController({
-  requestIdRef,
-  resolveSessionId,
-  send,
-  setAnalysis,
-  setRewrite,
-  setSte100,
-  noResultMessage,
-  failedMessage,
-}: DraftPromptRequestControllerOptions) {
-  const isCurrent = (requestId: number) => requestId === requestIdRef.current;
-  const errorMessage = (error: unknown) => error instanceof Error ? error.message : failedMessage;
-
-  const begin = (kind: "analysis" | "rewrite" | "ste100"): number => {
-    const requestId = ++requestIdRef.current;
-    if (kind === "analysis") {
-      setAnalysis({ status: "loading" });
-      setRewrite({ status: "idle" });
-      setSte100({ status: "idle" });
-    } else if (kind === "rewrite") {
-      setAnalysis((current) => current.status === "loading" ? { status: "idle" } : current);
-      setRewrite({ status: "loading" });
-      setSte100((current) => current.status === "loading" ? { status: "idle" } : current);
-    } else {
-      setAnalysis((current) => current.status === "loading" ? { status: "idle" } : current);
-      setSte100({ status: "loading" });
-      setRewrite((current) => current.status === "loading" ? { status: "idle" } : current);
-    }
-    return requestId;
-  };
-
-  const completeRewrite = async (requestId: number, question: string, terms: string): Promise<void> => {
-    if (!isCurrent(requestId)) return;
-    setRewrite({ status: "loading" });
-    try {
-      const sessionId = await resolveSessionId();
-      if (!isCurrent(requestId)) return;
-      const result = await send(sessionId, { type: "rewrite_question", question, terms }) as QuestionRewriteResult;
-      if (!isCurrent(requestId)) return;
-      if (!result?.text?.trim()) throw new Error(noResultMessage);
-      if (!isCurrent(requestId)) return;
-      setRewrite({ status: "ready", result });
-    } catch (error) {
-      if (!isCurrent(requestId)) return;
-      setRewrite({ status: "error", message: errorMessage(error) });
-    }
-  };
-
-  const runAnalysis = async (mode: QuestionAnalysisMode, question: string): Promise<void> => {
-    const requestId = begin("analysis");
-    try {
-      const sessionId = await resolveSessionId();
-      if (!isCurrent(requestId)) return;
-      const result = await send(sessionId, {
-        type: "analyze_question_draft",
-        question,
-        contextMode: mode,
-      }) as QuestionAnalysisResult;
-      if (!isCurrent(requestId)) return;
-      if (!result?.text?.trim()) throw new Error(noResultMessage);
-      if (!isCurrent(requestId)) return;
-      setAnalysis({ status: "ready", result });
-      if (!isCurrent(requestId)) return;
-      await completeRewrite(requestId, stripTrailingTerms(question, result.text).trim(), result.text);
-    } catch (error) {
-      if (!isCurrent(requestId)) return;
-      setAnalysis({ status: "error", message: errorMessage(error) });
-    }
-  };
-
-  const runRewrite = async (question: string, terms: string): Promise<void> => {
-    const requestId = begin("rewrite");
-    await completeRewrite(requestId, question, terms);
-  };
-
-  const runSte100 = async (question: string): Promise<void> => {
-    const requestId = begin("ste100");
-    try {
-      const sessionId = await resolveSessionId();
-      if (!isCurrent(requestId)) return;
-      const result = await send(sessionId, { type: "rewrite_ste100", question }) as QuestionRewriteResult;
-      if (!isCurrent(requestId)) return;
-      if (!result?.text?.trim()) throw new Error(noResultMessage);
-      if (!isCurrent(requestId)) return;
-      setSte100({ status: "ready", result });
-    } catch (error) {
-      if (!isCurrent(requestId)) return;
-      setSte100({ status: "error", message: errorMessage(error) });
-    }
-  };
-
-  return {
-    reset: () => resetDraftPromptRequest(requestIdRef, setAnalysis, setRewrite, setSte100),
-    runAnalysis,
-    runRewrite,
-    runSte100,
-  };
-}
+export { createDraftPromptRequestController, resetDraftPromptRequest, stripTrailingTerms } from "./chat-input-draft-prompts";
+export type { DraftAnalysisState, DraftRewriteState } from "./chat-input-draft-prompts";
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[], questionAnalysis?: QuestionAnalysisPromptMetadata) => void;
@@ -266,12 +143,14 @@ interface Props {
   onRecallQueue?: () => void;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
+  slashCommandsReloadKey?: number;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
-  draftKey?: string;
+  draftKey?: DraftKey;
+  onLegacyDraftRecovered?: (historyEdit: HistoryEditDraft | null) => void;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
   /** Current session file path — enables the per-session image-generation switch */
@@ -312,8 +191,8 @@ export interface ChatInputHandle {
   isQueuedDraftDurable: (operationId: string) => boolean;
   prependQueuedDraft: (text: string, images: ChatDraftImage[], operationId?: string) => boolean;
   addImages: (files: File[]) => void;
-  rekeyDraft: (previousKey: string, nextKey: string) => void;
-  restoreSubmission: (text: string, images?: ChatDraftImage[], targetDraftKey?: string) => void;
+  rekeyDraft: (previousKey: DraftKey, nextKey: DraftKey) => void;
+  restoreSubmission: (text: string, images?: ChatDraftImage[], targetDraftKey?: DraftKey) => void;
 }
 
 interface ImageGenState {
@@ -393,7 +272,8 @@ function ChatInputSelectTrigger({
         display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
         padding: isMobile ? "0 6px" : "8px 12px",
         width: isMobile ? "auto" : undefined,
-        height: 32,
+        minWidth: isMobile ? 44 : undefined,
+        height: isMobile ? 44 : 32,
         background: open ? "var(--bg-hover)" : "none",
         border: "none",
         borderRadius: 9,
@@ -432,9 +312,10 @@ interface GenOptionSelectProps {
   onChange: (value: string) => void;
   title: string;
   ariaLabel: string;
+  isMobile: boolean;
 }
 
-function GenOptionSelect({ value, options, onChange, title, ariaLabel }: GenOptionSelectProps) {
+function GenOptionSelect({ value, options, onChange, title, ariaLabel, isMobile }: GenOptionSelectProps) {
   const selected = options.find((option) => option.value === value);
   return (
     <ReaderFloatingSelect
@@ -457,7 +338,8 @@ function GenOptionSelect({ value, options, onChange, title, ariaLabel }: GenOpti
           title={title}
           ariaLabel={ariaLabel}
           onToggle={onToggle}
-          style={{ height: 32, padding: "0 2px", gap: 4 }}
+          isMobile={isMobile}
+          style={{ padding: "0 2px", gap: 4 }}
         />
       )}
       renderOption={(option) => (
@@ -522,6 +404,17 @@ function resizeChatInput(textarea: HTMLTextAreaElement, keepCaretVisible = false
   }
 }
 
+/** Recover a browser-dropped paste through the textarea's normal input path. */
+export function replaceTextareaRange(
+  textarea: HTMLTextAreaElement,
+  start: number,
+  end: number,
+  text: string,
+): void {
+  textarea.setRangeText(text, start, end, "end");
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 export function insertAtSelection(
   text: string,
   selectionStart: number,
@@ -567,14 +460,6 @@ export function appendTermsToDraft(draft: string, terms: string): string {
   return `${base}\n${block}`;
 }
 
-export function stripTrailingTerms(draft: string, terms: string): string {
-  const base = draft.trimEnd();
-  const block = terms.trim();
-  if (!block || !base.endsWith(block)) return base;
-  const head = base.slice(0, base.length - block.length);
-  return head ? head.trimEnd() : base;
-}
-
 export function getUpwardMenuMaxHeight(menuBottom: number, visibleTop: number, gap = ANCHORED_MENU_GAP): number {
   return Math.max(0, Math.floor(menuBottom - visibleTop - gap));
 }
@@ -598,8 +483,13 @@ function compareModelOptions(a: ModelOption, b: ModelOption): number {
     || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
 }
 
-export function filterModelOptionsByProvider(options: ModelOption[], hiddenProviders: ReadonlySet<string>): ModelOption[] {
-  return options.filter((option) => !hiddenProviders.has(option.provider));
+export function filterModelOptionsByProvider(
+  options: ModelOption[],
+  hiddenProviders: ReadonlySet<string>,
+  selectedModel?: { provider: string; modelId: string } | null,
+): ModelOption[] {
+  return options.filter((option) => !hiddenProviders.has(option.provider)
+    || (selectedModel?.provider === option.provider && selectedModel.modelId === option.modelId));
 }
 
 export function filterModelOptions(options: ModelOption[], query: string): ModelOption[] {
@@ -863,6 +753,20 @@ export function hasStreamingMessagePayload(value: string, imageCount: number, qu
   return Boolean(value.trim()) || imageCount > 0 || quoteCount > 0;
 }
 
+/**
+ * Attach quote cards to the prompt. A `/skill:name` command takes them as its
+ * argument text — pi splits the skill name at the first space, so a bare
+ * command needs one inserted. Other slash commands and bash mode never carry
+ * them, and their cards stay in the composer.
+ */
+export function withQuoteContext(message: string, quoteMarkdown: string): string {
+  if (!quoteMarkdown) return message;
+  if (/^\/skill:\S*$/.test(message)) return `${message} ${quoteMarkdown}`;
+  if (message.startsWith("/skill:")) return `${message}\n\n${quoteMarkdown}`;
+  if (message.startsWith("/") || message.startsWith("!")) return message;
+  return message ? `${quoteMarkdown}\n\n${message}` : quoteMarkdown;
+}
+
 const SLASH_SOURCES: SlashCommandSource[] = ["customPrompt", "builtin", "skill", "prompt", "extension"];
 
 const SLASH_SOURCE_GROUP_LABEL_KEYS: Record<SlashCommandSource, string> = {
@@ -1002,12 +906,13 @@ function isDormantSkillCommand(command: SlashCommandPaletteItem, dormancy: Recor
 export function buildSlashCommandLayout(
   commands: SlashCommandPaletteItem[],
   dormancy: Record<string, boolean>,
+  query = "",
 ) {
   let index = 0;
   const groups = SLASH_SOURCES
     .map((source) => {
       const sourceCommands = commands.filter((command) => command.source === source);
-      const orderedCommands = source === "skill"
+      const orderedCommands = source === "skill" && !query.trim()
         ? [
             ...sourceCommands.filter((command) => !isDormantSkillCommand(command, dormancy)),
             ...sourceCommands.filter((command) => isDormantSkillCommand(command, dormancy)),
@@ -1026,6 +931,15 @@ export function buildSlashCommandLayout(
   };
 }
 
+export function getSlashGroupBoundaryDownIndex(
+  groups: ReadonlyArray<{ items: ReadonlyArray<{ index: number }> }>,
+  activeIndex: number,
+): number | null {
+  const groupIndex = groups.findIndex((group) => group.items.some((item) => item.index === activeIndex));
+  if (groupIndex < 0 || groups[groupIndex].items.length !== 1) return null;
+  return groups[groupIndex + 1]?.items[0]?.index ?? null;
+}
+
 function imageToDraftImage(image: AttachedImage): ChatDraftImage {
   return { data: image.data, mimeType: image.mimeType };
 }
@@ -1038,9 +952,10 @@ function draftImageToAttachedImage(image: ChatDraftImage): AttachedImage {
 }
 
 function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined): AttachedImage[] {
+  // Recovery may temporarily exceed the normal composer limit; never discard
+  // images from a failed or unconfirmed submission while rebuilding the draft.
   return (images ?? [])
     .filter(isBase64ImageWithinLimits)
-    .slice(0, MAX_ATTACHED_IMAGES)
     .map(draftImageToAttachedImage);
 }
 
@@ -1336,7 +1251,8 @@ function fileIndexRequestPath(cwd: string, query: string | undefined, hideGitIgn
   return `file-index?${params.toString()}`;
 }
 
-export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
+// The composer props remain stable while a token stream updates the reply.
+export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, canStop = isStreaming, stopping = false, readOnlyReason, statePending, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching, runtimeSettingsUpdating,
   defaultModel, onSetDefaultModel,
   onCompact, onAbortCompaction, autoCompactionEnabled, runtimeSettingsRead, onRetryRuntimeSettings, onAutoCompactionChange, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
@@ -1346,12 +1262,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   fastMode, onFastModeChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   continueUi, unattended, onContinue, onUnattendedChange, onStopContinue,
-  slashCommands, slashCommandsLoading, onLoadSlashCommands,
+  slashCommands, slashCommandsLoading, slashCommandsReloadKey = 0, onLoadSlashCommands,
   onBuiltinCommand,
   soundEnabled, onSoundToggle, onAudioUnlock,
   onPromptWithStreamingBehavior,
   editorSuggestion,
   draftKey,
+  onLegacyDraftRecovered,
   cwd,
   sessionFile,
   onOpenFile,
@@ -1369,6 +1286,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   useChatAppearance();
   const embeddedInParent = typeof window !== "undefined" && window.parent !== window;
   const isMobile = useIsMobile();
+  const controlHeight = isMobile ? 44 : 32;
   const enterSendMode = useEnterSendMode();
   const apiPath = useCallback((path: string) => apiPathForPeer(remotePeer, path), [remotePeer]);
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
@@ -1380,35 +1298,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [modelFilter, setModelFilter] = useState("");
-  const [hiddenModelProviders, setHiddenModelProviders] = useState<Set<string>>(() => new Set(readCollapsedProviderNames()));
+  const hiddenModelProviders = useHiddenModelProviders();
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
-  const refreshHiddenModelProviders = useCallback(() => {
-    setHiddenModelProviders(new Set(readCollapsedProviderNames()));
-  }, []);
-
-  useEffect(() => {
-    const refresh = () => refreshHiddenModelProviders();
-    const onMessage = (event: MessageEvent) => {
-      if (window.parent === window || event.source !== window.parent) return;
-      const data = event.data as { type?: unknown; providers?: unknown } | null;
-      if (data?.type !== COLLAPSED_PROVIDERS_SYNC_EVENT || !Array.isArray(data.providers)) return;
-      const names = data.providers.filter((name): name is string => typeof name === "string" && name.trim().length > 0);
-      writeCollapsedProviderNames(names);
-      setHiddenModelProviders(new Set(names));
-      window.dispatchEvent(new Event(COLLAPSED_PROVIDERS_CHANGED_EVENT));
-    };
-    window.addEventListener("storage", refresh);
-    window.addEventListener(COLLAPSED_PROVIDERS_CHANGED_EVENT, refresh);
-    window.addEventListener("message", onMessage);
-    if (window.parent !== window) {
-      window.parent.postMessage({ type: COLLAPSED_PROVIDERS_REQUEST_EVENT }, "*");
-    }
-    return () => {
-      window.removeEventListener("storage", refresh);
-      window.removeEventListener(COLLAPSED_PROVIDERS_CHANGED_EVENT, refresh);
-      window.removeEventListener("message", onMessage);
-    };
-  }, [refreshHiddenModelProviders]);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [builtinCommandPending, setBuiltinCommandPending] = useState(false);
   const builtinCommandPendingRef = useRef(false);
@@ -1540,6 +1431,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
+  const pendingPasteRef = useRef<{ textarea: HTMLTextAreaElement; value: string; start: number; end: number } | null>(null);
   const slashCommandsRequestedRef = useRef(false);
   const customPromptRequestIdRef = useRef(0);
 
@@ -1570,7 +1462,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const explorerFilterAbortRef = useRef<AbortController | null>(null);
   const draftKeyRef = useRef(draftKey);
   const valueRef = useRef(value);
-  const pendingDraftFocusRef = useRef<{ key: string | undefined; value: string } | null>(null);
+  const pendingDraftFocusRef = useRef<{ key: DraftKey | undefined; value: string } | null>(null);
   const attachedImagesRef = useRef(attachedImages);
   const draftPromptSourceRef = useRef<string | null>(null);
   const draftAnalysisQuestionRef = useRef<string | null>(null);
@@ -1578,6 +1470,41 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const pendingImageCountRef = useRef(0);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+
+  const [dismissedLegacyDraft, setDismissedLegacyDraft] = useState<string | null>(null);
+  const legacyRecoveryKey = sessionId && draftKey && typeof draftKey !== "string" && draftKey.kind === "session" ? draftKeyIdentity(draftKey) : null;
+  const legacyDraft = legacyRecoveryKey && sessionId ? getDraft(sessionId) : null;
+  const legacyEdit = legacyRecoveryKey && sessionId
+    ? getDraft(legacyHistoryDraftKey(sessionId, remotePeer))?.historyEdit ?? legacyDraft?.historyEdit ?? null
+    : null;
+  const hasLegacyDraft = Boolean(legacyDraft?.value || legacyDraft?.images.length || legacyDraft?.quotes?.length || legacyEdit);
+  const invalidLegacyImages = Boolean(legacyDraft?.images.some((image) => !isBase64ImageWithinLimits(image)));
+  const invalidLegacyEdit = Boolean(legacyEdit && (typeof legacyEdit.entryId !== "string" || !legacyEdit.entryId));
+  const hasCurrentDraft = Boolean(value || attachedImages.length || quotes.length || (sessionId && getDraft(historyDraftKey(sessionId, remotePeer))?.historyEdit));
+  const canRecoverLegacyDraft = !hasCurrentDraft && !invalidLegacyImages && !invalidLegacyEdit && !statePending && !builtinCommandPending && (!legacyEdit || Boolean(onLegacyDraftRecovered));
+  const recoverLegacyDraft = () => {
+    if (!sessionId || !draftKey || !legacyRecoveryKey || !canRecoverLegacyDraft
+      || !sameDraftKey(draftKeyRef.current, draftKey) || valueRef.current || textareaRef.current?.value
+      || attachedImagesRef.current.length || pendingImageCountRef.current || quotesRef.current.length
+      || getDraft(historyDraftKey(sessionId, remotePeer))?.historyEdit) return;
+    const old = getDraft(sessionId);
+    const historyEdit = getDraft(legacyHistoryDraftKey(sessionId, remotePeer))?.historyEdit ?? old?.historyEdit ?? null;
+    if (!old && !historyEdit) return;
+    if (historyEdit && (!onLegacyDraftRecovered || typeof historyEdit.entryId !== "string" || !historyEdit.entryId)) return;
+    if (old?.images.some((image) => !isBase64ImageWithinLimits(image))) return;
+    const restored = { value: old?.value ?? "", images: old?.images ?? [], quotes: old?.quotes ?? [] };
+    setDraft(draftKey, restored);
+    const restoredImages = draftImagesToAttachedImages(restored.images);
+    valueRef.current = restored.value;
+    attachedImagesRef.current = restoredImages;
+    quotesRef.current = restored.quotes;
+    pendingDraftFocusRef.current = { key: draftKey, value: restored.value };
+    setValue(restored.value);
+    setAttachedImages(restoredImages);
+    setQuotes(restored.quotes);
+    onLegacyDraftRecovered?.(historyEdit);
+    setDismissedLegacyDraft(legacyRecoveryKey);
+  };
 
   const editorSuggestionSuffix = getEditorSuggestionSuffix(value, editorSuggestion);
   const editorSuggestionAtEnd = (slashCaret ?? value.length) === value.length
@@ -2060,7 +1987,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const ta = textareaRef.current;
     if (!pending || !ta) return;
     pendingDraftFocusRef.current = null;
-    if (pending.key !== draftKey || pending.value !== value) return;
+    if (!sameDraftKey(pending.key, draftKey) || pending.value !== value) return;
     ta.focus();
     ta.setSelectionRange(ta.value.length, ta.value.length);
     resizeChatInput(ta, true);
@@ -2094,7 +2021,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const draftImages = getUserMessageDraftImages(message);
       // Restoring an edit is atomic: a display URL or invalid image must not
       // silently turn a complete user message into a partial draft.
-      if (draftImages.length !== imageCount || imageCount > MAX_ATTACHED_IMAGES) return false;
+      if (draftImages.length !== imageCount) return false;
       const restoredImages = draftImagesToAttachedImages(draftImages);
       if (restoredImages.length !== imageCount) return false;
       pendingDraftFocusRef.current = { key: draftKey, value: restoredText };
@@ -2162,9 +2089,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
       setAtQuery(null);
     },
-    rekeyDraft(previousKey: string, nextKey: string) {
-      if (previousKey === nextKey) return;
-      if (draftKeyRef.current !== previousKey) {
+    rekeyDraft(previousKey: DraftKey, nextKey: DraftKey) {
+      if (sameDraftKey(previousKey, nextKey)) return;
+      if (!sameDraftKey(draftKeyRef.current, previousKey)) {
         rekeyStoredDraft(previousKey, nextKey);
         return;
       }
@@ -2172,9 +2099,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const currentDraft = {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
+        quotes: quotesRef.current,
       };
-      const moved = rekeyStoredDraft(previousKey, nextKey, currentDraft) ?? { value: "", images: [] };
+      const moved = rekeyStoredDraft(previousKey, nextKey, currentDraft) ?? { value: "", images: [], quotes: [] };
+      const movedQuotes = moved.quotes ?? [];
       const unchanged = moved.value === currentDraft.value
+        && JSON.stringify(movedQuotes) === JSON.stringify(currentDraft.quotes)
         && moved.images.length === currentDraft.images.length
         && moved.images.every((image, index) => (
           image.data === currentDraft.images[index]?.data
@@ -2186,7 +2116,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const movedImages = draftImagesToAttachedImages(moved.images);
       valueRef.current = moved.value;
       attachedImagesRef.current = movedImages;
+      quotesRef.current = movedQuotes;
       setValue(moved.value);
+      setQuotes(movedQuotes);
       setAttachedImages((current) => {
         current.forEach(revokeImagePreview);
         return movedImages;
@@ -2194,7 +2126,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setAtQuery(null);
       setHistoryMenuOpen(false);
     },
-    restoreSubmission(text: string, images?: ChatDraftImage[], targetDraftKey?: string) {
+    restoreSubmission(text: string, images?: ChatDraftImage[], targetDraftKey?: DraftKey) {
       if (!text.trim() && !images?.length) return;
 
       // clearInput is queued before the submission handler runs. Compose with
@@ -2202,7 +2134,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       // then get overwritten by the clear.
       const currentDraftKey = draftKeyRef.current;
       const destinationDraftKey = targetDraftKey ?? currentDraftKey;
-      const targetsCurrentComposer = destinationDraftKey === currentDraftKey;
+      const targetsCurrentComposer = sameDraftKey(destinationDraftKey, currentDraftKey);
       const storedDraft = !targetsCurrentComposer && destinationDraftKey
         ? getDraft(destinationDraftKey)
         : null;
@@ -2220,13 +2152,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (destinationDraftKey) setDraft(destinationDraftKey, restoredDraft);
       if (!targetsCurrentComposer) return;
       const restoredImages = images?.length
-        ? [
-            ...draftImagesToAttachedImages(images).slice(
-              0,
-              Math.max(0, MAX_ATTACHED_IMAGES - attachedImagesRef.current.length),
-            ),
-            ...attachedImagesRef.current,
-          ].slice(0, MAX_ATTACHED_IMAGES)
+        ? [...draftImagesToAttachedImages(images), ...attachedImagesRef.current]
         : attachedImagesRef.current;
       // Session promotion can rekey this composer before React flushes the
       // functional updates below, so update the imperative snapshot first.
@@ -2241,9 +2167,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setHistoryMenuOpen(false);
       if (images?.length) {
         setAttachedImages((current) => {
-          const available = Math.max(0, MAX_ATTACHED_IMAGES - current.length);
-          const restored = draftImagesToAttachedImages(images)
-            .slice(0, available);
+          const restored = draftImagesToAttachedImages(images);
           const next = restored.length > 0 ? [...restored, ...current] : current;
           attachedImagesRef.current = next;
           return next;
@@ -2379,7 +2303,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setAtQuery(null);
     setHistoryMenuOpen(false);
     if (draftKey) clearDraft(draftKey);
-    if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
+    if (draftKeyRef.current && !sameDraftKey(draftKeyRef.current, draftKey)) clearDraft(draftKeyRef.current);
     clearImages();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
@@ -2643,7 +2567,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   // ── end image-generation panel state ──────────────────────────
 
   useEffect(() => {
-    if (!draftKey || draftKeyRef.current !== draftKey) return;
+    if (!draftKey || !sameDraftKey(draftKeyRef.current, draftKey)) return;
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
@@ -2653,7 +2577,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
-    if (previousDraftKey === draftKey) return;
+    if (sameDraftKey(previousDraftKey, draftKey)) return;
 
     if (previousDraftKey) {
       setDraft(previousDraftKey, {
@@ -2754,13 +2678,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
     if (isStreaming) return;
 
-    const isCommand = msg.startsWith("/") || msg.startsWith("!");
-    let effectiveMsg = msg;
-    if (!isCommand && quotes.length > 0) {
-      const formattedQuotes = formatQuoteItemsToMarkdown(quotes, t);
-      effectiveMsg = msg ? `${formattedQuotes}\n\n${msg}` : formattedQuotes;
-      setQuotes([]);
-    }
+    const quoteMarkdown = quotes.length > 0 ? formatQuoteItemsToMarkdown(quotes, t) : "";
+    const effectiveMsg = withQuoteContext(msg, quoteMarkdown);
+    if (effectiveMsg !== msg) setQuotes([]);
 
     let questionAnalysis: QuestionAnalysisPromptMetadata | undefined;
     if (draftAnalysis.status === "ready" && draftAnalysisQuestionRef.current) {
@@ -2815,7 +2735,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const remainingCommands = activeSlashTab === "all"
     ? filteredSlashCommands.filter((command) => !slashFavoriteKeys.includes(getSlashCommandFavoriteKey(command)))
     : orderedTabFilteredSlashCommands;
-  const categoryLayout = buildSlashCommandLayout(remainingCommands, skillDormancy);
+  const categoryLayout = buildSlashCommandLayout(remainingCommands, skillDormancy, slashMenuQuery ?? "");
 
   const isSearchingSlash = Boolean(slashMenuQuery && slashMenuQuery.trim());
 
@@ -2874,7 +2794,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }> = [];
 
       if (otherCommands.length > 0) {
-        const otherCategoryLayout = buildSlashCommandLayout(otherCommands, skillDormancy);
+        const otherCategoryLayout = buildSlashCommandLayout(otherCommands, skillDormancy, slashMenuQuery ?? "");
         otherGroups = otherCategoryLayout.groups.map((group) => ({
           ...group,
           label: `${t(SLASH_SOURCE_GROUP_LABEL_KEYS[group.source])} (${t("chat.otherResults")})`,
@@ -3304,12 +3224,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     };
     const queue = () => {
       const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-      let effectiveMsg = msg;
-      if (!msg.startsWith("/") && quotes.length > 0) {
-        const formattedQuotes = formatQuoteItemsToMarkdown(quotes, t);
-        effectiveMsg = msg ? `${formattedQuotes}\n\n${msg}` : formattedQuotes;
-        setQuotes([]);
-      }
+      const quoteMarkdown = quotes.length > 0 ? formatQuoteItemsToMarkdown(quotes, t) : "";
+      const effectiveMsg = withQuoteContext(msg, quoteMarkdown);
+      if (effectiveMsg !== msg) setQuotes([]);
       if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
         clearQueuedInput();
         onPromptWithStreamingBehavior(effectiveMsg, streamingBehavior, images);
@@ -3343,6 +3260,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
     if (direction === "left") return Math.max(0, slashActiveIndex - 1);
     if (direction === "right") return Math.min(lastIndex, slashActiveIndex + 1);
+    if (direction === "down") {
+      const groupBoundaryIndex = getSlashGroupBoundaryDownIndex(groupedSlashCommands, slashActiveIndex);
+      if (groupBoundaryIndex !== null) return groupBoundaryIndex;
+    }
 
     const currentNode = slashItemRefs.current[slashActiveIndex];
     if (!currentNode) {
@@ -3378,7 +3299,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     return direction === "down"
       ? Math.min(lastIndex, slashActiveIndex + 1)
       : Math.max(0, slashActiveIndex - 1);
-  }, [displayedSlashCommands.length, slashActiveIndex]);
+  }, [displayedSlashCommands.length, groupedSlashCommands, slashActiveIndex]);
 
   const handleSlashSearchKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
@@ -3592,10 +3513,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   );
 
   const handleInput = useCallback(() => {
+    pendingPasteRef.current = null;
     const ta = textareaRef.current;
     if (!ta) return;
     resizeChatInput(ta, ta.selectionStart === ta.value.length);
   }, []);
+
+  useEffect(() => {
+    pendingPasteRef.current = null;
+  }, [draftKey, sessionId, cwd, remotePeer]);
 
   const handleBeforeInput = useCallback((e: React.FormEvent<HTMLTextAreaElement>) => {
     const nativeEvent = e.nativeEvent as InputEvent;
@@ -3612,14 +3538,43 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     insertAsciiSlash();
   }, [insertAsciiSlash]);
 
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
-    e.preventDefault();
-    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-    processImageFiles(files);
+    if (imageItems.length) {
+      e.preventDefault();
+      const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
+      processImageFiles(files);
+      return;
+    }
+
+    const text = e.clipboardData?.getData("text/plain") ?? "";
+    if (!text) return;
+
+    // Chrome can drop its native insertion when a dictation tool restores the
+    // clipboard during this event. Keep native paste in charge and recover only
+    // if no input event changed this exact textarea before the next task.
+    const textarea = e.currentTarget;
+    const nativeEvent = e.nativeEvent;
+    const pendingPaste = {
+      textarea,
+      value: textarea.value,
+      start: textarea.selectionStart,
+      end: textarea.selectionEnd,
+    };
+    pendingPasteRef.current = pendingPaste;
+    setTimeout(() => {
+      if (pendingPasteRef.current !== pendingPaste) return;
+      pendingPasteRef.current = null;
+      if (!nativeEvent.defaultPrevented && textarea.isConnected && textarea.value === pendingPaste.value) {
+        replaceTextareaRange(textarea, pendingPaste.start, pendingPaste.end, text);
+      }
+    }, 0);
   }, [processImageFiles]);
+
+  useEffect(() => {
+    slashCommandsRequestedRef.current = false;
+  }, [slashCommandsReloadKey, sessionId, cwd, remotePeer]);
 
   useEffect(() => {
     if (slashQuery === null && !slashMenuOpenedByButton) {
@@ -3638,7 +3593,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         slashCommandsRequestedRef.current = false;
       });
     }
-  }, [slashQuery, slashMenuOpenedByButton, onLoadSlashCommands]);
+  }, [slashQuery, slashMenuOpenedByButton, onLoadSlashCommands, slashCommandsReloadKey, sessionId, cwd, remotePeer]);
 
   useEffect(() => {
     if (!slashMenuOpen) setActiveSlashTab("customPrompt");
@@ -3773,7 +3728,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       name,
     })).sort(compareModelOptions);
   })();
-  const visibleModelOptions = filterModelOptionsByProvider(modelOptions, hiddenModelProviders);
+  const visibleModelOptions = filterModelOptionsByProvider(modelOptions, hiddenModelProviders, model);
   const filteredModelOptions = filterModelOptions(visibleModelOptions, modelFilter);
   const showModelFilter = visibleModelOptions.length > MODEL_FILTER_THRESHOLD;
 
@@ -3922,9 +3877,20 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         )}
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
+        {hasLegacyDraft && legacyRecoveryKey !== dismissedLegacyDraft && (
+          <div role="status" style={{ marginBottom: 8, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12 }}>
+            <span>{t("chat.legacyDraftNotice")}</span>{" "}
+            {legacyEdit && <span>{t("chat.legacyDraftHistoryNotice")} </span>}
+            {invalidLegacyImages && <span>{t("chat.legacyDraftInvalidImages")} </span>}
+            {invalidLegacyEdit && <span>{t("chat.legacyDraftInvalidHistory")} </span>}
+            {hasCurrentDraft && <span>{t("chat.legacyDraftClearCurrent")} </span>}
+            <button type="button" data-legacy-draft-recover onClick={recoverLegacyDraft} disabled={!canRecoverLegacyDraft}>{t("chat.legacyDraftRecover")}</button>{" "}
+            <button type="button" onClick={() => setDismissedLegacyDraft(legacyRecoveryKey)}>{t("chat.legacyDraftDismiss")}</button>
+          </div>
+        )}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {queuedMessages?.recallState === "server_copy" && <p role="status" style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("chat.queueRecoveryNotice_memoryOnly")}</p>}
-        {queuedMessages?.recovery && <QueueRecoveryPanel key={draftKey ?? "new"} recovery={queuedMessages.recovery} />}
+        {queuedMessages?.recovery && <QueueRecoveryPanel key={draftKey ? draftKeyIdentity(draftKey) : "new"} recovery={queuedMessages.recovery} />}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{
             marginBottom: 8,
@@ -4942,7 +4908,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             value={value}
             onChange={(e) => {
               const input = e.nativeEvent as InputEvent;
-              if (isMobile && showEditorSuggestion && !isComposingRef.current && !input.isComposing
+              if (showEditorSuggestion && !isComposingRef.current && !input.isComposing
                 && Date.now() - lastCompositionEndAtRef.current >= COMPOSITION_END_ENTER_GRACE_MS
                 && input.inputType === "insertText" && (input.data === " " || input.data == null)
                 && e.target.value === `${valueRef.current} ` && acceptEditorSuggestion()) return;
@@ -5121,7 +5087,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               style={{
                 flexShrink: 0,
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                ...(isMobile && !(continueUi && continueUi.kind !== "idle" && !value.trim()) ? { width: 36, height: 36, padding: 0 } : { padding: "7px 14px" }),
+                ...(isMobile && !(continueUi && continueUi.kind !== "idle" && !value.trim()) ? { width: 44, height: 44, padding: 0 } : { padding: "7px 14px" }),
                 ...(continueUi && continueUi.kind !== "idle" && !value.trim()
                   ? {
                       background: "rgba(234,88,12,0.9)",
@@ -5239,14 +5205,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }}>
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
-          <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 4 }}>
+          <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", flexWrap: isMobile ? "wrap" : undefined, gap: 4 }}>
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={!canAttachImages}
              title={t("chat.attachImage")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 32, padding: 0,
+                width: isMobile ? 44 : 28, height: controlHeight, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
@@ -5271,7 +5237,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <div ref={dropdownRef} style={{ position: "relative", order: 3, flex: isMobile ? "1 1 auto" : undefined, minWidth: 0 }}>
                   <ChatInputSelectTrigger
                     triggerRef={modelTriggerRef}
-                    label={currentName ?? (visibleModelOptions.length > 0 ? "Select model" : modelError ? "Model error" : "No models")}
+                    label={currentName ?? (visibleModelOptions.length > 0 ? t("chat.selectModel") : modelError ? t("chat.modelError") : t("chat.noModels"))}
                     icon={modelSwitching ? (
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true">
                         <path d="M21 12a9 9 0 1 1-2.64-6.36" />
@@ -5289,10 +5255,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     open={modelDropdownOpen}
                     disabled={modelSwitching || runtimeSettingsUpdating}
                     busy={modelSwitching || runtimeSettingsUpdating}
-                    title={modelSwitching ? "Switching model" : visibleModelOptions.length > 0 ? "Change model" : modelError ? "Model discovery failed" : "No available models"}
-                    ariaLabel={modelSwitching ? "Switching model" : visibleModelOptions.length > 0 ? "Change model" : modelError ? "Model discovery failed" : "No available models"}
+                    title={modelSwitching ? t("chat.switchingModel") : visibleModelOptions.length > 0 ? t("chat.changeModel") : modelError ? t("chat.modelDiscoveryFailed") : t("chat.noAvailableModels")}
+                    ariaLabel={modelSwitching ? t("chat.switchingModel") : visibleModelOptions.length > 0 ? t("chat.changeModel") : modelError ? t("chat.modelDiscoveryFailed") : t("chat.noAvailableModels")}
                     onToggle={() => {
-                      refreshHiddenModelProviders();
                       const rect = modelTriggerRef.current?.getBoundingClientRect();
                       if (rect) setModelDropdownRect({ top: rect.top, left: rect.left, width: rect.width });
                       setModelDropdownOpen((open) => {
@@ -5366,7 +5331,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       )}
                       <div
                         role="listbox"
-                        aria-label="Change model"
+                        aria-label={t("chat.changeModel")}
                         style={{ minHeight: 0, overflowY: "auto" }}
                       >
                         {/* ── Chat models ── */}
@@ -5375,8 +5340,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                             {modelFilter.trim()
                               ? t("chat.noMatchingModels")
                               : modelError
-                                ? "Model discovery failed"
-                                : "No available models"}
+                                ? t("chat.modelDiscoveryFailed")
+                                : t("chat.noAvailableModels")}
                           </div>
                         ) : modelsByProvider.map((group, gi) => (
                           <div key={group.provider} role="group" aria-label={group.provider}>
@@ -5439,7 +5404,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               }
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 32, padding: 0,
+                width: isMobile ? 44 : 28, height: controlHeight, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
                 color: genState?.enabled ? "var(--accent)" : "var(--text-muted)",
@@ -5493,6 +5458,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   {sizes.length > 0 && (
                     <GenOptionSelect
                       value={sizeValue}
+                      isMobile={isMobile}
                       onChange={(value) => handleGenOption("size", value)}
                       title={t("chat.genSize")}
                       ariaLabel={t("chat.genSize")}
@@ -5502,6 +5468,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   {cap.resolutions.length > 0 && (
                     <GenOptionSelect
                       value={resValue}
+                      isMobile={isMobile}
                       onChange={(value) => handleGenOption("resolution", value)}
                       title={t("chat.genResolution")}
                       ariaLabel={t("chat.genResolution")}
@@ -5511,6 +5478,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   {cap.qualities && cap.qualities.length > 0 && (
                     <GenOptionSelect
                       value={qualityValue}
+                      isMobile={isMobile}
                       onChange={(value) => handleGenOption("quality", value)}
                       title={t("chat.genQuality")}
                       ariaLabel={t("chat.genQuality")}
@@ -5554,7 +5522,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   alignItems: "center",
                   justifyContent: "center",
                   width: "100%",
-                  height: 32,
+                  height: controlHeight,
                   padding: "8px 10px",
                   background: "none",
                   border: "none",
@@ -5798,7 +5766,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <div style={{
                 display: "flex",
                 alignItems: "stretch",
-                height: 32,
+                height: controlHeight,
                 marginRight: (isStreaming || (continueUi && continueUi.kind === "running")) ? (isMobile ? 5 : 4) : 0,
               }}>
                 {onCompact && <button
@@ -5808,7 +5776,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                     padding: isMobile ? "0 6px" : "8px 12px",
                     width: isMobile ? "auto" : undefined,
-                    height: 32,
+                    height: controlHeight,
                     background: isCompacting ? "rgba(239,68,68,0.08)" : "none",
                     border: isCompacting ? "1px solid rgba(239,68,68,0.3)" : "1px solid var(--border)",
                     borderRight: onAutoCompactionChange ? "none" : undefined,
@@ -5857,8 +5825,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     style={{
                       display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
                       padding: isMobile ? "0 6px" : "8px 10px",
-                      width: isMobile && !controlsMenuOpen ? 30 : "auto",
-                      height: 32,
+                      width: isMobile && !controlsMenuOpen ? 44 : "auto",
+                      height: controlHeight,
                       background: autoCompactionEnabled ? "var(--bg-selected, rgba(59, 130, 246, 0.10))" : "rgba(128,128,128,0.06)",
                       border: autoCompactionEnabled ? "1px solid rgba(59, 130, 246, 0.32)" : "1px solid rgba(128,128,128,0.25)",
                       borderLeft: isCompacting
@@ -5905,7 +5873,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   padding: isMobile ? "8px 10px" : "8px 14px",
-                  height: 32,
+                  height: controlHeight,
                   marginRight: isMobile ? 2 : 4,
                   background: unattended ? "rgba(16,185,129,0.12)" : "rgba(128,128,128,0.06)",
                   border: unattended ? "1px solid rgba(16,185,129,0.4)" : "1px solid rgba(128,128,128,0.25)",
@@ -5937,7 +5905,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   padding: isMobile ? "8px 10px" : "8px 14px",
-                  height: 32,
+                  height: controlHeight,
                   background: "rgba(239,68,68,0.08)",
                   border: "1px solid rgba(239,68,68,0.3)",
                   borderRadius: 9,
@@ -5973,8 +5941,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  width: 36,
-                  height: 32,
+                  width: 44,
+                  height: 44,
                   padding: 0,
                   marginLeft: 2,
                   background: "var(--bg-hover)",
@@ -6004,4 +5972,4 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       </div>
     </fieldset>
   );
-});
+}));

@@ -5,10 +5,11 @@ import { dump as stringifyYaml } from "js-yaml";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { parseFrontmatter } from "./frontmatter";
+import { parseReaderNativeProfile } from "./subagent-profile-reader";
 import { parseNpmSource } from "./npm-source";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
-import { disabledBuiltInSubagents, readBuiltInSubagentOverride } from "./subagent-settings";
+import { disabledBuiltInSubagents, getSubagentSettingsPath, readBuiltInSubagentOverride } from "./subagent-settings";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
 
@@ -38,7 +39,7 @@ export interface SubagentProfile {
   disallowedExtensionTools?: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
-  /** Native code mode capability. Omitted profiles are disabled. */
+  /** Native code mode capability. Usable profiles default to on; chat-only profiles stay off. */
   codemode?: SubagentCodemode;
   /** Child MCP host capability. Omitted profiles are disabled. */
   mcp?: SubagentMcp;
@@ -63,6 +64,8 @@ export interface SubagentMetadata {
   parentToolCallId: string;
   profile: string;
   description: string;
+  /** Effective provider/model selected for this child when known. */
+  model?: string;
   task: string;
   runInBackground: boolean;
   createdAt: string;
@@ -124,6 +127,8 @@ export interface SubagentRunInfo {
   parentToolCallId: string;
   profile: string;
   description: string;
+  /** Effective provider/model selected for this child when known. */
+  model?: string;
   task: string;
   runInBackground: boolean;
   status: SubagentStatus;
@@ -185,21 +190,22 @@ const FRONTMATTER_OPEN_RE = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\n|\r)/;
  */
 const OWNED_ALIAS_VALUES = new Set(["none", "all", "true", "false"]);
 
-function parseCodemode(value: unknown): SubagentCodemode {
+function parseCodemode(value: unknown, fallback: SubagentCodemode = "on"): SubagentCodemode {
   if (value === "on" || value === true) return "on";
   if (value === "inherit") return "inherit";
+  if (value === undefined) return fallback;
   return "off";
 }
 
-function validateSavedCodemode(value: unknown): SubagentCodemode {
+function validateSavedCodemode(value: unknown, fallback: SubagentCodemode = "on"): SubagentCodemode {
   if (value === undefined || value === "inherit" || value === "on" || value === "off") {
-    return value === undefined ? "off" : value;
+    return value === undefined ? fallback : value;
   }
   throw new Error("codemode must be one of: inherit, on, off");
 }
 
-function parseMcp(value: unknown): SubagentMcp {
-  return value === "on" || value === true ? "on" : "off";
+function parseMcp(value: unknown, fallback: SubagentMcp = "on"): SubagentMcp {
+  return value === undefined ? fallback : value === "on" || value === true ? "on" : "off";
 }
 
 function validateSavedMcp(value: unknown): SubagentMcp | undefined {
@@ -214,13 +220,13 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     description: "Handle a focused implementation or investigation task",
     systemPrompt: "Work autonomously on the delegated task. Keep the final answer concise and include important files, decisions, and remaining risks.",
     tools: DEFAULT_TOOLS,
-    loadSkills: false,
-    loadExtensions: false,
-    codemode: "off",
-    mcp: "off",
+    loadSkills: true,
+    loadExtensions: true,
+    codemode: "inherit",
+    mcp: "on",
     promptMode: "append",
     inheritContext: false,
-    runInBackground: false,
+    runInBackground: true,
     enabled: true,
     scope: "builtin",
   },
@@ -230,13 +236,13 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     description: "Quickly inspect a codebase without modifying it",
     systemPrompt: "Explore the codebase to answer the delegated question. Do not modify files. Report concrete findings with file paths and relevant symbols.",
     tools: [...PRESET_READ_ONLY],
-    loadSkills: false,
-    loadExtensions: false,
-    codemode: "off",
-    mcp: "off",
+    loadSkills: true,
+    loadExtensions: true,
+    codemode: "inherit",
+    mcp: "on",
     promptMode: "append",
     inheritContext: false,
-    runInBackground: false,
+    runInBackground: true,
     enabled: true,
     scope: "builtin",
   },
@@ -246,13 +252,13 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     description: "Design an implementation plan without modifying files",
     systemPrompt: "Produce an implementation-ready plan for the delegated task. Inspect the repository as needed, do not modify files, and call out dependencies, risks, and verification steps.",
     tools: [...PRESET_READ_ONLY],
-    loadSkills: false,
-    loadExtensions: false,
-    codemode: "off",
-    mcp: "off",
+    loadSkills: true,
+    loadExtensions: true,
+    codemode: "inherit",
+    mcp: "on",
     promptMode: "append",
     inheritContext: false,
-    runInBackground: false,
+    runInBackground: true,
     enabled: true,
     scope: "builtin",
   },
@@ -379,7 +385,7 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     const name = stringValue(data?.name) ?? basename(filePath, ".md");
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return null;
     const thinkingValue = stringValue(data?.thinking) as ThinkingLevel | undefined;
-    const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
+    const reader = parseReaderNativeProfile(data);
     const tools = parseTools(data?.tools, DEFAULT_TOOLS);
     const extensionSelectors = parseExtensionToolSelectors(data?.tools);
     const skills = profileNameList(data?.skills);
@@ -410,16 +416,23 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
       ...(disallowedExtensionTools.length > 0 ? { disallowedExtensionTools } : {}),
       ...(skills !== undefined ? { skills } : {}),
       ...(extensions !== undefined ? { extensions } : {}),
-      loadSkills: resourceBoolean(data?.load_skills ?? data?.skills, false),
-      loadExtensions: resourceBoolean(data?.load_extensions ?? data?.extensions, extensionSelectors.length > 0),
-      codemode: parseCodemode(data?.codemode),
-      mcp: parseMcp(data?.mcp),
+      loadSkills: reader?.loadSkills ?? resourceBoolean(data?.load_skills ?? data?.skills, true),
+      loadExtensions: reader?.loadExtensions ?? resourceBoolean(data?.load_extensions ?? data?.extensions, true),
+      codemode: reader?.codemode ?? parseCodemode(
+        data?.codemode,
+        tools.length > 0 || resourceBoolean(data?.load_skills ?? data?.skills, false)
+          || resourceBoolean(data?.load_extensions ?? data?.extensions, extensionSelectors.length > 0)
+          ? "inherit"
+          : "off",
+      ),
+      mcp: reader?.mcp ?? parseMcp(data?.mcp),
       ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
       ...(thinkingValue && THINKING_LEVELS.has(thinkingValue) ? { thinking: thinkingValue } : {}),
-      ...(maxTurnsValue && maxTurnsValue > 0 ? { maxTurns: maxTurnsValue } : {}),
-      inheritContext: booleanValue(data?.inherit_context, false),
-      runInBackground: booleanValue(data?.run_in_background, false),
-      promptMode: data?.prompt_mode === "replace" ? "replace" : "append",
+      ...(reader?.maxTurns ? { maxTurns: reader.maxTurns } : {}),
+      inheritContext: reader?.inheritContext ?? booleanValue(data?.inherit_context, false),
+      runInBackground: reader?.runInBackground ?? booleanValue(data?.run_in_background, true),
+      promptMode: reader?.promptMode
+        ?? (data?.prompt_mode === "replace" ? "replace" : "append"),
       ...(stringValue(data?.color) ? { color: stringValue(data?.color) } : {}),
       ...(data?.isolation === "worktree" || data?.isolation === "off" ? { isolation: data.isolation } : {}),
       ...(typeof data?.persist_session === "boolean" ? { persistSession: data.persist_session } : {}),
@@ -445,9 +458,9 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
     .filter((profile): profile is SubagentProfile => profile !== null);
 }
 
-function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
+function profileDirectories(cwd: string, agentDir = getAgentDir()): Array<[string, Exclude<SubagentScope, "builtin">]> {
   return [
-    [join(getAgentDir(), "agents"), "global"],
+    [join(agentDir, "agents"), "global"],
     [join(resolve(cwd), ".agents", "agents"), "workspace"],
     [join(resolve(cwd), ".pi", "agents"), "project"],
   ];
@@ -459,10 +472,11 @@ function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, 
  * instead of a copied-out override file, which would otherwise freeze the built-in
  * prompt at the version it was copied from.
  */
-function builtInProfiles(): SubagentProfile[] {
-  const disabled = disabledBuiltInSubagents();
+function builtInProfiles(agentDir = getAgentDir()): SubagentProfile[] {
+  const settingsPath = getSubagentSettingsPath(agentDir);
+  const disabled = disabledBuiltInSubagents(settingsPath);
   return BUILTIN_PROFILES.map((profile) => {
-    const override = readBuiltInSubagentOverride(profile.name);
+    const override = readBuiltInSubagentOverride(profile.name, settingsPath);
     return {
       ...profile,
       tools: [...profile.tools],
@@ -474,25 +488,25 @@ function builtInProfiles(): SubagentProfile[] {
 }
 
 /** Every configured source, including profiles shadowed by a higher-precedence scope. */
-export function listSubagentProfileSources(cwd: string): SubagentProfile[] {
-  const profiles = builtInProfiles();
-  for (const [dir, scope] of profileDirectories(cwd)) {
+export function listSubagentProfileSources(cwd: string, agentDir = getAgentDir()): SubagentProfile[] {
+  const profiles = builtInProfiles(agentDir);
+  for (const [dir, scope] of profileDirectories(cwd, agentDir)) {
     profiles.push(...readProfileDirectory(dir, scope, cwd));
   }
   return profiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
-export function listSubagentProfiles(cwd: string): SubagentProfile[] {
+export function listSubagentProfiles(cwd: string, agentDir = getAgentDir()): SubagentProfile[] {
   // A same-name file replaces the built-in outright, its own `enabled` included.
-  const byName = new Map(builtInProfiles().map((profile) => [profile.name.toLowerCase(), profile]));
-  for (const [dir, scope] of profileDirectories(cwd)) {
+  const byName = new Map(builtInProfiles(agentDir).map((profile) => [profile.name.toLowerCase(), profile]));
+  for (const [dir, scope] of profileDirectories(cwd, agentDir)) {
     for (const profile of readProfileDirectory(dir, scope, cwd)) byName.set(profile.name.toLowerCase(), profile);
   }
   return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
-export function resolveSubagentProfile(cwd: string, name: string): SubagentProfile | undefined {
-  return listSubagentProfiles(cwd).find((profile) => profile.name.toLowerCase() === name.trim().toLowerCase() && profile.enabled);
+export function resolveSubagentProfile(cwd: string, name: string, agentDir = getAgentDir()): SubagentProfile | undefined {
+  return listSubagentProfiles(cwd, agentDir).find((profile) => profile.name.toLowerCase() === name.trim().toLowerCase() && profile.enabled);
 }
 
 function assertProfileName(name: string): string {
@@ -548,7 +562,10 @@ export function saveSubagentProfile(
   const model = profile.model?.trim() || undefined;
   const loadSkills = profile.loadSkills === true;
   const loadExtensions = profile.loadExtensions === true;
-  const codemode = validateSavedCodemode(profile.codemode);
+  const codemode = validateSavedCodemode(
+    profile.codemode,
+    tools.length > 0 || extensionTools.length > 0 || profile.loadSkills || profile.loadExtensions ? "on" : "off",
+  );
   const requestedMcp = validateSavedMcp(profile.mcp);
   const promptMode = profile.promptMode === "replace" ? "replace" : "append";
   const dir = assertWritableProfileDirectory(cwd, scope);
@@ -1041,6 +1058,7 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
     parentToolCallId: typeof data.parentToolCallId === "string" ? data.parentToolCallId : "",
     profile: typeof data.profile === "string" ? data.profile : "general-purpose",
     description: typeof data.description === "string" ? data.description : "Subagent",
+    ...(typeof data.model === "string" && data.model.trim() ? { model: data.model.trim() } : {}),
     task: typeof data.task === "string" ? data.task : "",
     runInBackground: data.runInBackground === true,
     status: persistedStatus,

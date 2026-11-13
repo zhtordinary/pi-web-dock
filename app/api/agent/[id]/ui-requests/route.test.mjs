@@ -6,7 +6,8 @@ const source=readFileSync(new URL('./route.ts',import.meta.url),'utf8');
 function fixture(live) {
  let checks=0;
  const fixtureModule={exports:{}};
- const deps={'@/lib/rpc-manager':{getRpcSession:()=>live,assertRpcSessionRuntimeBinding:async()=>{checks++}},'@/lib/request-security':{isApiRequestAllowed:()=>true}};
+ const createReaderStreamWriter=(controller,diagnostic,onOverflow,onEnqueueError)=>{let startup=true;const frames=[];const enqueue=text=>{if((controller.desiredSize??0)<=0){diagnostic.droppedEvents++;onOverflow();return false}try{controller.enqueue(new TextEncoder().encode(text));diagnostic.connectedAt??=Date.now();diagnostic.lastWriteAt=Date.now();diagnostic.queuedBytes=Math.max(0,256*1024-(controller.desiredSize??256*1024));return true}catch{onEnqueueError();return false}};return {write:text=>startup?(frames.push(text),true):enqueue(text),flush:()=>{startup=false;const text=frames.splice(0).join('');return !text||enqueue(text)}}};
+ const deps={'@/lib/rpc-manager':{getRpcSession:()=>live,assertRpcSessionRuntimeBinding:async()=>{checks++}},'@/lib/request-security':{isApiRequestAllowed:()=>true},'@/lib/reader-event-stream':{createReaderStreamWriter,registerReaderStreamCloser:()=>()=>{},READER_STREAM_HIGH_WATER_MARK_BYTES:256*1024}};
  new Function('require','module','exports',ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)(name=>{assert.ok(name in deps);return deps[name]},fixtureModule,fixtureModule.exports);
  return {get:(suffix='',signal)=>fixtureModule.exports.GET(new Request('http://localhost/api/agent/B/ui-requests'+suffix,{signal}),{params:Promise.resolve({id:'B'})}),checks:()=>checks};
 }

@@ -1,18 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import type { SettingsPanelController } from "./UnifiedSettingsModal";
 import { ExternalLink, X, ChevronDown } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { BUILTIN_TOOLS, type SubagentProfile } from "@/lib/subagent-profile-types";
-import { collectPendingDrafts, rememberDraft, removeDrafts } from "@/lib/subagent-draft-state";
+import { BUILTIN_TOOLS, type ReaderNativeProfileOptions, type SubagentProfile } from "@/lib/subagent-profile-types";
+import { collectPendingDrafts, hasPendingSubagentReload, pendingSubagentReloadToken, rememberDraft, removeDrafts, setPendingSubagentReload } from "@/lib/subagent-draft-state";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import { projectTrustReloadKey } from "./settings-ui-helpers";
 import { apiPathForPeer } from "@/lib/file-api";
-import { ConfigButton, ConfigListAction, ConfigScopeTag, ConfigSwitch } from "./SettingsUi";
+import { sendAgentCommand } from "@/lib/agent-client";
+import { moveSubagentProfile } from "@/lib/subagent-order";
+import { ConfigButton, ConfigListAction, ConfigScopeTag, ConfigSwitch, useSettingsDetailNavigation } from "./SettingsUi";
 import { useConfigSidebarResize } from "./ConfigPanelShared";
 import { ReaderFloatingSelect } from "./ReaderFloatingSelect";
+import { useHiddenModelProviders } from "@/hooks/useHiddenModelProviders";
+import { filterHiddenProviderNames } from "@/lib/model-visibility-preference";
 
 export interface AgentsConfigProps {
   cwd?: string;
@@ -27,20 +31,30 @@ export interface AgentsConfigProps {
   controllerRef?: React.MutableRefObject<SettingsPanelController | null>;
 }
 
+const DEFAULT_READER_NATIVE: ReaderNativeProfileOptions = {
+  loadSkills: true,
+  loadExtensions: true,
+  codemode: "inherit",
+  mcp: "on",
+  inheritContext: false,
+  runInBackground: true,
+};
+
 const DEFAULT_DRAFT: SubagentProfile = {
   name: "",
   displayName: "",
   description: "",
   systemPrompt: "",
   tools: [...BUILTIN_TOOLS],
+  reader: { ...DEFAULT_READER_NATIVE },
   enabled: true,
   scope: "global",
   toolsExplicit: true,
   defaultContext: "fresh",
-  defaultAsync: false,
+  defaultAsync: true,
   inheritProjectContext: true,
-  inheritGlobalContext: false,
-  inheritSkills: false,
+  inheritGlobalContext: true,
+  inheritSkills: true,
 };
 
 type ProfileGroupKey = "project" | "workspace" | "global" | "builtin-reader" | "runtime";
@@ -73,11 +87,39 @@ function cloneProfile(profile: SubagentProfile): SubagentProfile {
   return {
     ...profile,
     tools: [...profile.tools],
+    ...(profile.reader ? { reader: { ...profile.reader } } : {}),
   };
+}
+
+function readerOptions(profile: SubagentProfile): ReaderNativeProfileOptions {
+  return {
+    ...DEFAULT_READER_NATIVE,
+    ...(profile.reader ?? {}),
+    inheritContext: profile.defaultContext === "fork",
+    runInBackground: profile.defaultAsync,
+  };
+}
+
+function modelReferenceBase(reference: string, models: readonly { provider: string; id: string }[]): string {
+  if (models.some((model) => `${model.provider}/${model.id}` === reference)) return reference;
+  const colon = reference.lastIndexOf(":");
+  const suffix = reference.slice(colon + 1);
+  return colon > 0 && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(suffix)
+    ? reference.slice(0, colon)
+    : reference;
 }
 
 function profileKey(profile: Pick<SubagentProfile, "scope" | "name">): string {
   return `${profile.scope}:${profile.name}`;
+}
+
+function duplicateProfileName(name: string, profiles: readonly SubagentProfile[]): string {
+  const existing = new Set(profiles.map((profile) => profile.name.toLowerCase()));
+  const base = `${name}-copy`;
+  let candidate = base;
+  let suffix = 2;
+  while (existing.has(candidate.toLowerCase())) candidate = `${base}-${suffix++}`;
+  return candidate;
 }
 
 function editableModel(profile: SubagentProfile): string | undefined {
@@ -125,6 +167,7 @@ function comparableProfile(profile: SubagentProfile): Record<string, unknown> {
     inheritProjectContext: profile.inheritProjectContext,
     inheritGlobalContext: profile.inheritGlobalContext,
     inheritSkills: profile.inheritSkills,
+    reader: readerOptions(profile),
   };
 }
 
@@ -139,19 +182,28 @@ function hasNewDraftChanges(profile: SubagentProfile): boolean {
   return !profilesEqual(comparable, DEFAULT_DRAFT);
 }
 
-export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, embedded = false, onOpenFile, active = true, controllerRef, trust }: AgentsConfigProps) {
+export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, onReloaded, embedded = false, onOpenFile, active = true, controllerRef, trust }: AgentsConfigProps) {
   const { t } = useI18n();
+  const navigation = useSettingsDetailNavigation();
   const isMobile = useIsMobile();
+  const hiddenModelProviders = useHiddenModelProviders();
   const sidebarResizer = useConfigSidebarResize();
 
   const [showBuiltInInfo, setShowBuiltInInfo] = useState(false);
   const builtInInfoRef = useRef<HTMLDivElement>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(false);
+  const [reloadNeededFor, setReloadNeededFor] = useState<string | null>(null);
+  const reloadIdentity = sessionId ? JSON.stringify([remotePeer ?? null, sessionId]) : null;
+  const reloadNeeded = reloadIdentity !== null && reloadNeededFor === reloadIdentity;
+  const [reloading, setReloading] = useState(false);
   const [maxConcurrent, setMaxConcurrent] = useState(10);
   const [, setBuiltInLoading] = useState(true);
   const [profiles, setProfiles] = useState<SubagentProfile[]>([]);
   const [, setLoadingProfiles] = useState(true);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [profileDrop, setProfileDrop] = useState<{ group: ProfileGroupKey; key: string; after: boolean } | null>(null);
+  const draggedProfileRef = useRef<{ group: ProfileGroupKey; key: string } | null>(null);
+  const [reordering, setReordering] = useState(false);
   const [expandedScopes, setExpandedScopes] = useState<Record<ProfileGroupKey, boolean>>({
     project: true,
     workspace: true,
@@ -161,17 +213,22 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
   });
   const trustKey = projectTrustReloadKey(trust);
   const [modelList, setModelList] = useState<Array<{ id: string; name: string; provider: string }>>([]);
+  const [modelError, setModelError] = useState<string | null>(null);
   const [thinkingLevelsMap, setThinkingLevelsMap] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
     setModelList([]);
+    setModelError(null);
     setThinkingLevelsMap({});
     fetch(apiPathForPeer(remotePeer, `models?cwd=${encodeURIComponent(cwd)}`), { cache: "no-store", signal: controller.signal })
-      .then((res) => res.json())
-      .then((data) => {
+      .then(async (res) => ({ ok: res.ok, status: res.status, data: await res.json() }))
+      .then(({ ok, status, data }) => {
         if (controller.signal.aborted) return;
+        const message = typeof data?.modelError?.message === "string" ? data.modelError.message
+          : typeof data?.error === "string" ? data.error : undefined;
+        if (!ok || message) setModelError(message ?? `HTTP ${status}`);
         if (data && Array.isArray(data.modelList)) {
           setModelList(data.modelList);
         } else if (data && data.models && typeof data.models === "object") {
@@ -188,7 +245,9 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
           setThinkingLevelsMap(data.thinkingLevels);
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        if (!controller.signal.aborted) setModelError(err instanceof Error ? err.message : String(err));
+      });
     return () => controller.abort();
   }, [active, cwd, remotePeer, trustKey]);
 
@@ -209,7 +268,15 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
   const draftsRef = useRef<Record<string, SubagentProfile>>({});
   const selectedKeyRef = useRef<string | null>(null);
   const isCreatingRef = useRef(false);
+  const newScopeRef = useRef<"global" | "project" | null>(null);
+  const reloadOwnerRef = useRef({ sessionId, remotePeer });
+  reloadOwnerRef.current = { sessionId, remotePeer };
   const [sessionEvidence, setSessionEvidence] = useState<{ loaded: boolean; provider?: string } | null>(null);
+
+  useEffect(() => {
+    setReloadNeededFor(sessionId && hasPendingSubagentReload(sessionId, remotePeer) ? reloadIdentity : null);
+  }, [sessionId, remotePeer, reloadIdentity]);
+  useEffect(() => { newScopeRef.current = null; }, [cwd, remotePeer]);
 
   useEffect(() => {
     draftsRef.current = draftsByKey;
@@ -266,16 +333,17 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
   const draftEditableThinking = editableThinking(draft);
   const { currentPrimaryProvider, currentPrimaryModelId } = useMemo(() => {
     if (!draftEditableModel) return { currentPrimaryProvider: "", currentPrimaryModelId: "" };
-    const matched = modelList.find((m) => `${m.provider}/${m.id}` === draftEditableModel);
+    const baseReference = modelReferenceBase(draftEditableModel, modelList);
+    const matched = modelList.find((m) => `${m.provider}/${m.id}` === baseReference);
     if (matched) return { currentPrimaryProvider: matched.provider, currentPrimaryModelId: matched.id };
-    const slashIdx = draftEditableModel.indexOf("/");
+    const slashIdx = baseReference.indexOf("/");
     if (slashIdx > 0) {
       return {
-        currentPrimaryProvider: draftEditableModel.slice(0, slashIdx),
-        currentPrimaryModelId: draftEditableModel.slice(slashIdx + 1),
+        currentPrimaryProvider: baseReference.slice(0, slashIdx),
+        currentPrimaryModelId: baseReference.slice(slashIdx + 1),
       };
     }
-    return { currentPrimaryProvider: "", currentPrimaryModelId: draftEditableModel };
+    return { currentPrimaryProvider: "", currentPrimaryModelId: baseReference };
   }, [draftEditableModel, modelList]);
 
   const getSupportedThinkingOptions = useCallback((provider: string, modelId: string) => {
@@ -296,6 +364,10 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
     if (!currentPrimaryProvider) return [];
     return modelList.filter((m) => m.provider === currentPrimaryProvider);
   }, [currentPrimaryProvider, modelList]);
+  const visibleProviderNames = useMemo(
+    () => filterHiddenProviderNames(providerNames, hiddenModelProviders, currentPrimaryProvider),
+    [currentPrimaryProvider, hiddenModelProviders, providerNames],
+  );
 
   const handlePrimaryProviderChange = useCallback((newProv: string) => {
     if (!newProv) {
@@ -390,6 +462,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
 
   const toggleBuiltIn = async (enabled: boolean) => {
     const previous = builtInEnabled;
+    const isCurrentOwner = () => reloadOwnerRef.current.sessionId === sessionId && reloadOwnerRef.current.remotePeer === remotePeer;
     setBuiltInEnabled(enabled);
     try {
       const res = await fetch(apiPathForPeer(remotePeer, "subagents/settings"), {
@@ -398,10 +471,36 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
         body: JSON.stringify({ enabled }),
       });
       if (!res.ok) throw new Error("Save failed");
-      setError(null);
+      if (sessionId) {
+        setPendingSubagentReload(sessionId, remotePeer, true);
+        if (isCurrentOwner()) setReloadNeededFor(reloadIdentity);
+      }
+      if (isCurrentOwner()) setError(null);
     } catch (err) {
-      setBuiltInEnabled(previous);
-      setError(err instanceof Error ? err.message : String(err));
+      if (isCurrentOwner()) {
+        setBuiltInEnabled(previous);
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  };
+
+  const reloadSession = async () => {
+    if (!sessionId || reloading) return;
+    const isCurrentOwner = () => reloadOwnerRef.current.sessionId === sessionId && reloadOwnerRef.current.remotePeer === remotePeer;
+    const pendingToken = pendingSubagentReloadToken(sessionId, remotePeer);
+    try {
+      setReloading(true);
+      setError(null);
+      await sendAgentCommand(sessionId, { type: "reload" }, remotePeer);
+      if (pendingSubagentReloadToken(sessionId, remotePeer) === pendingToken) {
+        setPendingSubagentReload(sessionId, remotePeer, false);
+        if (isCurrentOwner()) setReloadNeededFor(null);
+      }
+      onReloaded?.();
+    } catch (err) {
+      if (isCurrentOwner()) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReloading(false);
     }
   };
 
@@ -423,6 +522,90 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
     }
   };
 
+  const persistProfileOrder = useCallback(async (nextProfiles: SubagentProfile[]) => {
+    setProfiles(nextProfiles);
+    setReordering(true);
+    setError(null);
+    try {
+      const res = await fetch(apiPathForPeer(remotePeer, "subagents/settings"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order: nextProfiles.map(profileKey) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error ?? "Save failed");
+    } catch (err) {
+      await fetchProfiles();
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReordering(false);
+    }
+  }, [fetchProfiles, remotePeer]);
+
+  const moveProfile = useCallback((group: ProfileGroupKey, sourceKey: string, targetKey: string, after: boolean) => {
+    if (saving || reordering) return;
+    const groupProfiles = profiles.filter((profile) => getProfileGroupKey(profile) === group);
+    const nextGroup = moveSubagentProfile(groupProfiles, sourceKey, targetKey, after);
+    if (!nextGroup) return;
+    const groupKeys = new Set(groupProfiles.map(profileKey));
+    let nextGroupIndex = 0;
+    const nextProfiles = profiles.map((profile) => groupKeys.has(profileKey(profile)) ? nextGroup[nextGroupIndex++] : profile);
+    void persistProfileOrder(nextProfiles);
+  }, [persistProfileOrder, profiles, reordering, saving]);
+
+  const moveProfileByOffset = useCallback((group: ProfileGroupKey, sourceKey: string, offset: -1 | 1) => {
+    const groupProfiles = profiles.filter((profile) => getProfileGroupKey(profile) === group);
+    const sourceIndex = groupProfiles.findIndex((profile) => profileKey(profile) === sourceKey);
+    const target = sourceIndex < 0 ? undefined : groupProfiles[sourceIndex + offset];
+    if (!target) return;
+    moveProfile(group, sourceKey, profileKey(target), offset > 0);
+  }, [moveProfile, profiles]);
+
+  const profileDragProps = (group: ProfileGroupKey, key: string): React.HTMLAttributes<HTMLDivElement> => {
+    const target = (event: DragEvent<HTMLDivElement>) => {
+      const dragged = draggedProfileRef.current;
+      if (!dragged || dragged.group !== group || dragged.key === key) return null;
+      const rect = event.currentTarget.getBoundingClientRect();
+      return { after: event.clientY >= rect.top + rect.height / 2 };
+    };
+    const endDrag = () => {
+      draggedProfileRef.current = null;
+      setProfileDrop(null);
+    };
+    return {
+      draggable: !saving && !reordering,
+      onDragStart: (event) => {
+        if (saving || reordering) return;
+        draggedProfileRef.current = { group, key };
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/x-reader-subagent-profile", key);
+        event.dataTransfer.setData("text/plain", key);
+      },
+      onDragOver: (event) => {
+        const drop = target(event);
+        if (!drop) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        setProfileDrop((previous) => previous?.group === group && previous.key === key && previous.after === drop.after
+          ? previous
+          : { group, key, ...drop });
+      },
+      onDragLeave: (event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        setProfileDrop((previous) => previous?.group === group && previous.key === key ? null : previous);
+      },
+      onDrop: (event) => {
+        const drop = target(event);
+        const dragged = draggedProfileRef.current;
+        if (!drop || !dragged) return;
+        event.preventDefault();
+        moveProfile(group, dragged.key, key, drop.after);
+        endDrag();
+      },
+      onDragEnd: endDrag,
+    };
+  };
+
   const selectedProfile = useMemo(() => {
     if (isCreating) return null;
     return profiles.find((p) => `${p.scope}:${p.name}` === selectedKey) ?? null;
@@ -435,6 +618,10 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
   ));
   const canEditModel = isCreating || isProfileEditable;
   const isExternalRuntime = !isCreating && selectedProfile?.scope === "runtime" && selectedProfile.runtimeKind !== "native";
+  const draftReader = readerOptions(draft);
+  const readerChatOnly = draft.toolsExplicit !== false
+    && !draft.tools.some((tool) => BUILTIN_TOOLS.some((builtin) => builtin === tool))
+    && !draftReader.loadSkills && !draftReader.loadExtensions;
 
   const rememberCurrentDraft = useCallback(() => {
     const key = isCreating ? NEW_DRAFT_KEY : selectedKey;
@@ -459,6 +646,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
     selectedKeyRef.current = key;
     expandProfile(p);
     setDraft(cloneProfile(nextDraft));
+    navigation?.openDetail(p.displayName || p.name);
   };
 
   const handleStartCreate = () => {
@@ -466,7 +654,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
       ? draft
       : draftsRef.current[NEW_DRAFT_KEY] ?? {
           ...DEFAULT_DRAFT,
-          scope: cwd ? "project" : "global",
+          scope: newScopeRef.current ?? (cwd ? "project" : "global"),
           tools: [...BUILTIN_TOOLS],
           toolsExplicit: true,
         };
@@ -493,10 +681,12 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
     selectedKeyRef.current = null;
     setDraft({
       ...draft,
-      name: `${draft.name}-copy`,
+      name: duplicateProfileName(draft.name, profiles),
       displayName: t("agents.copyName", { name: draft.displayName }),
       scope: draft.scope === "project" ? "project" : "global",
       builtinKind: undefined,
+      filePath: undefined,
+      copyFrom: selectedProfile ? { scope: selectedProfile.scope, name: selectedProfile.name } : undefined,
       tools: [...draft.tools],
       toolsExplicit: draft.toolsExplicit,
     });
@@ -558,6 +748,9 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
 
   const saveProfile = useCallback(async (profile: SubagentProfile, baseline?: SubagentProfile) => {
     if (!profile.name.trim()) throw new Error("Agent ID is required");
+    if (profile.reader?.maxTurns !== undefined && (!Number.isSafeInteger(profile.reader.maxTurns) || profile.reader.maxTurns < 1)) {
+      throw new Error(t("agents.invalidMaxTurns"));
+    }
     const currentBaseline = baseline ?? profiles.find((candidate) => profileKey(candidate) === profileKey(profile));
     if (profile.scope === "builtin" || profile.scope === "runtime") {
       const patch: Record<string, string | boolean | null> = { };
@@ -585,7 +778,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? "Save failed");
-  }, [cwd, profiles, remotePeer, sessionId]);
+  }, [cwd, profiles, remotePeer, sessionId, t]);
 
   const handleSave = useCallback(async (): Promise<boolean> => {
     const currentKey = isCreating ? NEW_DRAFT_KEY : selectedKey;
@@ -627,6 +820,12 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
         }
       }
       if (succeeded.size > 0) {
+        if (sessionId) {
+          setPendingSubagentReload(sessionId, remotePeer, true);
+          if (reloadOwnerRef.current.sessionId === sessionId && reloadOwnerRef.current.remotePeer === remotePeer) {
+            setReloadNeededFor(reloadIdentity);
+          }
+        }
         // Remove saved drafts before reloading. fetchProfiles intentionally prefers
         // an unsaved draft when one exists, so refreshing first would put the old
         // object back into the form and make the controller report dirty again.
@@ -663,7 +862,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
     } finally {
       setSaving(false);
     }
-  }, [draft, fetchProfiles, isCreating, isProfileEditable, profiles, saveProfile, selectedKey, selectedProfile]);
+  }, [draft, fetchProfiles, isCreating, isProfileEditable, profiles, reloadIdentity, remotePeer, saveProfile, selectedKey, selectedProfile, sessionId]);
 
   const isDirty = useCallback(() => {
     if (Object.keys(draftsByKey).length > 0) return true;
@@ -709,6 +908,10 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
     });
   };
 
+  const updateReaderOptions = (change: Partial<ReaderNativeProfileOptions>) => {
+    setDraft((prev) => ({ ...prev, reader: { ...readerOptions(prev), ...change } }));
+  };
+
   // Grouping
   const globals = useMemo(() => profiles.filter((p) => p.scope === "global"), [profiles]);
   const projects = useMemo(() => profiles.filter((p) => p.scope === "project"), [profiles]);
@@ -733,8 +936,8 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
             <button
               type="button"
               onClick={() => setShowBuiltInInfo((prev) => !prev)}
-              aria-label={`${t("agents.executionNotice")}\n${sessionEvidence?.loaded ? (builtInEnabled ? t("agents.executionReaderLoaded") : t("agents.executionPiLoaded")) : t("agents.executionPending")}`}
-              title={`${t("agents.executionNotice")}\n${sessionEvidence?.loaded ? (builtInEnabled ? t("agents.executionReaderLoaded") : t("agents.executionPiLoaded")) : t("agents.executionPending")}`}
+              aria-label={`${t("agents.executionNotice")}\n${t("agents.executionPending")}`}
+              title={`${t("agents.executionNotice")}\n${t("agents.executionPending")}`}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -778,16 +981,22 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
                 <div style={{ fontSize: 11, color: "var(--text-muted)", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
                   <div>{t("agents.executionNotice")}</div>
                   <div style={{ marginTop: 4, color: "var(--accent)" }}>
-                    {sessionEvidence?.loaded
-                      ? (builtInEnabled ? t("agents.executionReaderLoaded") : t("agents.executionPiLoaded"))
-                      : t("agents.executionPending")}
+                    {t("agents.executionPending")}
                   </div>
                 </div>
               </div>
             )}
           </div>
         </div>
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 16, flexShrink: 0, marginLeft: "auto" }}>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 10, flexShrink: 0, marginLeft: "auto" }}>
+          {reloadNeeded && sessionId && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, color: "#d97706", fontSize: 11 }}>
+              <span>{t("agents.reloadRequired")}</span>
+              <ConfigButton size="small" onClick={() => void reloadSession()} disabled={reloading}>
+                {reloading ? t("agents.reloading") : t("agents.reloadSession")}
+              </ConfigButton>
+            </span>
+          )}
           <label title={t("agents.maxConcurrentDescription")} style={{ display: "inline-flex", alignItems: "center", gap: 7, color: "var(--text-muted)", fontSize: 12 }}>
             <span>{t("agents.maxConcurrent")}</span>
             <input
@@ -811,11 +1020,11 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
       </div>
 
       {/* Main Split Body */}
-      <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", flex: 1, minHeight: 0 }}>
+      <div className="settings-phone-split" style={{ display: "flex", flexDirection: isMobile ? "column" : "row", flex: 1, minHeight: 0 }}>
         {/* Left Agent List */}
         <div
           ref={sidebarResizer.panelRef}
-          className="config-sidebar config-resource-sidebar agents-config-sidebar"
+          className="config-sidebar config-resource-sidebar agents-config-sidebar settings-phone-list"
           style={{
             width: isMobile ? "100%" : "var(--config-sidebar-width, 240px)",
             maxHeight: isMobile ? "40vh" : undefined,
@@ -870,16 +1079,40 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
                   {expanded && groupProfiles.map((p) => {
                     const isOverridden = p.scope === "builtin" && (globals.some((g) => g.name.toLowerCase() === p.name.toLowerCase()) || projects.some((pr) => pr.name.toLowerCase() === p.name.toLowerCase()));
                     return (
-                      <button
+                      <div
                         key={`${p.scope}:${p.name}`}
-                        type="button"
-                        onClick={() => handleSelect(p)}
+                        role="button"
+                        tabIndex={0}
+                        aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
                         aria-current={selectedKey === `${p.scope}:${p.name}` && !isCreating ? "page" : undefined}
+                        aria-busy={reordering}
+                        title={t("modelRouting.dragToReorder")}
+                        {...profileDragProps(group, profileKey(p))}
+                        onKeyDown={(event) => {
+                          if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+                            const offset = event.key === "ArrowUp" ? -1 : 1;
+                            const index = groupProfiles.findIndex((profile) => profileKey(profile) === profileKey(p));
+                            if (groupProfiles[index + offset]) {
+                              event.preventDefault();
+                              moveProfileByOffset(group, profileKey(p), offset);
+                            }
+                            return;
+                          }
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            handleSelect(p);
+                          }
+                        }}
+                        onClick={() => handleSelect(p)}
                         className="config-sidebar-item config-resource-item agents-sidebar-item"
                         style={{
                           justifyContent: "space-between",
+                          cursor: reordering ? "wait" : "grab",
                           background: selectedKey === `${p.scope}:${p.name}` && !isCreating ? "var(--bg-selected, rgba(59, 130, 246, 0.12))" : "transparent",
                           color: selectedKey === `${p.scope}:${p.name}` && !isCreating ? "var(--accent, #3b82f6)" : "var(--text)",
+                          boxShadow: profileDrop?.group === group && profileDrop.key === profileKey(p)
+                            ? `inset 0 ${profileDrop.after ? "-2px" : "2px"} 0 var(--accent)`
+                            : undefined,
                         }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -901,7 +1134,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
                             {t("agents.overridden")}
                           </span>
                         )}
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -909,7 +1142,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
             })}
           </div>
 
-          <ConfigListAction active={isCreating} onClick={handleStartCreate}>{t("agents.new")}</ConfigListAction>
+          <ConfigListAction active={isCreating} onClick={() => { handleStartCreate(); navigation?.openDetail(t("agents.new")); }}>{t("agents.new")}</ConfigListAction>
         </div>
 
         {!isMobile && (
@@ -921,21 +1154,45 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
         )}
 
         {/* Right Detail / Edit Form */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--config-detail-padding-top) 22px 32px", display: "flex", flexDirection: "column", gap: 16 }}>
+        <div className="settings-phone-detail" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "var(--config-detail-padding-top) 22px 32px", display: "flex", flexDirection: "column", gap: 16 }}>
           {/* Top Bar inside Detail Pane: badge + path + open + actions */}
           <div className="config-detail-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, minWidth: 0, minHeight: "var(--config-control-height)", flexWrap: "wrap" }}>
             <div className="config-detail-header-info" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flexWrap: "nowrap" }}>
-              <ConfigScopeTag scope={draft.scope}>
-                {draft.scope === "project"
-                  ? t("agents.scope.project")
-                  : draft.scope === "workspace"
-                  ? t("agents.scope.workspace")
-                  : draft.scope === "global"
-                  ? t("agents.scope.global")
-                  : draft.scope === "runtime"
-                  ? t("agents.scope.runtimeBuiltin")
-                  : t("agents.scope.readerBuiltin")}
-              </ConfigScopeTag>
+              {isCreating ? (
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 11 }}>
+                  <span>{t("config.saveTo")}</span>
+                  <ReaderFloatingSelect
+                    value={draft.scope === "project" ? "project" : "global"}
+                    onChange={(value) => {
+                      const scope = value as "global" | "project";
+                      newScopeRef.current = scope;
+                      setDraft((profile) => ({ ...profile, scope }));
+                    }}
+                    options={[
+                      { value: "global", label: t("agents.scope.global") },
+                      { value: "project", label: t("agents.scope.project") },
+                    ]}
+                    ariaLabel={t("config.saveTo")}
+                    disabled={saving}
+                    appearance="field"
+                    containerStyle={{ width: 120 }}
+                    triggerStyle={{ height: 28, fontSize: 12 }}
+                    optionFontSize={12}
+                  />
+                </label>
+              ) : (
+                <ConfigScopeTag scope={draft.scope}>
+                  {draft.scope === "project"
+                    ? t("agents.scope.project")
+                    : draft.scope === "workspace"
+                    ? t("agents.scope.workspace")
+                    : draft.scope === "global"
+                    ? t("agents.scope.global")
+                    : draft.scope === "runtime"
+                    ? t("agents.scope.runtimeBuiltin")
+                    : t("agents.scope.readerBuiltin")}
+                </ConfigScopeTag>
+              )}
               {!isMobile && draft.filePath && (
                 <code
                   style={{
@@ -1035,7 +1292,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
               <input
                 type="text"
                 value={draft.name}
-                readOnly={isReadonlyProfile}
+                readOnly={isReadonlyProfile || !isCreating}
                 onChange={(e) => setDraft((p) => ({ ...p, name: e.target.value }))}
                 style={{
                   height: 34,
@@ -1104,8 +1361,8 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
                     onChange={(val) => handlePrimaryProviderChange(val)}
                     options={[
                       { value: "", label: t("agents.followParent") },
-                      ...providerNames.map((provider) => ({ value: provider, label: provider })),
-                      ...(currentPrimaryProvider && !providerNames.includes(currentPrimaryProvider)
+                      ...visibleProviderNames.map((provider) => ({ value: provider, label: provider })),
+                      ...(currentPrimaryProvider && !visibleProviderNames.includes(currentPrimaryProvider)
                         ? [{ value: currentPrimaryProvider, label: currentPrimaryProvider }]
                         : []),
                     ]}
@@ -1219,6 +1476,7 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
                   {sessionEvidence?.loaded ? ` · ${sessionEvidence.provider}` : ` · ${t("agents.executionPending")}`}
                 </div>
               )}
+              {modelError && <div style={{ color: "#ef4444", fontSize: 11 }}>{modelError}</div>}
             </div>
           )}
 
@@ -1374,6 +1632,72 @@ export function AgentsConfig({ cwd = "", sessionId = null, remotePeer, onClose, 
               <span>{t("agents.background")}</span>
             </label>
           </div>
+
+          {!isExternalRuntime && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 4, borderTop: "1px solid var(--border)" }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
+                {t("agents.readerRuntime")}
+              </label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 20px" }}>
+                {([
+                  ["loadSkills", "agents.loadSkills"],
+                  ["loadExtensions", "agents.loadExtensions"],
+                ] as const).map(([field, label]) => (
+                  <label key={field} style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: isReadonlyProfile ? "not-allowed" : "pointer", fontSize: 13, color: "var(--text)" }}>
+                    <input
+                      type="checkbox"
+                      checked={readerOptions(draft)[field]}
+                      disabled={isReadonlyProfile}
+                      onChange={(event) => updateReaderOptions({ [field]: event.target.checked } as Partial<ReaderNativeProfileOptions>)}
+                      style={{ accentColor: "var(--accent, #3b82f6)", cursor: isReadonlyProfile ? "not-allowed" : "pointer" }}
+                    />
+                    <span>{t(label)}</span>
+                  </label>
+                ))}
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: isReadonlyProfile ? "not-allowed" : "pointer", fontSize: 13, color: "var(--text)" }}>
+                  <input
+                    type="checkbox"
+                    checked={readerOptions(draft).mcp === "on"}
+                    disabled={isReadonlyProfile || (readerChatOnly && draftReader.mcp !== "on")}
+                    onChange={(event) => updateReaderOptions({ mcp: event.target.checked ? "on" : "off" })}
+                    style={{ accentColor: "var(--accent, #3b82f6)", cursor: isReadonlyProfile ? "not-allowed" : "pointer" }}
+                  />
+                  <span>{t("agents.mcp")}</span>
+                </label>
+              </div>
+              {readerChatOnly && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agents.chatOnlyResources")}</span>}
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(120px, 0.7fr)", gap: 10 }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--text-dim)" }}>
+                  <span>{t("agents.codemode")}</span>
+                  <ReaderFloatingSelect
+                    value={readerOptions(draft).codemode}
+                    disabled={isReadonlyProfile}
+                    onChange={(value) => updateReaderOptions({ codemode: value as ReaderNativeProfileOptions["codemode"] })}
+                    options={[
+                      { value: "inherit", label: t("agents.codemode.inherit") },
+                      { value: "on", label: t("agents.codemode.on"), disabled: readerChatOnly && draftReader.codemode !== "on" },
+                      { value: "off", label: t("agents.codemode.off") },
+                    ]}
+                    ariaLabel={t("agents.codemode")}
+                    appearance="field"
+                    triggerStyle={{ height: 34, fontSize: 13 }}
+                    optionFontSize={13}
+                  />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--text-dim)" }}>
+                  <span>{t("agents.maxTurns")}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={readerOptions(draft).maxTurns ?? ""}
+                    disabled={isReadonlyProfile}
+                    onChange={(event) => updateReaderOptions({ maxTurns: event.target.value ? Number(event.target.value) : undefined })}
+                    style={{ height: 34, padding: "0 8px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text)", fontSize: 13 }}
+                  />
+                </label>
+              </div>
+            </div>
+          )}
 
         </div>
       </div>

@@ -3,7 +3,6 @@ import fs from "node:fs";
 import { localDeviceId, readActivityConfig } from "@/lib/activity-peers";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { isApiRequestAllowed } from "@/lib/request-security";
 import { openCommandFor } from "@/lib/open-apps";
 
@@ -66,15 +65,13 @@ export async function POST(request: NextRequest) {
     }
 
     const filePath = path.resolve(body.path);
-    const allowedRoots = await getAllowedFileRoots();
-    if (!isFilePathAllowed(filePath, allowedRoots) || !isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
     const target = fs.realpathSync(filePath);
     openFileWithApp(target, requestedApp);
     return NextResponse.json({ opened: target });
   } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (code === "EACCES" || code === "EPERM") return NextResponse.json({ error: "Permission denied" }, { status: 403 });
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }

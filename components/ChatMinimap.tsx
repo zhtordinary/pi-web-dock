@@ -11,6 +11,7 @@ import { splitFinalAssistantBlocks } from "@/lib/message-display";
 import { isSubagentWakeMessage, stripHiddenUserQuestion } from "@/lib/session-hover-preview";
 import type { AgentMessage, AssistantMessage, CustomMessage, TextContent, UserMessage } from "@/lib/types";
 import type { HistoryNode } from "@/lib/session-history-types";
+import type { StreamingStore } from "@/lib/streaming-message";
 import styles from "./ChatMinimap.module.css";
 import { ArrowDown } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
@@ -93,7 +94,8 @@ interface Props {
   messages: AgentMessage[];
   entryIds: string[];
   scopeKey?: string;
-  streamingMessage: Partial<AgentMessage> | null;
+  streamingStore: StreamingStore;
+  atLiveTail: boolean;
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
   streamingMessageRef: RefObject<HTMLDivElement | null>;
@@ -113,7 +115,6 @@ const MINIMAP_PADDING = 12;
 const MINIMAP_ACTION_SLOT = 32;
 const PREVIEW_HIDE_DELAY = 250;
 const NAVIGATION_ACTIVE_LOCK_MS = 1600;
-const PREVIEW_NEIGHBOR_COUNT = 2;
 
 interface AssistantPreview {
   markdown: string;
@@ -167,11 +168,12 @@ function elementForEntry(scrollEl: HTMLDivElement, entryId: string): HTMLElement
     .find((element) => element.dataset.entryId === entryId) ?? null;
 }
 
-export function ChatMinimap({
+export const ChatMinimap = memo(function ChatMinimap({
   messages,
   entryIds,
   scopeKey = "",
-  streamingMessage,
+  streamingStore,
+  atLiveTail,
   scrollContainer,
   messageRefs: _messageRefs,
   streamingMessageRef,
@@ -193,6 +195,8 @@ export function ChatMinimap({
   const draggingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const allNodesRef = useRef<NodeInfo[]>([]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const nodeLayoutRef = useRef<NodeLayout>({ nodes: [], gap: MAX_NODE_GAP, fillsHeight: false });
   const previewBoxRef = useRef<HTMLDivElement>(null);
   const previewItemRefs = useRef(new Map<number, HTMLDivElement>());
@@ -244,11 +248,12 @@ export function ChatMinimap({
     const messageIndexByEntryId = new Map<string, number>();
     entryIds.forEach((entryId, index) => { if (entryId) messageIndexByEntryId.set(entryId, index); });
     const nextNodes: NodeInfo[] = [];
+    const streamingMessage = atLiveTail ? streamingStore.getState().streamingMessage : null;
     for (const node of historyNodes) {
       const nodeIndex = node.nodeIndex;
       const entryId = node?.entryId ?? "";
       const messageIndex = entryId ? messageIndexByEntryId.get(entryId) : undefined;
-      const message = messageIndex === undefined ? null : messages[messageIndex];
+      const message = messageIndex === undefined ? null : messagesRef.current[messageIndex];
       if (message && isSubagentWakeMessage(message)) continue;
       const element = elementForEntry(scrollEl, entryId);
       const elementRect = element?.getBoundingClientRect();
@@ -261,15 +266,16 @@ export function ChatMinimap({
       const assistantPreviews: AssistantPreview[] = [];
       let toolCount = 0;
       if (messageIndex !== undefined) {
-        for (let index = messageIndex + 1; index < messages.length; index += 1) {
-          const next = messages[index];
-          if (next.role === "user" || isCompactionMessage(next)) break;
+        let lastTurn = true;
+        for (let index = messageIndex + 1; index < messagesRef.current.length; index += 1) {
+          const next = messagesRef.current[index];
+          if (next.role === "user" || isCompactionMessage(next)) { lastTurn = false; break; }
           if (next.role !== "assistant") continue;
           toolCount += countToolCalls(next);
           const markdown = getAssistantAnswerMarkdown(next);
           if (markdown) assistantPreviews.push({ markdown, element: elementForEntry(scrollEl, entryIds[index] ?? "") });
         }
-        if (streamingMessage?.role === "assistant" && messageIndex === messages.length - 1) {
+        if (kind === "turn" && lastTurn && streamingMessage?.role === "assistant") {
           const markdown = getAssistantAnswerMarkdown(streamingMessage);
           if (markdown) assistantPreviews.push({ markdown, element: streamingMessageRef.current });
         }
@@ -297,7 +303,7 @@ export function ChatMinimap({
     pendingNavigationRef.current = null;
     lockActiveNode(pendingNode.index);
     onScrollToEntry(target, pending.target === "compaction" ? 0 : MINIMAP_ANCHOR_OFFSET);
-  }, [entryIds, historyNodeCount, historyNodes, messages, onScrollToEntry, scrollContainer, streamingMessage, streamingMessageRef, syncActiveNode, lockActiveNode, scopeKey]);
+  }, [atLiveTail, entryIds, historyNodeCount, historyNodes, onScrollToEntry, scrollContainer, streamingMessageRef, streamingStore, syncActiveNode, lockActiveNode, scopeKey]);
 
   useEffect(() => {
     const el = scrollContainer.current;
@@ -327,6 +333,16 @@ export function ChatMinimap({
     syncLayout();
     return () => { clearTimeout(timeout); ro?.disconnect(); };
   }, [measureNodes, scrollContainer, updateVisibility, visible]);
+
+  useEffect(() => {
+    if (!visible || !atLiveTail) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = streamingStore.subscribe(() => {
+      if (timer !== null) return;
+      timer = setTimeout(() => { timer = null; measureNodes(); }, 100);
+    });
+    return () => { unsubscribe(); if (timer !== null) clearTimeout(timer); };
+  }, [atLiveTail, measureNodes, streamingStore, visible]);
 
   const scrollToNode = useCallback((node: NodeInfo) => {
     onReadHistory();
@@ -437,9 +453,7 @@ export function ChatMinimap({
   if (!visible) return null;
   const lastNodeTop = positionedNodes.length ? positionedNodes[positionedNodes.length - 1].topRatio * minimapHeight : MINIMAP_PADDING;
   const railHeight = Math.max(1, lastNodeTop - MINIMAP_PADDING);
-  const previewNodes = nearestNode
-    ? positionedNodes.filter((node) => Math.abs(node.index - nearestNode.index) <= PREVIEW_NEIGHBOR_COUNT)
-    : positionedNodes.slice(0, PREVIEW_NEIGHBOR_COUNT * 2 + 1);
+  const previewNodes = positionedNodes;
 
   return (
     <div
@@ -494,7 +508,7 @@ export function ChatMinimap({
       )}
     </div>
   );
-}
+});
 
 // Hook to create a stable array of refs for messages
 export function useMessageRefs(count: number): RefObject<(HTMLDivElement | null)[]> {

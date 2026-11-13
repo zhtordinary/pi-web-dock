@@ -14,6 +14,7 @@ import {
 import { readModelsJson, writeModelsJson } from "@/lib/models-json-store";
 import { ModelsConfigReadError } from "@/lib/models-config-store";
 import { MODEL_RUNTIME_REFRESH_TIMEOUT_MS, refreshRpcSessionModels } from "@/lib/rpc-manager";
+import { installOpenAIProviderAliases } from "@/lib/openai-provider-aliases";
 
 export const dynamic = "force-dynamic";
 
@@ -169,6 +170,7 @@ export async function POST(req: Request) {
     readModelsJson();
 
     const runtime = await ModelRuntime.create();
+    installOpenAIProviderAliases(runtime);
     const provider = runtime.getProvider(providerName);
     if (!provider) return NextResponse.json({ error: `Unknown provider: ${providerName}` }, { status: 404 });
     if (!provider.auth.apiKey) {

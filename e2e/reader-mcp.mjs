@@ -2,15 +2,20 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdirSync,writeFileSync,readFileSync,createWriteStream,readdirSync} from 'node:fs';
+import {mkdirSync,writeFileSync,readFileSync,createWriteStream,readdirSync,realpathSync} from 'node:fs';
 import {join} from 'node:path';
-import {tmpdir} from 'node:os';
+import {tmpdir,userInfo} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
+import {currentPiPackage} from '../test-support/current-pi-package.mjs';
 const repo=fileURLToPath(new URL('..',import.meta.url));
 const questionnaireSource=process.env.READER_QUESTIONNAIRE_SOURCE;
-if(questionnaireSource)assert.equal(JSON.parse(readFileSync(join(questionnaireSource,'package.json'),'utf8')).version,'2.13.8');
+const questionnairePackage=questionnaireSource?currentPiPackage('@juicesharp/rpiv-ask-user-question',{
+ agentDir:process.env.READER_TEST_PI_AGENT_DIR||join(userInfo().homedir,'.pi','agent'),
+ manifestPath:process.env.READER_TEST_PI_PACKAGE_MANIFEST||join(userInfo().homedir,'Sync/pi-state/agent/npm/package.json'),
+}):undefined;
+if(questionnaireSource)assert.equal(realpathSync(questionnaireSource),questionnairePackage.packageRoot,'questionnaire source must be the current installed plugin');
 const root=join(process.env.READER_MCP_QA_OUTPUT_ROOT||tmpdir(),'reader-mcp-acceptance-'+Date.now());mkdirSync(root,{recursive:true});
 const home=join(root,'home'),agent=join(home,'.pi','agent'),project=join(home,'project');for(const p of [agent,project])mkdirSync(p,{recursive:true});
 const evidence={root,scope:'real Reader HTTP and persistence; deterministic loopback OpenAI-compatible fixture; packaged Reader MCP stdio adapter',adapterVersion:JSON.parse(readFileSync(join(repo,'packages/reader-mcp/package.json'),'utf8')).version,requests:[],modelRequests:[],processes:[]};
@@ -28,7 +33,7 @@ writeFileSync(join(agent,'models.json'),JSON.stringify({providers:{fixture:{base
 writeFileSync(join(agent,'settings.json'),JSON.stringify({defaultProvider:'fixture',defaultModel:'fixture-model',defaultThinkingLevel:'off',packages:[],compaction:{enabled:false}}));
 mkdirSync(join(agent,'extensions'),{recursive:true});
 writeFileSync(join(agent,'extensions','qa-question.ts'),`export default function(pi){pi.registerTool({name:'qa_question',label:'Fixture question',description:'Deterministic test question only',parameters:{type:'object',properties:{manual:{type:'boolean'}}},async execute(id,args,signal,onUpdate,ctx){if(args.manual){const selected=await ctx.ui.select('Review authorization',['Allow one reviewer','Manual reply']);const answer=selected==='Manual reply'?await ctx.ui.input('Manual authorization response'):selected;return {content:[{type:'text',text:JSON.stringify({selected,answer})}],details:{selected,answer}}}const confirmed=await ctx.ui.confirm('QA question','Confirm fixture answer?');return {content:[{type:'text',text:JSON.stringify({confirmed})}],details:{confirmed}}}})}`);
-if(questionnaireSource){writeFileSync(join(agent,'extensions','original-questionnaire.ts'),`export {default} from ${JSON.stringify(join(questionnaireSource,'index.ts'))};`);evidence.originalQuestionnaire={version:'2.13.8',source:questionnaireSource};}
+if(questionnaireSource){writeFileSync(join(agent,'extensions','original-questionnaire.ts'),`export {default} from ${JSON.stringify(join(questionnaireSource,'index.ts'))};`);evidence.originalQuestionnaire={version:questionnairePackage.version,source:questionnairePackage.packageRoot};}
 const guard=join(root,'network-guard.mjs');writeFileSync(guard,`const original=globalThis.fetch;globalThis.fetch=(input,options)=>{const url=new URL(typeof input==='string'||input instanceof URL?String(input):input.url);if(!['127.0.0.1','localhost','[::1]'].includes(url.hostname))throw new Error('QA_BLOCKED_EXTERNAL:'+url.origin);return original(input,options)};`);
 const probe=createServer();probe.listen(0,'127.0.0.1');await once(probe,'listening');const port=probe.address().port;await new Promise(r=>probe.close(r));const base=`http://127.0.0.1:${port}`;
 let child;

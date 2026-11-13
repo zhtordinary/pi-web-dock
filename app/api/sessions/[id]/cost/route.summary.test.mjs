@@ -107,6 +107,9 @@ test("summary: eight rotating sessions avoid transcript reads even with the read
     assert.equal(cleared.result.historyParse, 0);
     assert.equal("contextUsage" in summary.bodies[0], false);
     assert.equal("compactionContexts" in summary.bodies[0], false);
+    assert.equal("messageCosts" in summary.bodies[0], false);
+    assert.equal("imageGenerationCosts" in summary.bodies[0], false);
+    assert.equal("compactionCosts" in summary.bodies[0], false);
     assert.ok(full.bodies[0].contextUsage, "default full API remains intact");
   } finally {
     metrics = undefined;

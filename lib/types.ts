@@ -173,7 +173,7 @@ export interface BashExecutionMessage extends ReaderMessageTiming {
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage;
 
-export type ExtensionUiRequest = { runtimeGeneration?: string; createdAt?: number } & (
+export type ExtensionUiRequest = { runtimeGeneration?: string; createdAt?: number; sideAskRunId?: string; sideAskLabel?: string } & (
   | {
       type: "extension_ui_request";
       id: string;
@@ -423,9 +423,11 @@ export interface SessionInfo {
   parentSessionId?: string; // fork source or subagent parent
   relation?:
     | { kind: "fork"; originSessionId?: string }
-    | { kind: "subagent"; parentSessionId: string; profile: string; description: string; status: SubagentSessionStatus };
+    | { kind: "subagent"; parentSessionId: string; profile: string; description: string; model?: string; status: SubagentSessionStatus };
   /** Reader-only Talk Map context source; does not represent a Pi fork. */
   contextSourceSessionId?: string;
+  /** Server-derived effective model label for list rows; absent before the first model record. */
+  modelName?: string;
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */

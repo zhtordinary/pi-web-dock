@@ -26,6 +26,7 @@ function harness() {
   let queue = { steering: [], followUp: [] };
   const requests = [], writes = [];
   const projection = new QueuedDraftProjection(); projection.reset("s");
+  const streamState = { isStreaming: false };
   const ctx = {
     useCallback: fn => fn, AbortSignal, AbortController, encodeURIComponent, Map, Set,
     console: { error() {} }, window: { setTimeout, clearTimeout },
@@ -36,7 +37,7 @@ function harness() {
     stateRunRevisionRef: { current: 0 }, currentAgentRunIdRef: { current: "run" }, promptRunIdRef: { current: 1 },
     stateLoadInFlightRef: { current: null }, stateLoadGenerationRef: { current: 0 }, runtimeSettingsReadGenerationRef: { current: 0 },
     branchRef: { current: null }, sessionStatePendingRef: { current: false }, agentRunningRef: { current: true }, activeToolIdsRef: { current: new Set() }, toolEventRevisionRef: { current: 0 },
-    bashRunningRef: { current: false }, streamState: { isStreaming: false }, sdkAgentActiveRef: { current: false }, rpcPromptPendingRef: { current: true },
+    bashRunningRef: { current: false }, streamState, streamingStore: { getState: () => streamState }, sdkAgentActiveRef: { current: false }, rpcPromptPendingRef: { current: true },
     sessionRunningRef: { current: true }, sessionSettlementGenerationRef: { current: 0 },
     lastAgentErrorRef: { current: false }, lastAgentAbortedRef: { current: false },
     fetch: url => new Promise((resolve, reject) => requests.push({ url, resolve, reject })),

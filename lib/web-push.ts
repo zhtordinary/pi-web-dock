@@ -6,6 +6,7 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import { enLocale } from "./i18n/messages/en";
 import { zhCNLocale } from "./i18n/messages/zh-CN";
 import { getAgentDir } from "./session-reader";
+import { sessionCompletionTag, type SessionCompletionIdentity } from "./session-completion-notification";
 
 export interface PushSubscriptionRecord {
   endpoint: string;
@@ -34,7 +35,7 @@ export interface WebPushNotifier {
   getVapidPublicKey: () => string;
   addSubscription: (subscription: PushSubscriptionRecord) => void;
   removeSubscription: (endpoint: string) => boolean;
-  notifySessionComplete: (sessionId: string) => Promise<void>;
+  notifySessionComplete: (sessionId: string, identity?: SessionCompletionIdentity) => Promise<void>;
 }
 
 function stateFilePath(): string {
@@ -151,14 +152,21 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
       if (state.subscriptions.length !== before) saveState();
       return state.subscriptions.length !== before;
     },
-    async notifySessionComplete(sessionId) {
+    async notifySessionComplete(sessionId, identity) {
       if (state.subscriptions.length === 0) return;
       const sessionName = (await environment.listSessionNames()).get(sessionId);
+      const deviceId = identity?.deviceId?.trim() || undefined;
+      const runId = identity?.runId?.trim() || undefined;
+      const tag = sessionCompletionTag({ deviceId, sessionId, runId });
+      const payloadIdentity = tag && deviceId && runId ? { deviceId, sessionId, runId } : undefined;
+      const url = new URLSearchParams({ session: sessionId });
+      if (deviceId) url.set("device", deviceId);
       const payloadFor = (locale: string) => ({
         title: sessionName ?? localeText(locale, "sessionComplete"),
         body: localeText(locale, "taskFinished"),
-        url: `/?session=${encodeURIComponent(sessionId)}`,
-        tag: `pi-session-complete:${sessionId}`,
+        url: `/?${url.toString()}`,
+        ...(tag ? { tag } : {}),
+        ...(payloadIdentity ?? {}),
       });
 
       let pruned = false;
@@ -205,7 +213,7 @@ export function removeSubscription(endpoint: string): Promise<boolean> {
   return getNotifier().then((notifier) => notifier.removeSubscription(endpoint));
 }
 
-export async function notifySessionComplete(sessionId: string): Promise<void> {
+export async function notifySessionComplete(sessionId: string, identity?: SessionCompletionIdentity): Promise<void> {
   const notifier = await getNotifier();
-  await notifier.notifySessionComplete(sessionId);
+  await notifier.notifySessionComplete(sessionId, identity);
 }

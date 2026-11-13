@@ -75,6 +75,8 @@ const nextConfig: NextConfig = {
     "node-pty",
     "undici",
     "web-push",
+    // Keep ws optional native fallbacks out of Webpack's empty-module aliases.
+    "ws",
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",

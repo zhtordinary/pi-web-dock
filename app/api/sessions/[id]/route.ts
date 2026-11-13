@@ -2,7 +2,7 @@ import type { SessionEntry } from "@/lib/types";
 import { computeSessionStats } from "@/lib/session-stats";
 import { NextResponse } from "next/server";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { SessionHeader as ReaderSessionHeader } from "@/lib/types";
 import {
@@ -31,13 +31,15 @@ import { getRpcSession } from "@/lib/rpc-manager";
 import { projectTreeForResponse } from "@/lib/project-tree";
 import { loadSessionTiming } from "@/lib/session-timing.server";
 import { windowSessionTiming } from "@/lib/session-timing";
+import { readSessionContextUsageFromFile } from "@/lib/session-context-usage";
 import { computeSessionRevision } from "@/lib/session-revision";
 import { emitActivityEvent } from "@/lib/activity-events";
 import { clearSessionCaches } from "@/lib/session-caches";
 import { clearSessionHidden } from "@/lib/hidden-state";
 import { setFavorite } from "@/lib/favorite-state";
 import { setSessionCategory } from "@/lib/session-category-state";
-import { movePiSessionToDeleted, setTokenMonitorArchivedFlag, setTokenMonitorDeletedFlag } from "@/lib/session-archive";
+import { getPiSessionRoots, movePiSessionToDeleted, setTokenMonitorArchivedFlag, setTokenMonitorDeletedFlag } from "@/lib/session-archive";
+import { resolvePiSubagentBundleRoot } from "@/lib/session-child-tree";
 import { assignmentForSession, applySubprojectAssignments, assignSession, unassignSession } from "@/lib/subproject-state";
 import { readSessionFastMode } from "@/lib/fast-mode";
 import { readSafeSessionHistory, boundedSafeHistoryInteger } from "@/lib/reader-safe-history";
@@ -94,7 +96,20 @@ export async function GET(
         leafId,
         tree,
         context: { messages: [], entryIds: [], thinkingLevel: settings.thinkingLevel, model: settings.model },
-        stats,
+        stats: {
+          ...stats,
+          sessionId: id,
+          sessionFile: filePath,
+          sessionName: readSnapshot.name,
+          // Metadata is intentionally not Reader's priced mainCost. Keep the
+          // producer-side file cost out of this first paint snapshot.
+          cost: 0,
+          costStatus: "unavailable",
+          costState: "loading",
+          statsSource: "reader-file",
+          statsScope: "Reader persisted session file; excludes child sessions and Reader-priced total",
+        },
+        contextUsage: await readSessionContextUsageFromFile(filePath, leafId),
         questionAnalysisJobs: getQuestionAnalysisJobsForBranch(entries as never, leafId),
         questionDraftViews: getQuestionDraftViewsForBranch(entries as never, leafId),
         metadataOnly: true,
@@ -279,6 +294,16 @@ export async function DELETE(
       || live?.inner.sessionManager?.getSessionFile?.()
       || resolvedPath
       || "";
+    if (filePath) {
+      const bundleRoot = resolvePiSubagentBundleRoot(filePath, getPiSessionRoots());
+      if (resolve(bundleRoot) !== resolve(filePath)) {
+        return NextResponse.json({
+          error: "Subagent sessions belong to the parent session bundle; delete the parent session instead",
+          code: "session_child_lifecycle_requires_parent",
+          parentPath: bundleRoot,
+        }, { status: 409 });
+      }
+    }
     const hasPersistedFile = Boolean(filePath && existsSync(filePath));
     if (!live && !hasPersistedFile) {
       // A failed/partial delete can leave only the sidecar assignment. Clean

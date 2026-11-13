@@ -2,6 +2,7 @@ const CACHE_PREFIX = "pi-web";
 const CACHE_VERSION = new URL(self.location.href).searchParams.get("v") || "dev";
 const STATIC_CACHE = `${CACHE_PREFIX}-static-${CACHE_VERSION}`;
 const OFFLINE_URL = "/offline.html";
+// The manifest and icons are part of the offline shell, not session data.
 const PRECACHE_URLS = [
   OFFLINE_URL,
   "/manifest.webmanifest",
@@ -61,6 +62,11 @@ self.addEventListener("fetch", (event) => {
   }
 });
 
+// A page announces a completion from its stream and the server may push the
+// same completion shortly afterwards. Only a complete device/session/run
+// identity participates in deduplication; incomplete events are always shown.
+const RECENT_NOTIFICATION_MS = 10000;
+
 self.addEventListener("push", (event) => {
   let payload = {};
   try {
@@ -68,23 +74,47 @@ self.addEventListener("push", (event) => {
   } catch {
     // Ignore malformed or missing push payloads.
   }
-  const { title, body, url, tag } = payload;
+  const { title, body, url } = payload;
   if (typeof title !== "string" || !title || typeof body !== "string" || !body) return;
 
-  // Always surface a system notification. iOS revokes the push subscription
-  // when a service worker handles a push without showing a notification, so
-  // suppressing the notification while a window is visible poisons the
-  // subscription in the background-delivery case. Notifications sharing a tag
-  // replace each other instead of stacking, so a visible window merely sees
-  // the completion notification re-appear.
-  event.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      data: { url: typeof url === "string" && url ? url : "/" },
-      ...(typeof tag === "string" && tag ? { tag, renotify: true } : {}),
-    }),
-  );
+  const deviceId = typeof payload.deviceId === "string" && payload.deviceId.trim() ? payload.deviceId.trim() : null;
+  const sessionId = typeof payload.sessionId === "string" && payload.sessionId.trim() ? payload.sessionId.trim() : null;
+  const runId = typeof payload.runId === "string" && payload.runId.trim() ? payload.runId.trim() : null;
+  const tag = deviceId && sessionId && runId
+    ? `pi-session-complete:${encodeURIComponent(deviceId)}:${encodeURIComponent(sessionId)}:${encodeURIComponent(runId)}`
+    : null;
+  event.waitUntil(showPushNotification(title, body, url, tag, { deviceId, sessionId, runId }));
 });
+
+async function showPushNotification(title, body, url, tag, identity) {
+  const shownAt = Date.now();
+  const data = {
+    url: typeof url === "string" && url ? url : "/",
+    shownAt,
+    ...(tag ? identity : {}),
+  };
+  if (!tag) return self.registration.showNotification(title, { body, data });
+
+  const renotify = !(await hasRecentNotification(tag, shownAt, identity));
+  return self.registration.showNotification(title, { body, data, tag, renotify });
+}
+
+async function hasRecentNotification(tag, now, identity) {
+  try {
+    const notifications = await self.registration.getNotifications({ tag });
+    return notifications.some((notification) => {
+      const data = notification.data;
+      return data?.deviceId === identity.deviceId
+        && data?.sessionId === identity.sessionId
+        && data?.runId === identity.runId
+        && typeof data?.shownAt === "number"
+        && now - data.shownAt >= 0
+        && now - data.shownAt < RECENT_NOTIFICATION_MS;
+    });
+  } catch {
+    return false;
+  }
+}
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();

@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from "node:path";
 import { redactLiveValue } from "./live-agent-events";
+import { validateSessionToolSelection } from "./session-tool-selection";
 import {
   isReaderCreateFailureDiagnostic,
   readerCreateFailureDiagnostic,
@@ -36,6 +37,22 @@ const MANAGED_CREATE_FAILURE_CODES = new Set([
 ]);
 class CreateControlError extends Error {
   constructor(public code: string, public status = 400) { super(code); }
+}
+/**
+ * A managed create takes the same tool selection a person can make in the UI:
+ * any unique subset of Reader's built-in tools. strictToolAllowlist=true makes
+ * it an exact allow-list; false/omitted keeps the normal runtime (extensions,
+ * MCP, Skills) and only narrows the active built-ins.
+ */
+function validateManagedToolSelection(input: Record<string, unknown>): void {
+  const { toolNames, strictToolAllowlist } = input;
+  if (strictToolAllowlist !== undefined && typeof strictToolAllowlist !== "boolean") throw new CreateControlError("invalid_managed_tool_allowlist");
+  if (strictToolAllowlist === true && toolNames === undefined) throw new CreateControlError("invalid_managed_tool_allowlist");
+  if (toolNames === undefined) return;
+  try {
+    if (!Array.isArray(toolNames) || new Set(toolNames).size !== toolNames.length) throw new Error("toolNames must be a unique array");
+    validateSessionToolSelection(toolNames);
+  } catch { throw new CreateControlError("invalid_managed_tool_allowlist"); }
 }
 function text(value: unknown, field: string, max = 200): string {
   if (typeof value !== "string" || !value.trim() || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new CreateControlError(`invalid_${field}`);
@@ -74,7 +91,7 @@ export function createManagedSessionControl(deps: Dependencies) {
       if (input.dryRun !== undefined && typeof input.dryRun !== "boolean") throw new CreateControlError("invalid_dry_run");
       const cwd = text(input.cwd, "cwd", 2000);
       if (!isAbsolute(cwd) || resolve(cwd) !== cwd) throw new CreateControlError("invalid_cwd");
-      if (input.toolNames !== undefined && (!Array.isArray(input.toolNames) || input.toolNames.some((name) => !["read", "grep", "find", "ls"].includes(String(name))) || new Set(input.toolNames).size !== input.toolNames.length || input.strictToolAllowlist !== true)) throw new CreateControlError("invalid_managed_tool_allowlist");
+      validateManagedToolSelection(input);
       const body = Object.fromEntries(Object.entries(input).filter(([key]) => CREATE_KEYS.includes(key)));
       const fingerprint = controlRequestFingerprint({ deviceId, operation: "create_session", body,
         confirmationReason: input.confirmationReason ?? null,

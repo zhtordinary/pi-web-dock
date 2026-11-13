@@ -36,6 +36,12 @@ test("session detail projects Reader context source without treating it as a for
   assert.match(routeSource, /contextSourceSessionId: \(header as unknown as ReaderSessionHeader \| null\)\?\.contextSourceSessionId/);
 });
 
+test("delete refuses direct lifecycle mutation of a persisted subagent", () => {
+  assert.match(routeSource, /resolvePiSubagentBundleRoot\(filePath, getPiSessionRoots\(\)\)/);
+  assert.match(routeSource, /session_child_lifecycle_requires_parent/);
+  assert.match(routeSource, /delete the parent session instead/);
+});
+
 test("delete moves the complete session bundle into TokenMonitor deleted_sessions", () => {
   assert.match(routeSource, /movePiSessionToDeleted\(persistedPath, reparentedChildren\)/);
   assert.match(routeSource, /setTokenMonitorDeletedFlag\(deletedPath, true\)/);

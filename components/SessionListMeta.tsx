@@ -2,6 +2,7 @@
 
 import type { CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { sessionModelLabel, sessionModelValue } from "@/lib/session-display";
 import type { SessionInfo } from "@/lib/types";
 
 export function formatSessionListRelativeTime(dateStr: string): string {
@@ -56,9 +57,13 @@ interface SessionListMetaProps {
 
 export function SessionListMeta({ session, isRunning = false, isUnread = false, className, style }: SessionListMetaProps) {
   const { t } = useI18n();
+  const isSubagent = session.relation?.kind === "subagent";
+  const modelValue = isSubagent ? sessionModelValue(session) : undefined;
+  const modelLabel = isSubagent ? sessionModelLabel(modelValue) ?? t("sidebar.subagentModelPending") : undefined;
   return (
     <div className={className ?? "session-list-meta"} data-session-list-meta style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0, ...style }}>
       {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : <span title={session.modified}>{formatSessionListRelativeTime(session.modified)}</span>}
+      {modelLabel && <span title={modelValue ?? modelLabel} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{modelLabel}</span>}
       <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
       {session.worktreeBranch && (
         <span title={`Worktree: ${session.cwd}`} style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}>

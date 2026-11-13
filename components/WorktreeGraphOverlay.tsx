@@ -27,6 +27,7 @@ import { copyText } from "@/lib/clipboard";
 import { shortenPath } from "@/lib/display-path";
 import { fetchSessionActivity } from "@/lib/session-activity-fetch";
 import type { SessionActivityItem, SessionActivityResponse } from "@/lib/session-activity-types";
+import { listSessionFamilies } from "@/lib/session-family";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { notifyEmbeddedModalState } from "@/lib/embedded-modal";
@@ -56,8 +57,11 @@ interface Props {
 
 type FilterTab = "attention" | "all" | "active" | "at_base";
 
+type WorktreeAssociationRelation = "cwd" | "creator" | "task-root";
+
 interface WorktreeCreationHistory {
   records: Array<{ worktreePath: string; sessionId: string; createdAt: string; sessionName?: string }>;
+  bindings?: Array<{ worktreePath: string; sessionId: string; relation: "creator" | "task-root"; createdAt: string; sessionName?: string }>;
   partial: boolean;
 }
 
@@ -65,6 +69,7 @@ interface WorktreeAssociatedSession {
   id: string;
   title: string;
   status?: SessionActivityItem["status"];
+  relations: WorktreeAssociationRelation[];
 }
 
 function GitHubIcon({ size = 14 }: { size?: number }) {
@@ -138,6 +143,10 @@ function associatedSessionTitle(session: SessionActivityItem["session"]): string
   return session.name?.trim() || session.firstMessage?.trim().split("\n")[0]?.slice(0, 100) || session.id;
 }
 
+function addAssociationRelation(item: WorktreeAssociatedSession, relation: WorktreeAssociationRelation): void {
+  if (!item.relations.includes(relation)) item.relations.push(relation);
+}
+
 export function mergeAssociatedWorktreeSessions(
   selectedPath: string | null,
   sessions: readonly SessionActivityItem[],
@@ -145,22 +154,61 @@ export function mergeAssociatedWorktreeSessions(
 ): WorktreeAssociatedSession[] {
   if (!selectedPath) return [];
   const sessionsById = new Map(sessions.map((item) => [item.session.id, item]));
+  const ownerBySessionId = new Map<string, SessionActivityItem>();
+  for (const family of listSessionFamilies(sessions.map((item) => item.session))) {
+    const owner = sessionsById.get(family.root.id);
+    if (!owner) continue;
+    ownerBySessionId.set(owner.session.id, owner);
+    for (const subagent of family.subagents) ownerBySessionId.set(subagent.id, owner);
+  }
   const associated = new Map<string, WorktreeAssociatedSession>();
-  for (const item of sessions) {
-    if (sameWorktreePath(item.session.cwd, selectedPath)) {
-      associated.set(item.session.id, { id: item.session.id, title: associatedSessionTitle(item.session), status: item.status });
+  const ensure = (sessionId: string, title: string, status: SessionActivityItem["status"] | undefined, relation: WorktreeAssociationRelation) => {
+    const existing = associated.get(sessionId);
+    if (existing) {
+      addAssociationRelation(existing, relation);
+      if (existing.status === undefined && status !== undefined) existing.status = status;
+      return;
     }
+    associated.set(sessionId, { id: sessionId, title, ...(status ? { status } : {}), relations: [relation] });
+  };
+  const ensureActivityOwner = (activity: SessionActivityItem, relation: WorktreeAssociationRelation) => {
+    const owner = ownerBySessionId.get(activity.session.id);
+    if (!owner) return;
+    ensure(owner.session.id, associatedSessionTitle(owner.session), owner.status, relation);
+  };
+  for (const item of sessions) {
+    if (sameWorktreePath(item.session.cwd, selectedPath)) ensureActivityOwner(item, "cwd");
   }
   for (const record of history?.records ?? []) {
-    if (!sameWorktreePath(record.worktreePath, selectedPath) || associated.has(record.sessionId)) continue;
+    if (!sameWorktreePath(record.worktreePath, selectedPath)) continue;
     const activity = sessionsById.get(record.sessionId);
-    associated.set(record.sessionId, {
-      id: record.sessionId,
-      title: activity ? associatedSessionTitle(activity.session) : record.sessionName || record.sessionId,
-      ...(activity ? { status: activity.status } : {}),
-    });
+    if (activity) {
+      ensureActivityOwner(activity, "creator");
+    } else {
+      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, "creator");
+    }
+  }
+  for (const record of history?.bindings ?? []) {
+    if (!sameWorktreePath(record.worktreePath, selectedPath)) continue;
+    const activity = sessionsById.get(record.sessionId);
+    if (activity) {
+      ensureActivityOwner(activity, "task-root");
+    } else {
+      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, "task-root");
+    }
   }
   return [...associated.values()];
+}
+
+function associationRelationLabel(
+  relation: WorktreeAssociationRelation,
+  translate: (key: string) => string,
+): string {
+  switch (relation) {
+    case "cwd": return translate("worktreeGraph.relationCwd");
+    case "creator": return translate("worktreeGraph.relationCreator");
+    case "task-root": return translate("worktreeGraph.relationTaskRoot");
+  }
 }
 
 function worktreeSourceLabel(
@@ -567,6 +615,7 @@ export function WorktreeGraphOverlay({
       />
       <input
         type="text"
+        className="worktree-graph-search-input"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         placeholder={t("worktreeGraph.filterPlaceholder")}
@@ -1469,13 +1518,13 @@ export function WorktreeGraphOverlay({
                           aria-label={item.title}
                           onClick={() => {
                             onOpenSession(item.id, selectedWorktree.path);
-                            onClose();
                           }}
                           style={{ minWidth: 0, width: "100%", padding: "7px 8px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg)", color: "inherit", font: "inherit", textAlign: "left", cursor: "pointer", overflow: "hidden" }}
                         >
                           <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 11, fontWeight: 600 }}>{item.title}</span>
                           <span style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, minWidth: 0, color: "var(--text-dim)", fontSize: 10, lineHeight: 1.3 }}>
                             <span title={item.id} style={{ flexShrink: 0, fontFamily: "var(--font-mono)" }}>{t("worktreeGraph.sessionId")} #{item.id.slice(0, 8)}</span>
+                            {item.relations.map((relation) => <span key={relation} style={{ flexShrink: 0, padding: "1px 4px", borderRadius: 3, background: "var(--bg-hover)", color: "var(--text-muted)" }}>{associationRelationLabel(relation, t)}</span>)}
                             {item.status && <><span aria-hidden="true">·</span><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: sessionActivityStatusColor(item.status) }}>{t(`sessionActivity.status.${item.status}`)}</span></>}
                           </span>
                         </button>

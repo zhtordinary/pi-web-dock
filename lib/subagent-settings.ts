@@ -13,6 +13,8 @@ export interface SubagentSettings {
   disabledBuiltIns: string[];
   modelOverrides: Record<string, SubagentModelOverride>;
   maxConcurrent: number;
+  /** User-defined display order keys, retained across profile discovery changes. */
+  profileOrder: string[];
 }
 
 type StoredSubagentSettings = Record<string, unknown> & {
@@ -21,16 +23,43 @@ type StoredSubagentSettings = Record<string, unknown> & {
   disabledBuiltIns?: unknown;
   modelOverrides?: unknown;
   maxConcurrent?: unknown;
+  profileOrder?: unknown;
 };
 
 export const DEFAULT_SUBAGENT_MAX_CONCURRENT = 10;
 export const MAX_SUBAGENT_MAX_CONCURRENT = 32;
+export const MAX_SUBAGENT_PROFILE_ORDER = 10_000;
 export const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 function readMaxConcurrent(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_SUBAGENT_MAX_CONCURRENT
     ? value
     : DEFAULT_SUBAGENT_MAX_CONCURRENT;
+}
+
+function readProfileOrder(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const key = entry.trim();
+    if (!key || key.includes("\0") || seen.has(key)) continue;
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
+}
+
+export function validateSubagentProfileOrder(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > MAX_SUBAGENT_PROFILE_ORDER) {
+    throw new Error(`profileOrder must be an array with at most ${MAX_SUBAGENT_PROFILE_ORDER} entries`);
+  }
+  const result = readProfileOrder(value);
+  if (result.length !== value.length) {
+    throw new Error("profileOrder must contain unique, non-empty strings without null bytes");
+  }
+  return result;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -89,12 +118,22 @@ function settingsValue(
   maxConcurrent: number,
   disabledBuiltIns: string[],
   modelOverrides: Record<string, SubagentModelOverride>,
+  profileOrder: string[],
 ): SubagentSettings {
-  return Object.defineProperty({ builtInEnabled, disabledBuiltIns, modelOverrides }, "maxConcurrent", {
-    value: maxConcurrent,
-    enumerable: false,
-    configurable: true,
-  }) as SubagentSettings;
+  const value = { builtInEnabled, disabledBuiltIns, modelOverrides };
+  Object.defineProperties(value, {
+    maxConcurrent: {
+      value: maxConcurrent,
+      enumerable: false,
+      configurable: true,
+    },
+    profileOrder: {
+      value: [...profileOrder],
+      enumerable: false,
+      configurable: true,
+    },
+  });
+  return value as SubagentSettings;
 }
 
 export function getSubagentSettingsPath(agentDir = getAgentDir()): string {
@@ -111,17 +150,21 @@ function projectSettings(stored: StoredSubagentSettings): SubagentSettings {
     readMaxConcurrent(stored.maxConcurrent),
     readDisabledBuiltIns(stored.disabledBuiltIns),
     readModelOverrides(stored.modelOverrides),
+    readProfileOrder(stored.profileOrder),
   );
 }
 
 export function inspectSubagentSettings(settingsPath = getSubagentSettingsPath()) {
   const snapshot = readResourceDocument(settingsPath);
   const value = projectSettings(snapshot.document);
-  return { revision: snapshot.revision, value: { ...value, maxConcurrent: value.maxConcurrent } };
+  return {
+    revision: snapshot.revision,
+    value: { ...value, maxConcurrent: value.maxConcurrent, profileOrder: [...value.profileOrder] },
+  };
 }
 
 export type SubagentSettingsMutation =
-  | { operation: "patch"; changes: { builtInEnabled?: boolean; maxConcurrent?: number } }
+  | { operation: "patch"; changes: { builtInEnabled?: boolean; maxConcurrent?: number; profileOrder?: string[] } }
   | { operation: "set_profile_enabled"; changes: { name: string; enabled: boolean } }
   | { operation: "set_profile_override"; changes: { name: string; model?: string | null; thinking?: string | null } };
 
@@ -132,13 +175,26 @@ export function mutateSubagentSettings(
 ) {
   const result = mutateResourceDocument(settingsPath, expectedRevision, (stored) => {
     if (mutation.operation === "patch") {
-      const { builtInEnabled, maxConcurrent } = mutation.changes;
+      const { builtInEnabled, maxConcurrent, profileOrder } = mutation.changes;
       if (builtInEnabled !== undefined) stored.builtInEnabled = builtInEnabled;
       if (maxConcurrent !== undefined) {
         if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > MAX_SUBAGENT_MAX_CONCURRENT) {
           throw new Error(`maxConcurrent must be an integer between 1 and ${MAX_SUBAGENT_MAX_CONCURRENT}`);
         }
         stored.maxConcurrent = maxConcurrent;
+      }
+      if (profileOrder !== undefined) {
+        const normalized = validateSubagentProfileOrder(profileOrder);
+        if (normalized.length > 0) {
+          const requested = new Set(normalized);
+          const previous = readProfileOrder(stored.profileOrder).filter((key) => !requested.has(key));
+          if (normalized.length + previous.length > MAX_SUBAGENT_PROFILE_ORDER) {
+            throw new Error(`profileOrder cannot retain more than ${MAX_SUBAGENT_PROFILE_ORDER} entries`);
+          }
+          stored.profileOrder = [...normalized, ...previous];
+        } else {
+          delete stored.profileOrder;
+        }
       }
       stored.version = 1;
     } else {
@@ -173,7 +229,7 @@ export function mutateSubagentSettings(
       }
     }
     const value = projectSettings(stored);
-    return { ...value, maxConcurrent: value.maxConcurrent };
+    return { ...value, maxConcurrent: value.maxConcurrent, profileOrder: [...value.profileOrder] };
   });
   return { revision: result.revision, changed: result.changed, value: result.result };
 }
@@ -240,7 +296,7 @@ export function writeBuiltInSubagentsEnabled(
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
   const result = mutateSubagentSettings({ operation: "patch", changes: { builtInEnabled: enabled } }, undefined, settingsPath);
-  return settingsValue(result.value.builtInEnabled, result.value.maxConcurrent, result.value.disabledBuiltIns, result.value.modelOverrides);
+  return settingsValue(result.value.builtInEnabled, result.value.maxConcurrent, result.value.disabledBuiltIns, result.value.modelOverrides, result.value.profileOrder);
 }
 
 /** Minimal edit of the stored list: names this call did not touch are left as authored. */
@@ -250,7 +306,7 @@ export function writeDisabledBuiltInSubagent(
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
   const result = mutateSubagentSettings({ operation: "set_profile_enabled", changes: { name, enabled: !disabled } }, undefined, settingsPath);
-  return settingsValue(result.value.builtInEnabled, result.value.maxConcurrent, result.value.disabledBuiltIns, result.value.modelOverrides);
+  return settingsValue(result.value.builtInEnabled, result.value.maxConcurrent, result.value.disabledBuiltIns, result.value.modelOverrides, result.value.profileOrder);
 }
 
 export function writeSubagentMaxConcurrent(
@@ -258,7 +314,25 @@ export function writeSubagentMaxConcurrent(
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
   const result = mutateSubagentSettings({ operation: "patch", changes: { maxConcurrent } }, undefined, settingsPath);
-  return settingsValue(result.value.builtInEnabled, result.value.maxConcurrent, result.value.disabledBuiltIns, result.value.modelOverrides);
+  return settingsValue(result.value.builtInEnabled, result.value.maxConcurrent, result.value.disabledBuiltIns, result.value.modelOverrides, result.value.profileOrder);
+}
+
+export function writeSubagentProfileOrder(
+  profileOrder: string[],
+  settingsPath = getSubagentSettingsPath(),
+): SubagentSettings {
+  const result = mutateSubagentSettings({ operation: "patch", changes: { profileOrder } }, undefined, settingsPath);
+  return settingsValue(result.value.builtInEnabled, result.value.maxConcurrent, result.value.disabledBuiltIns, result.value.modelOverrides, result.value.profileOrder);
+}
+
+export function readSubagentProfileOrder(
+  settingsPath = getSubagentSettingsPath(),
+): string[] {
+  try {
+    return [...readSubagentSettings(settingsPath).profileOrder];
+  } catch {
+    return [];
+  }
 }
 
 // Keep Reader's existing settings API while exposing upstream concurrency and per-built-in settings.

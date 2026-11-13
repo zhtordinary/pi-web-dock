@@ -39,8 +39,13 @@ test("uses history index ordinals instead of DOM message positions", () => {
   assert.doesNotMatch(source, /nextRuntimeNodeIndex|Runtime-only rows/);
   assert.match(source, /nodeIndex/);
   assert.match(source, /onNavigateEntry/);
-  assert.match(source, /PREVIEW_NEIGHBOR_COUNT/);
-  assert.match(source, /positionedNodes\.filter\(\(node\) => Math\.abs\(node\.index - nearestNode\.index\)/);
+  assert.match(source, /const previewNodes = positionedNodes;/);
+  assert.doesNotMatch(source, /PREVIEW_NEIGHBOR_COUNT/);
+});
+
+test("the hover preview keeps every indexed question available to its own scroll container", () => {
+  assert.match(source, /const previewNodes = positionedNodes;/);
+  assert.match(styles, /\.preview \{[\s\S]*overflow-y: auto;/);
 });
 
 test("the complete indexed rail has no body-preload arrow and retains bottom navigation", () => {

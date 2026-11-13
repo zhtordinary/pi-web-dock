@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
@@ -60,6 +60,7 @@ export async function updateGlobalSettings<T>(
   settingsPath: string,
   update: (settings: Record<string, unknown>) => T | Promise<T>,
   validateTarget?: () => string | void,
+  preserveMode = false,
 ): Promise<T> {
   mkdirSync(dirname(settingsPath), { recursive: true });
   const release = await lockfile.lock(settingsPath, { realpath: false, retries: 10 });
@@ -71,8 +72,9 @@ export async function updateGlobalSettings<T>(
     // No await between this final authorization/path check and the atomic write.
     validateTarget?.();
     if (JSON.stringify(settings) === before) return result;
-    writePrivateFileAtomicSync(writePath, `${JSON.stringify(settings, null, 2)}\n`);
-    chmodSync(writePath, 0o600);
+    const mode = preserveMode && existsSync(writePath) ? statSync(writePath).mode & 0o777 : 0o600;
+    writePrivateFileAtomicSync(writePath, `${JSON.stringify(settings, null, 2)}\n`, mode);
+    chmodSync(writePath, mode);
     return result;
   } finally {
     await release();

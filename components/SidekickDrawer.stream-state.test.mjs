@@ -15,7 +15,7 @@ const observeSource = stripTypeScriptTypes(source.slice(source.indexOf("  observ
 const key = (url, branch, thread) => JSON.stringify([url, branch, thread]);
 function harness({ queued = false } = {}) {
   const state = { replies: {}, items: [], drafts: {}, threadLists: {}, identity: { sessionId: "session", quickAskUrl: "/api/session/quick-ask" } };
-  const streamRequestsRef = { current: new Map() }, sessionIdentityRef = { current: state.identity }, streams = new Map(), runs = new Map(), requests = [], updates = [];
+  const streamRequestsRef = { current: new Map() }, sessionIdentityRef = { current: state.identity }, streams = new Map(), runs = new Map(), observerOptions = new Map(), requests = [], updates = [];
   const observeRunRef = { current: null }, pendingImageCountRef = { current: new Map() };
   const schedule = (fn) => { if (queued) updates.push(fn); else { fn(); runLayout(); } };
   const setter = (name) => (value) => schedule(() => { state[name] = typeof value === "function" ? value(state[name]) : value; });
@@ -28,15 +28,19 @@ function harness({ queued = false } = {}) {
     }),
     setReplies: setter("replies"), setItems: setter("items"), setThreadLists: setter("threadLists"), setDrafts: setter("drafts"),
     AbortController, crypto: { randomUUID }, imageDataUrl: (image) => `data:${image.mimeType};base64,${image.data}`,
-    observeQuickAskRun: (options) => observeQuickAskRun({ ...options, eventSource: (url) => {
-      const runId = new URL(url, "http://reader.test").searchParams.get("runId");
-      const run = [...runs.values()].find((item) => item.id === runId);
-      assert.ok(run, "GET observer must target a previously admitted host run");
-      const viewKey = key(options.url, run.branchId, run.threadId);
-      const stream = { onmessage: null, onerror: null, closed: false, close() { this.closed = true; } };
-      streams.set(viewKey, stream);
-      return stream;
-    } }),
+    observeQuickAskRun: (options) => {
+      const scoped = { ...options, eventSource: (url) => {
+        const runId = new URL(url, "http://reader.test").searchParams.get("runId");
+        const run = [...runs.values()].find((item) => item.id === runId);
+        assert.ok(run, "GET observer must target a previously admitted host run");
+        const viewKey = key(options.url, run.branchId, run.threadId);
+        const stream = { onmessage: null, onerror: null, closed: false, close() { this.closed = true; } };
+        streams.set(viewKey, stream);
+        return stream;
+      } };
+      observerOptions.set(key(options.url, options.run.branchId, options.run.threadId), scoped);
+      return observeQuickAskRun(scoped);
+    },
   };
   const runLayout = () => runSidekickReplyLayout(source, { streamRequestsRef, replies: state.replies });
   loadSidekickHelpers(source, shared);
@@ -77,7 +81,7 @@ function harness({ queued = false } = {}) {
   const queueImage = (viewKey, image) => setter("drafts")((previous) => ({ ...previous, [viewKey]: {
     ...previous[viewKey], images: [...previous[viewKey].images, image].slice(0, 10),
   } }));
-  return { state, createSend, emit, finish, requests, streams, runs, streamRequestsRef, sessionIdentityRef, pendingImageCountRef, queueDraft, queueImage, flush };
+  return { state, createSend, emit, finish, observerOptions, requests, streams, runs, streamRequestsRef, sessionIdentityRef, pendingImageCountRef, queueDraft, queueImage, flush };
 }
 
 test("two threads stream independently, block only their own duplicate send and persist in original threads", async () => {
@@ -128,6 +132,19 @@ test("a host error stays with the originating thread and preserves retry content
   assert.equal(f.state.replies[a.viewKey].images.length, 1);
   assert.equal(f.state.replies[a.viewKey].running, false);
   assert.equal(f.state.drafts[b.viewKey].question, "new question in B");
+});
+
+test("an observer failure keeps the question card and status recovery action visible", async () => {
+  const f = harness(), a = f.createSend("default");
+  await a.send();
+  const observer = f.observerOptions.get(a.viewKey);
+  assert.ok(observer, "the admitted request must have an observer");
+  observer.onError(new Error("Side Ask tools differ from the source session"));
+  assert.equal(f.state.replies[a.viewKey].question, "question default");
+  assert.equal(f.state.replies[a.viewKey].unconfirmed, true);
+  assert.equal(f.state.replies[a.viewKey].running, false);
+  assert.equal(f.state.drafts[a.viewKey].error, "Side Ask tools differ from the source session");
+  assert.match(source, /\{\(isStreaming \|\| streamingAnswer \|\| reply\?\.unconfirmed\) && \(/);
 });
 
 test("a stored host stop reason is shown in the current interface language", async () => {

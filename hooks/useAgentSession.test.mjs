@@ -90,7 +90,8 @@ function loadStreamingReducer() {
     .replace(/^export type \{[^\n]*\} from[^\n]*;\s*/gm, "")
     .replace(/^export type StreamAction =[\s\S]*?^\s*\| \{ type: "end" \};\s*/m, "")
     .replace(/export const INITIAL_STREAMING_STATE/g, "const INITIAL_STREAMING_STATE")
-    .replace(/export function streamReducer/g, "function streamReducer");
+    .replace(/export function streamReducer/g, "function streamReducer")
+    .replace(/^export interface StreamingStore[\s\S]*$/m, "");
   vm.runInContext(stripTypeScriptTypes(`${normalizeModule}\n${streamModule}\nglobalThis.__streamingReducer = { INITIAL_STREAMING_STATE, streamReducer };`), ctx);
   return ctx.__streamingReducer;
 }
@@ -1199,13 +1200,39 @@ test("local prompt start invalidates pending state snapshots", () => {
   assert.match(sendSource, /const promptRunId = promptRunIdRef\.current \+ 1;[\s\S]*?stateRunRevisionRef\.current \+= 1;/);
 });
 
-test("historical edit submission fails closed before branch navigation", () => {
+test("historical edit keeps its identity until the atomic server admission", () => {
   const sendSource = source.slice(
     source.indexOf("  const handleSend = useCallback"),
     source.indexOf("  const executeBash = useCallback", source.indexOf("  const handleSend = useCallback")),
   );
-  assert.match(sendSource, /if \(editEntryId\) \{[\s\S]*?restoreSubmission\(message, images, composerDraftKey\);[\s\S]*?branch navigation and prompt admission are atomic\.[\s\S]*?return;/);
+  assert.match(sendSource, /const historyEditEntryId = editEntryId/);
+  assert.match(sendSource, /type: "edit_history"/);
+  assert.match(sendSource, /pendingHistoryEdits\.get\(historyEditKey\)/);
+  assert.doesNotMatch(sendSource, /temporarily unavailable until branch navigation and prompt admission are atomic/);
   assert.doesNotMatch(sendSource, /handleNavigateRef\.current\?\.\(targetLeafId\)/);
+});
+
+test("historical edit follows the acknowledged leaf after an idempotent response", () => {
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback", source.indexOf("  const handleSend = useCallback")),
+  );
+  assert.match(sendSource, /const acknowledgedLeafId = result\?\.leafId !== undefined \? result\.leafId : result\?\.parentId/);
+  assert.match(sendSource, /observeRuntime\(acknowledgedLeafId\)/);
+  assert.match(sendSource, /setActiveLeafId\(acknowledgedLeafId\)/);
+});
+
+test("cancelled historical edit keeps its identity for a later retry", () => {
+  const editSource = source.slice(source.indexOf("  const setEdit = useCallback"), source.indexOf("  const sessionStats = useMemo"));
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback", source.indexOf("  const handleSend = useCallback")),
+  );
+  assert.match(editSource, /const cancelEdit = useCallback\([\s\S]*?setEditEntryId\(null\)/);
+  assert.doesNotMatch(editSource, /const cancelEdit = useCallback\(\(\) => setEdit\(null\)/);
+  assert.match(sendSource, /const storedHistoryEdit = session\?\.id \? getDraft\(historyDraftKey\(session\.id, remotePeerRef\.current\)\)\?\.historyEdit/);
+  assert.match(sendSource, /const pendingHistoryEdit = historyEditKey[\s\S]*?pendingHistoryEdits\.get\(historyEditKey\)/);
+  assert.match(sendSource, /const historyEditEntryId = editEntryId \?\? pendingHistoryEdit\?\.entryId \?\? null/);
 });
 
 test("retry branch preflight rejection restores idle without hiding the failure", async () => {
@@ -1466,6 +1493,7 @@ test("a rejected submission preserves a different run reported by the server", (
   assert.match(reconcileSource, /if \(busy \|\| localCompactionPendingRef\.current\) \{[\s\S]*?sdkAgentActiveRef\.current = Boolean\(state\.isStreaming\)/);
   assert.match(reconcileSource, /rpcPromptPendingRef\.current = Boolean\(state\.isPromptRunning\)/);
   assert.match(reconcileSource, /if \(!agentRunningRef\.current && !clientStreamActive\) return;[\s\S]*?finishPromptWithoutStream/);
+  assert.match(reconcileSource, /streamingStore\.getState\(\)\.isStreaming/);
 });
 
 test("opening System lazily starts a dormant session without sending a prompt", () => {
@@ -1523,18 +1551,20 @@ test("new-session promotion rekeys drafts before publishing the real session", (
     source.indexOf("  const ensureNewSession = useCallback"),
   );
 
-  assert.match(promoteSource, /draftKeyAliasesRef\.current\.set\(provisionalDraftKey, sid\)/);
+  assert.match(promoteSource, /const ownedDraftKey = sessionDraftKey\(sid, remotePeer\)/);
+  assert.match(promoteSource, /draftKeyAliasesRef\.current\.set\(provisionalDraftKey, ownedDraftKey\)/);
   assert.match(promoteSource, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)/);
   assert.match(promoteSource, /transient_session_assignment_forbidden/);
   assert.match(promoteSource, /subprojectId: assignmentError \? undefined : newSessionSubprojectId \?\? undefined/);
   assert.match(promoteSource, /throw assignmentError/);
-  assert.match(promoteSource, /input\.rekeyDraft\(provisionalDraftKey, sid\)/);
+  assert.match(promoteSource, /input\.rekeyDraft\(provisionalDraftKey, ownedDraftKey\)/);
   assert.ok(
-    promoteSource.indexOf("input.rekeyDraft(provisionalDraftKey, sid)")
+    promoteSource.indexOf("input.rekeyDraft(provisionalDraftKey, ownedDraftKey)")
       < promoteSource.indexOf("onSessionCreated?.({"),
   );
   assert.match(promoteSource, /}, provisionalDraftKey\)/);
-  assert.match(chatWindowSource, /draftKey=\{session\?\.id \?\? newSessionDraftKey \?\? undefined\}/);
+  assert.match(chatWindowSource, /sessionDraftKey\(session\.id, remotePeer\)/);
+  assert.match(chatWindowSource, /draftKey=\{composerDraftKey\}/);
 });
 
 test("new-session promotion leaves pending client identity in the transcript owner", () => {
@@ -1860,8 +1890,8 @@ test("delegates event stream readiness and hides an empty agent phase", () => {
   assert.match(source, /shouldMaintain: \(sid\)[\s\S]*?sessionIdRef\.current === sid/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.ensureRuntimeConnected\(sid\)/);
   assert.match(ensureSource, /eventConnectionRef\.current!\.maintain\(sid\)/);
-  assert.match(chatWindowSource, /const hasStreamingContent = Boolean\(atLiveTail && streamState\.streamingMessage\?\.content\.length\)/);
-  assert.match(chatWindowSource, /streamState\.isStreaming && hasStreamingContent && streamState\.streamingMessage/);
+  assert.match(chatWindowSource, /const hasStreamingContent = Boolean\(atLiveTail && hasStoreStreamingContent\)/);
+  assert.match(chatWindowSource, /isStreaming && hasStreamingContent && \(\s*<StreamingReply/);
   assert.match(chatWindowSource, /agentRunning && !hasStreamingContent && \(agentPhase \|\| isCompacting\)/);
   assert.match(chatWindowSource, /phaseLabel\(agentPhase, t, isCompacting\)/);
   assert.match(phaseLabelSource, /return null;/);
@@ -1871,7 +1901,7 @@ test("keeps background ChatWindow instances out of active controls", () => {
   assert.match(chatWindowSource, /background\?: boolean/);
   assert.match(chatWindowSource, /onSessionReady\?\:/);
   assert.match(chatWindowSource, /if \(background\) return;/);
-  assert.match(chatWindowSource, /const sessionBusy = Boolean\([\s\S]*?sessionRunning[\s\S]*?streamState\.isStreaming[\s\S]*?isCompacting/);
+  assert.match(chatWindowSource, /const sessionBusy = Boolean\([\s\S]*?sessionRunning[\s\S]*?isStreaming[\s\S]*?isCompacting/);
 });
 
 test("plays the wait sound once per request id across ChatWindow mounts", () => {
@@ -1990,7 +2020,7 @@ test("consumes both activity edges so an idle snapshot cannot keep the selected 
   assert.match(settleSource, /sessionRunningRef\.current = false/);
 });
 
-test("keeps one reducer-owned assistant partial and consumes Pi JSON deltas", () => {
+test("keeps one store-owned assistant partial and consumes Pi JSON deltas", () => {
   const connectedSource = source.slice(
     source.indexOf('case "connected"'),
     source.indexOf('case "agent_start"'),
@@ -2004,7 +2034,7 @@ test("keeps one reducer-owned assistant partial and consumes Pi JSON deltas", ()
     source.indexOf('case "tool_execution_start"'),
   );
 
-  assert.match(source, /streamReducer,[\s\S]*type ClientAssistantMessageEvent/);
+  assert.match(source, /createStreamingStore,[\s\S]*type ClientAssistantMessageEvent/);
   assert.doesNotMatch(source, /streamingMessageRef/);
   assert.match(connectedSource, /dispatch\(\{ type: "end" \}\)/);
   assert.match(connectedSource, /event\.isStreaming === true/);
@@ -2222,7 +2252,7 @@ test("keeps prompt anchor measurement outside the React update cycle", () => {
   );
   assert.notEqual(anchorEffectStart, -1);
   const syncEffectStart = chatWindowSource.indexOf(
-    "useLayoutEffect(() => {\n    promptAnchorUpdateRef.current?.();",
+    "const updatePromptAnchor = useCallback",
     anchorEffectStart,
   );
   assert.notEqual(syncEffectStart, -1);
@@ -2246,7 +2276,7 @@ test("keeps prompt anchor measurement outside the React update cycle", () => {
   assert.match(anchorLifecycleEffectSource, /if \(disposed \|\| promptAnchorMeasureFrameRef\.current !== null\) return/);
   assert.match(anchorLifecycleEffectSource, /promptAnchorMeasureFrameRef\.current = requestAnimationFrame\(\(\) => \{\s*promptAnchorMeasureFrameRef\.current = null;\s*updatePromptAnchorSpacer\(\)/);
   assert.match(anchorLifecycleEffectSource, /disposed = true;[\s\S]*?promptAnchorUpdateRef\.current === updatePromptAnchorSpacer[\s\S]*?cancelAnimationFrame\(promptAnchorMeasureFrameRef\.current\)/);
-  assert.match(anchorSyncEffectSource, /promptAnchorUpdateRef\.current\?\.\(\);\s*\}, \[streamState\.streamingMessage\]\)/);
+  assert.match(chatWindowSource, /useLayoutEffect\(updatePromptAnchor, \[isStreaming, hasStreamingContent, updatePromptAnchor\]\)/);
   assert.match(chatWindowSource, /<div ref=\{messageContentRef\} style=\{\{/);
 });
 
@@ -2298,7 +2328,8 @@ test("publishes complete session metrics and refreshes the matching details cach
   assert.match(refreshSource, /await refreshSessionStats\(sid\)/);
   const statsSource = source.slice(source.indexOf("const sessionStats = useMemo"), source.indexOf("const loadSession = useCallback"));
   assert.match(statsSource, /input: sessionUsageTotals\.inputTokens/);
-  assert.match(statsSource, /: scopedOverride\.tokens/);
+  assert.match(statsSource, /data\?\.stats/);
+  assert.match(statsSource, /: baseStats\.tokens/);
   assert.match(refreshSource, /\}, \[ensureSessionCost, invalidateSessionDetailsForSession, modelsRefreshKey, refreshSessionStats, session\?\.id, sessionDetailsVersion\]\)/);
   assert.doesNotMatch(source, /setSessionStatsOverride\(null\);\s+\}, \[messages,/);
 });

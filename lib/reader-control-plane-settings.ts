@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { DefaultPackageManager, getAgentDir, SettingsManager, type PackageSource } from "@earendil-works/pi-coding-agent";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
 import { PROJECT_SETTINGS_MAX_BYTES, readRegularFileText } from "./regular-file";
+import { samePath } from "./paths";
 import { getGlobalSettingsPath, updateGlobalSettings, defaultToolEntries } from "./global-settings-file";
 import { codemodePreferenceOf, codemodeModeOf, codemodeInlineBudgetOf, isCodemodePreference, isCodemodeMode, isCodemodeInlineBudget, withCodemodePreference, projectCodemodePreference, projectCodemodeMode, projectCodemodeInlineBudget } from "./codemode-settings";
 import { isThinkingLevel, shadowingProjectKeys, writeDefaultPreferences, type DefaultPreferencesEdit } from "./default-preferences";
@@ -94,15 +94,9 @@ function readDocument(path: string): JsonObject {
   if (!object(parsed)) fail("configuration_unreadable", "Configuration must contain an object", 409);
   return parsed;
 }
-function assertContainedPath(cwd: string, file: string): void {
-  let ancestor = file;
-  while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
-  if (!isExistingFilePathAllowed(ancestor, new Set([cwd]))) fail("scope_path_escape", "Project configuration resolves outside its exact cwd", 403);
-}
 /** Pin a managed write before any asynchronous business discovery or lock wait. */
 function pinProjectWrite(target: Required<ReaderSettingsTarget>, file: string): { path: string; validate: () => string } {
   const resolvePath = () => {
-    assertContainedPath(target.cwd, file);
     if (!existsSync(dirname(file))) fail("scope_uninitialized", "Configuration scope must already exist before a managed write", 409);
     return existsSync(file) ? realpathSync(file) : join(realpathSync(dirname(file)), basename(file));
   };
@@ -121,8 +115,6 @@ async function normalizeTarget(input: ReaderSettingsTarget): Promise<Required<Re
   if ((input.scope === "project" || CONTEXT_AREAS.has(input.area)) && !input.cwd) fail("cwd_required", "An exact cwd is required");
   const cwd = realpathSync(input.cwd ?? getAgentDir());
   if (!statSync(cwd).isDirectory()) fail("cwd_invalid", "cwd must be an existing directory");
-  if (cwd !== realpathSync(getAgentDir()) && !isExistingFilePathAllowed(cwd, await getAllowedFileRoots())) fail("scope_denied", "cwd is outside Reader's allowed roots", 403);
-  if (input.scope === "project" && input.area !== "subagent_profiles") assertContainedPath(cwd, join(cwd, ".pi", input.area === "mcp" ? "mcp.json" : "settings.json"));
   return { area: input.area, scope: input.scope, cwd };
 }
 function settingsPath(target: Required<ReaderSettingsTarget>): string {
@@ -268,6 +260,7 @@ async function editModelSettings(target: Required<ReaderSettingsTarget>, documen
       }
       if (!edit.ok) {
         if (edit.reason === "unverified-models") fail("unverified_models", "Unmatched models may be temporarily unavailable; inspect the configuration before removing them", 409);
+        if (edit.reason === "unrestricted-scope") fail("unrestricted_scope", "All models are enabled because enabledModels is not set; use model visibility controls instead of creating a partial scope", 409);
         if (edit.reason === "unsafe-scope") fail("unsafe_scope", "The model scope may include unavailable models; the requested change was not saved", 409);
         fail("last_model", "At least one model must stay enabled", 409);
       }
@@ -469,7 +462,7 @@ function editMcpDocument(target: Required<ReaderSettingsTarget>, document: JsonO
 }
 async function mutateMcp(target: Required<ReaderSettingsTarget>, operation: string, changes: JsonObject, expected: string, validateTarget?: () => void): Promise<ReaderSettingsSnapshot> {
   const internals = await writableMcpInternals();
-  const fileTarget: McpConfigFileTarget = target.scope === "global" ? { scope: "global", agentDir: getAgentDir() } : { scope: "project", cwd: target.cwd, allowedRoots: new Set([target.cwd]) };
+  const fileTarget: McpConfigFileTarget = target.scope === "global" ? { scope: "global", agentDir: getAgentDir() } : { scope: "project", cwd: target.cwd };
   let result: ReaderSettingsSnapshot | undefined;
   let restored: McpHeldRemoval | undefined;
   try {
@@ -570,7 +563,7 @@ export async function mutateSettings(input: ReaderSettingsTarget & { operation: 
     const before = revision(target, document);
     await editSettingsDocument(target, document, input.operation, input.changes, skill);
     result = snapshot(target, document, projection(target, document)); result.changed = before !== result.revision;
-  }, projectWrite?.validate);
+  }, projectWrite?.validate, Boolean(projectWrite && !samePath(projectWrite.path, settingsPath(target))));
   if (target.area.startsWith("models_")) invalidateModelsCache();
   return result!;
 }

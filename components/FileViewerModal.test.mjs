@@ -7,6 +7,8 @@ const models = await readFile(new URL("./ModelsConfig.tsx", import.meta.url), "u
 const plugins = await readFile(new URL("./PluginsConfig.tsx", import.meta.url), "utf8");
 const skills = await readFile(new URL("./SkillsConfig.tsx", import.meta.url), "utf8");
 const fileViewer = await readFile(new URL("./FileViewer.tsx", import.meta.url), "utf8");
+const fileViewerModal = await readFile(new URL("./FileViewerModal.tsx", import.meta.url), "utf8");
+const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 
 test("settings open-in-reader buttons are compact icon-only (22x22) with tooltip", () => {
   for (const [name, src] of [["agents", agents], ["models", models], ["plugins", plugins], ["skills", skills]]) {
@@ -37,4 +39,12 @@ test("TextFileViewer open-in-reader is icon-only (no visible long label)", () =>
   assert.match(viewerBlock, /title=\{t\("files\.openInReaderView/);
   assert.ok(!/<span>在阅读视图里打开<\/span>/.test(viewerBlock), "no visible label pill in text viewer");
   assert.match(viewerBlock, /className="file-viewer-icon-button"/);
+});
+
+test("modal history back control keeps its text on narrow viewports", () => {
+  assert.match(fileViewerModal, /className="file-viewer-back-button"/);
+  assert.doesNotMatch(fileViewerModal, /className="file-viewer-icon-button" aria-label=\{t\("files\.back"\)\}/);
+  const backCss = css.match(/\.file-viewer-back-button\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(backCss, /min-width:\s*max-content/);
+  assert.match(backCss, /white-space:\s*nowrap/);
 });

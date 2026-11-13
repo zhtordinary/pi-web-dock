@@ -39,6 +39,11 @@ const [chatInput, idRoute, activityPanel, fileExplorer, explorerSection, floatin
   readFile(new URL("./SessionContextMenu.tsx", import.meta.url), "utf8"),
   readFile(new URL("./WorktreeSessionBuckets.tsx", import.meta.url), "utf8"),
 ]);
+const worktreeShell = await readFile(new URL("./app-shell-worktree.tsx", import.meta.url), "utf8");
+const sessionTopBarStats = await readFile(new URL("./SessionTopBarStats.tsx", import.meta.url), "utf8");
+const resourceToolbar = await readFile(new URL("./app-shell-resource-toolbar.tsx", import.meta.url), "utf8");
+const topBarSource = `${appShell}\n${sessionTopBarStats}`;
+const resourceToolbarSource = `${appShell}\n${resourceToolbar}`;
 
 test("generation and activity selectors use one floating checked-menu pattern", () => {
   assert.match(floatingSelect, /font: "inherit",\s*fontSize: 11,[\s\S]*\.\.\.triggerStyle/);
@@ -58,7 +63,7 @@ test("generation and activity selectors use one floating checked-menu pattern", 
   assert.match(chatInput, /<ChatInputSelectTrigger[\s\S]*announceReaderMenuOpen\("chat-fast-mode"\)/);
   assert.match(chatInput, /<SelectorRow[\s\S]*disabled=\{mode === "fast" && !fastMode\.supported\}/);
   assert.match(chatInput, /<span style=\{\{ flex: 1 \}\}>\{mode\}<\/span>/);
-  assert.match(chatInput, /role="listbox"\s+aria-label="Change model"/);
+  assert.match(chatInput, /role="listbox"\s+aria-label=\{t\("chat\.changeModel"\)\}/);
   assert.match(chatInput, /role="group"\s+aria-label=\{group\.provider\}/);
   assert.match(chatInput, /role="listbox"\s+aria-label=\{t\("chat\.changeFastMode"\)\}/);
   assert.match(chatInput, /role="listbox"\s+aria-label=\{t\("chat\.changeReasoningLabel"\)\}/);
@@ -96,7 +101,7 @@ test("project groups expose Git navigation while the top toolbar keeps its Git b
   assert.doesNotMatch(sessionRunsRoute, /await resolveProject\(/);
   assert.match(sessionRunsRoute, /isGit: projectInfo\.isGit/);
   assert.match(appShell, /talkMapDevice/);
-  assert.match(appShell, /remotePeer=\{talkMapDevice && localDeviceId/);
+  assert.match(worktreeShell, /remotePeer=\{talkMapDevice && localDeviceId/);
   assert.match(talkMapOverlay, /remotePeer\?: string/);
   assert.match(talkMapOverlay, /apiPathForPeer\(remotePeer/);
   assert.match(talkMapOverlay, /deviceName\?: string \| null/);
@@ -114,8 +119,8 @@ test("project groups expose Git navigation while the top toolbar keeps its Git b
   assert.match(talkMapOverlay, /lastX/);
   assert.match(talkMapOverlay, /event\.clientX - drag\.lastX/);
   assert.match(talkMapOverlay, /Math\.hypot\(event\.clientX - drag\.startX, event\.clientY - drag\.startY\)/);
-  assert.match(appShell, /deviceName=\{talkMapDevice\?\.name/);
-  assert.match(appShell, /focusSessionId=\{talkMapFocusSessionId\}/);
+  assert.match(worktreeShell, /deviceName=\{talkMapDevice\?\.name/);
+  assert.match(worktreeShell, /focusSessionId=\{talkMapFocusSessionId\}/);
   assert.match(appShell, /talkMap\.locateSession/);
   assert.match(appShell, /talkMap\.open/);
   assert.match(appShell, /const topBarTalkMapLabel = topBarSessionId[\s\S]*talkMap\.locateSession[\s\S]*talkMap\.open/);
@@ -164,15 +169,15 @@ test("project groups expose Git navigation while the top toolbar keeps its Git b
   assert.match(talkMapOverlay, /isSubprojectView && onConvertGhost/);
   assert.match(talkMapOverlay, /module\.id !== UNCLASSIFIED_SUBPROJECT_ID/);
   assert.doesNotMatch(talkMapOverlay, /className="talk-map-primary-action"/);
-  assert.match(appShell, /onNewSession=\{handleTalkMapNewSession\}/);
-  assert.match(appShell, /onConvertGhost=\{handleTalkMapConvertGhost\}/);
+  assert.match(worktreeShell, /onNewSession=\{onTalkMapNewSession\}/);
+  assert.match(worktreeShell, /onConvertGhost=\{onTalkMapConvertGhost\}/);
   assert.match(appShell, /mutation: \{ op: "append-session", sessionId \}/);
-  assert.match(appShell, /onSelectCard=\{handleTalkMapSelectCard\}/);
+  assert.match(worktreeShell, /onSelectCard=\{onTalkMapSelectCard\}/);
   assert.match(appShell, /sessionInfo\?\.projectRoot \?\? remoteSession\.sessionInfo\?\.cwd/);
   assert.match(appShell, /selectedSession\?\.projectRoot \?\? selectedSession\?\.cwd/);
   assert.match(appShell, /padding: "8px 14px 8px 8px"/);
-  assert.match(appShell, /onArchiveSession=\{\(session\) => handleTalkMapSessionMutation\(session, "archive"\)\}/);
-  assert.match(appShell, /onDeleteSession=\{\(session\) => handleTalkMapSessionMutation\(session, "delete"\)\}/);
+  assert.match(worktreeShell, /onArchiveSession=\{\(session\) => onTalkMapSessionMutation\(session, "archive"\)\}/);
+  assert.match(worktreeShell, /onDeleteSession=\{\(session\) => onTalkMapSessionMutation\(session, "delete"\)\}/);
   assert.match(appShell, /highlightedSessionId=\{talkMapSidebarSessionId\}/);
   assert.match(sessionSidebar, /data-talk-map-highlighted=\{isHighlighted \? "true" : undefined\}/);
   assert.match(activityPanel, /highlightedSessionId\?: string \| null/);
@@ -200,9 +205,9 @@ test("project groups expose Git navigation while the top toolbar keeps its Git b
   assert.match(talkMapOverlay, /talkMap\.relationsHint/);
   assert.match(talkMapOverlay, /talk-map\/relations/);
   assert.match(talkMapOverlay, /handleFramePointerDown/);
-  assert.match(appShell, /onForkSession=\{handleTalkMapFork\}/);
-  assert.match(appShell, /onInjectContext=\{handleTalkMapInjectContext\}/);
-  assert.match(appShell, /sendAgentCommand<[\s\S]*type: "fork"/);
+  assert.match(worktreeShell, /onForkSession=\{onTalkMapFork\}/);
+  assert.match(worktreeShell, /onInjectContext=\{onTalkMapInjectContext\}/);
+  assert.match(worktreeShell, /sendAgentCommand<[\s\S]*type: "fork"/);
   assert.match(talkMapTypes, /op: "upsert-edge"/);
   assert.match(talkMapTypes, /op: "delete-edge"/);
   assert.match(talkMapTypes, /op: "upsert-frame"/);
@@ -215,10 +220,10 @@ test("project groups expose Git navigation while the top toolbar keeps its Git b
 });
 
 test("Talk Map injection creates a visible editable prompt with source identity", () => {
-  const start = appShell.indexOf("const handleTalkMapInjectContext");
-  const end = appShell.indexOf("const handleTalkMapFork", start);
+  const start = worktreeShell.indexOf("const handleTalkMapInjectContext");
+  const end = worktreeShell.indexOf("const handleTalkMapFork", start);
   assert.ok(start >= 0 && end > start);
-  const handler = appShell.slice(start, end);
+  const handler = worktreeShell.slice(start, end);
   assert.match(handler, /buildTalkMapInjectPrompt/);
   assert.match(handler, /sourceSessionId: session\.id/);
   assert.match(handler, /sourcePath: session\.path/);
@@ -382,6 +387,7 @@ test("search uses one compact control across Reader surfaces", () => {
   assert.match(globalsCss, /textarea,\s*input,\s*select \{\s*font-size: 16px !important;\s*\}/);
   assert.match(globalsCss, /\.session-search-input \{\s*font-size: 11px !important;\s*\}/);
   assert.match(globalsCss, /\.session-search-match-filter-select \{\s*font-size: 11px !important;\s*\}/);
+  assert.match(globalsCss, /\.worktree-graph-search-input \{\s*font-size: 11px !important;\s*\}/);
   const searchMatchFilterStart = activityPanel.indexOf('ariaLabel={t("sessionActivity.searchMatchFilterLabel")}');
   const searchMatchFilterEnd = activityPanel.indexOf(">", searchMatchFilterStart);
   assert.ok(searchMatchFilterStart >= 0 && searchMatchFilterEnd > searchMatchFilterStart);
@@ -436,7 +442,7 @@ test("project removal routes to owner and filter options expose context menu", (
   assert.match(activityPanel, /onDeleteProject=\{activity\.handleDeleteKnownProject\}/);
   assert.match(activityPanel, /const endpoint = isLocal \? "\/api\/projects" : `\/api\/remote\/projects\?peer=/);
   assert.match(activityPanel, /openAt=\{contextMenu\.point\}/);
-  assert.match(activityPanel, /hasSessions=\{groupProject\?\.hasSessions \?\? items\.length > 0\}/);
+  assert.match(activityPanel, /hasSessions=\{groupProject\?\.hasSessions \?\? visibleItems\.length > 0\}/);
   assert.doesNotMatch(activityPanel, /items\.length === 0 && groupDeviceId === localDeviceId/);
 });
 
@@ -782,18 +788,18 @@ test("activity costs load lazily per visible row", () => {
 
 test("activity costs use one red threshold and the same color in panel and sidebar", () => {
   assert.match(activityPanel, /import \{[^}]*sessionCostColor[^}]*\} from "@\/lib\/session-cost";/);
-  assert.match(appShell, /import \{[^}]*sessionCostColor[^}]*\} from "@\/lib\/session-cost";/);
+  assert.match(topBarSource, /import \{[^}]*sessionCostColor[^}]*\} from "@\/lib\/session-cost";/);
   assert.equal((activityPanel.match(/sessionCostColor\(costValue\)/g) ?? []).length, 2);
   assert.match(activityPanel, /className="session-activity-sidebar-row"/);
   assert.equal((activityPanel.match(/style=\{\{ color: sessionCostColor\(costValue\) \}\}>\{costText\}/g) ?? []).length, 2);
   assert.doesNotMatch(activityPanel, /<span style=\{\{ color: "var\(--text-dim\)" \}\}>\{costText\}<\/span>/);
   assert.match(activityPanel, /useSessionDetails/);
   assert.doesNotMatch(activityPanel, /sessionCacheHitColor/);
-  assert.match(appShell, /sessionCacheHitRate/);
+  assert.match(topBarSource, /sessionCacheHitRate/);
   assert.doesNotMatch(appShell, /sessionCacheHitColor/);
   assert.doesNotMatch(activityPanel, /sessionActivity\.totalCost/);
   assert.doesNotMatch(activityPanel, /function costColor/);
-  assert.doesNotMatch(appShell, /function sessionCostColor/);
+  assert.doesNotMatch(topBarSource, /function sessionCostColor/);
 });
 
 test("activity panel uses status metadata as its second row", () => {
@@ -902,8 +908,8 @@ test("keyboard menus recover after IME or focus interruption", () => {
 });
 
 test("archive mutations cannot wait forever on stale runtime or peer state", () => {
-  assert.match(archiveRoute, /await closeIdleSession\(id, source\)/);
-  assert.match(archiveRoute, /await controlSiblingSession\(id, "shutdown"\)/);
+  assert.match(archiveRoute, /await closeIdleSession\(bundleId, source\)/);
+  assert.match(archiveRoute, /await controlSiblingSession\(bundleId, "shutdown"\)/);
   assert.match(archiveRoute, /sessionArchiveFiles\(source\)/);
   assert.match(archiveRoute, /acquireStateWriteLock\(file\)/);
   assert.match(remoteRoute, /AbortSignal\.timeout\(isMcpTest \? 65_000 : 12_000\)/);
@@ -918,6 +924,15 @@ test("archive refreshes bypass stale session and activity snapshots", () => {
   assert.equal((activityPanel.match(/onChanged=\{\(\) => void activity\.refresh\(item\.device\.id, true\)\}/g) ?? []).length, 2);
 });
 
+
+test("subagent lifecycle actions stay with the parent bundle", () => {
+  assert.match(archiveRoute, /session_child_lifecycle_requires_parent/);
+  assert.match(sessionSidebar, /lifecycleManagedByParent/);
+  assert.match(activityPanel, /lifecycleManagedByParent/);
+  assert.match(activityPanel, /subagentLifecycleRequiresParent/);
+  assert.match(sessionContextMenu, /disabled=\{archiveDisabled \|\| !canMutateAny \|\| busy\}/);
+  assert.match(sessionContextMenu, /disabled=\{deleteDisabled \|\| !canMutateAny \|\| busy\}/);
+});
 
 test("archive rows leave only after the move is confirmed", () => {
   const rowStart = activityPanel.indexOf("function SessionActivityRow(");
@@ -986,7 +1001,6 @@ test("shell revives its audio context on validated gestures reported by an embed
 
 test("status sounds use atomic claims and replay-aware Activity delivery", async () => {
   const audio = await readFile(new URL("../hooks/useAudio.ts", import.meta.url), "utf8");
-  const relay = await readFile(new URL("../app/api/activity/relay/route.ts", import.meta.url), "utf8");
   const events = await readFile(new URL("../app/api/activity/events/route.ts", import.meta.url), "utf8");
   assert.match(audio, /navigator as Navigator & \{ locks\?: SoundLockManager \}/);
   assert.match(audio, /locks\.request\(soundLockName\(requestId\)/);
@@ -996,8 +1010,6 @@ test("status sounds use atomic claims and replay-aware Activity delivery", async
   assert.match(appShell, /event\.source !== source/);
   assert.match(appShell, /event\.origin !== expectedOrigin/);
   assert.doesNotMatch(chatWindow, /postMessage\(\{ type: "pi-web-session-sounded"/);
-  assert.match(relay, /activityEventsSince\(0\)/);
-  assert.match(relay, /replay: true/);
   assert.match(events, /activityEventsSince\(since\)/);
   assert.match(events, /replay: true/);
   assert.match(activityPanel, /pendingActivityEventsRef/);
@@ -1062,24 +1074,31 @@ test("session lists nest forks and injected-context sessions with distinct marke
   assert.match(activityPanel, /const latestByNode = new Map/);
   assert.match(activityPanel, /compareBySort\(childLatest, latest, sort\)/);
   assert.match(activityPanel, /compareBySort\(latestByNode\.get\(left\)!, latestByNode\.get\(right\)!, sort\)/);
-  assert.match(activityPanel, /buildSessionLineageTree\(items, state\.sort\)/);
-  assert.match(activityPanel, /buildSessionLineageTree\(items, filters\.sort\)/);
+  assert.match(activityPanel, /buildSessionLineageTree\(visibleItems, state\.sort\)/);
+  assert.match(activityPanel, /buildSessionLineageTree\(visibleItems, filters\.sort\)/);
   assert.match(activityPanel, /lineageParentId\(item\.session\)/);
   assert.match(activityPanel, /resolveAncestor/);
   assert.match(activityPanel, /node\.children\.length > 0/);
-  assert.match(activityPanel, /borderLeft: "1px solid var\(--border\)"/);
-  assert.match(activityPanel, /buildSessionLineageTree\(items, state\.sort\)/);
+  assert.match(activityPanel, /const guideBorder = "1px solid color-mix\(in srgb, var\(--text-dim\) 28%, transparent\)"/);
+  assert.doesNotMatch(activityPanel, /const armTop/);
+  assert.doesNotMatch(activityPanel, /background: isSidebar \? "var\(--bg-panel\)"/);
   assert.match(activityPanel, /forked=\{Boolean\(item\.session\.parentSessionId\)\}/);
   assert.match(activityPanel, /contextInjected=\{Boolean\(item\.session\.contextSourceSessionId\)\}/);
   assert.match(activityPanel, /contextInjected=\{Boolean\(hit\.contextSourceSessionId\)\}/);
   assert.match(activityPanel, /sessionActivity\.forkedSession/);
   assert.match(activityPanel, /sessionActivity\.contextInjectedSession/);
+  assert.match(activityPanel, /buildSessionLineageTree\(visibleItems, state\.sort\)/);
   assert.match(sessionSidebar, /lineageParentId\(s\)/);
   assert.match(sessionSidebar, /session\.contextSourceSessionId && \(\n/);
   assert.match(sessionSidebar, /session\.parentSessionId \|\| \(!session\.contextSourceSessionId && depth > 0\)/);
   assert.match(zhCN, /"sessionActivity\.forkedSession"/);
   assert.match(zhCN, /"sessionActivity\.contextInjectedSession"/);
+  assert.match(zhCN, /"sessionActivity\.expandBranch"/);
   assert.match(en, /"sessionActivity\.contextInjectedSession"/);
+  assert.match(en, /"sessionActivity\.expandBranch"/);
+  assert.match(activityPanel, /branchCollapsed/);
+  assert.match(activityPanel, /sessionActivity\.expandBranch/);
+  assert.match(activityPanel, /sessionActivity\.collapseBranch/);
 });
 
 test("session lineage preserves hierarchy across missing intermediate nodes", () => {
@@ -1319,7 +1338,8 @@ test("embedded session clicks follow device identity and keep activity-sidebar p
 test("aggregate remote sessions keep top-bar status and right-side toggles", () => {
   assert.match(appShell, /const topBarSessionActive = showChat \|\| Boolean\(remoteSession\)/);
   assert.match(appShell, /const topBarSession = remoteSession \? remoteSession\.sessionInfo : selectedSession/);
-  assert.match(appShell, /topBarSessionActive && \(sessionStats \|\| contextUsage\)/);
+  assert.match(appShell, /<SessionTopBarStats\s+sessionActive=\{topBarSessionActive\}\s+sessionStats=\{sessionStats\}\s+contextUsage=\{contextUsage\}/s);
+  assert.match(topBarSource, /if \(!sessionActive \|\| \(!sessionStats && !contextUsage\)\) return null;/);
   assert.match(appShell, /topBarSessionActive && \(\n\s*<div style=\{\{ display: "flex", alignItems: "stretch", height: "100%" \}\}>/);
   // Keep enough room for the optional selection-action toolbar in the shared ChatWindow header.
   assert.match(appShell, /remotePeer=\{remoteSession\.device\.id\}/);
@@ -1368,7 +1388,8 @@ test("top bar hides recap controls and exposes branch and sidekick controls", ()
   assert.doesNotMatch(appShell, /questionsSinceRecap/);
   assert.doesNotMatch(appShell, /handleTopBarRecap/);
   assert.doesNotMatch(appShell, /sessionActivity\.recapRun/);
-  assert.match(appShell, /<BranchNavigator/);
+  assert.match(worktreeShell, /<BranchNavigator/);
+  assert.match(appShell, /<AppShellWorktreeBranchNavigator/);
   assert.match(appShell, /hasSession=\{Boolean\(topBarSession\)\}/);
   assert.match(appShell, /hideInlineButton=\{!topBarSession\}/);
   assert.match(appShell, /sidekickOpen/);
@@ -1543,9 +1564,9 @@ test("resource toolbar owner follows embedded workspace shape", () => {
 
 test("resource toolbar exposes models, skills, plugins, and subagents with equal spacing", () => {
   assert.match(appShell, /onOpenAgents=\{\(\) => setSettingsModalTab\("agents"\)\}/);
-  assert.match(appShell, /label: t\("common\.agents"\),/);
-  assert.doesNotMatch(appShell, /onOpenPrompts/);
-  assert.match(appShell, /justifyContent: "space-between",\s*alignItems: "center"/);
+  assert.match(resourceToolbarSource, /label: t\("common\.agents"\),/);
+  assert.doesNotMatch(resourceToolbarSource, /onOpenPrompts/);
+  assert.match(resourceToolbarSource, /justifyContent: "space-between",\s*alignItems: "center"/);
 });
 
 test("session-only remote workspaces collapse the directory sidebar by default", () => {

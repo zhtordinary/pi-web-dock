@@ -77,6 +77,7 @@ function costResponse(
   result: SessionCostResult,
   contextUsage: ContextUsage | null | undefined,
   compactionContexts: Record<string, CompactionContextInfo> | undefined,
+  summary = false,
 ) {
   const cost = result.cost ?? {};
   const legacySummary: SessionCostSummary = {
@@ -127,10 +128,12 @@ function costResponse(
     missingPriceModels,
     pendingUsageCount: totalCost.pendingUsageCount,
     pendingUsageModels: totalCost.pendingUsageModels,
-    messageCosts: result.messageCosts ?? {},
-    imageGenerationCosts: result.imageGenerationCosts ?? [],
-    compactionCosts: result.compactionCosts ?? {},
-    compactionContexts,
+    // Summary callers only need aggregate status/usage. Per-message and image
+    // records stay on the default full contract to keep activity responses small.
+    ...(summary ? {} : { messageCosts: result.messageCosts ?? {} }),
+    ...(summary ? {} : { imageGenerationCosts: result.imageGenerationCosts ?? [] }),
+    ...(summary ? {} : { compactionCosts: result.compactionCosts ?? {} }),
+    ...(summary ? {} : { compactionContexts }),
     // Full-session cumulative token usage, computed by the same script that
     // prices the session. Used by the top bar so token stats and cache hit
     // rate cover the whole session history, not just post-compaction messages.
@@ -181,7 +184,7 @@ export async function GET(
       && (cached.result as SessionCostResult).recapCost
       && Array.isArray((cached.result as SessionCostResult).extensionCosts)
       && Array.isArray((cached.result as SessionCostResult).imageGenerationCosts)
-    ) return costResponse(cached.result as SessionCostResult, contextUsage, compactionContexts);
+    ) return costResponse(cached.result as SessionCostResult, contextUsage, compactionContexts, summary);
 
     const revisionKey = JSON.stringify([id, sessionRevision, scriptPath, scriptMtimeMs, priceTableSignature]);
     let pending = costInFlight.get(revisionKey);
@@ -196,7 +199,7 @@ export async function GET(
     if (sessionMtimeMs !== null) {
       cacheCost(id, { sessionMtimeMs, sessionRevision, scriptMtimeMs, priceTableSignature, result });
     }
-    return costResponse(result, contextUsage, compactionContexts);
+    return costResponse(result, contextUsage, compactionContexts, summary);
   } catch (error) {
     console.warn("[pi-web] session cost unavailable:", error instanceof Error ? error.message : String(error));
     return NextResponse.json({ amount: null, currency: "USD", status: "unavailable", usage: null, compactionCosts: {}, compactionContexts, contextUsage });

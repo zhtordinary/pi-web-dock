@@ -24,9 +24,9 @@ export interface EnabledModelsBulkActions {
 /**
  * Bulk actions for the rows currently shown.
  *
- * Mirrors the server guard: pi reads an empty scope as "no scope" and shows
- * every model again, so the UI never offers a bulk disable that would switch
- * off the last enabled model anywhere.
+ * An absent scope can be narrowed safely with a negated pattern, which keeps
+ * models outside this device's catalog enabled. The UI never offers a bulk
+ * disable that would switch off the last currently available model.
  */
 export function enabledModelsBulkActions(
   view: EnabledModelsView | null,
@@ -39,7 +39,9 @@ export function enabledModelsBulkActions(
     enableRefs,
     disableRefs,
     canEnable: editable && enableRefs.length > 0,
-    canDisable: editable && disableRefs.length > 0
+    canDisable: editable
+      && (view?.allEnabled !== true || view.patterns === null)
+      && disableRefs.length > 0
       && (view?.enabledTotal ?? 0) - disableRefs.length >= 1,
   };
 }
@@ -50,7 +52,7 @@ export interface EnabledModelsProviderToggle {
   /** True when the switch cannot move in the direction it would go. */
   blocked: boolean;
   /** Why it cannot move, as a refusal key, or null while it can. */
-  reason: "last-model" | "project-scope" | null;
+  reason: "last-model" | "project-scope" | "unrestricted-scope" | "unsafe-scope" | null;
 }
 
 /**
@@ -73,7 +75,13 @@ export function enabledModelsProviderToggle(
   return {
     checked,
     blocked,
-    reason: !blocked ? null : view?.editable ? "last-model" : "project-scope",
+    reason: !blocked
+      ? null
+      : view?.editable !== true
+        ? "project-scope"
+        : view?.allEnabled === true
+          ? view.patterns === null ? "unrestricted-scope" : "unsafe-scope"
+          : "last-model",
   };
 }
 

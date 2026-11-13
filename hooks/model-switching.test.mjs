@@ -148,10 +148,10 @@ test("metadata reload targets current head by default and preserves an explicit 
   assert.doesNotMatch(source, /activeLeafIdRef/);
 });
 
-test("AppShell prioritizes live context usage over cost fallback", async () => {
+test("AppShell prioritizes live context usage over cost and stats fallbacks", async () => {
   const appShell = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
   assert.match(appShell, /const \[liveContextUsageSnapshot, setLiveContextUsageSnapshot\] = useState/);
   assert.match(appShell, /const liveContextUsage = liveContextUsageSnapshot\?\.sessionId === topBarSessionId/);
-  assert.match(appShell, /contextUsage = liveContextUsage \?\? topBarDetails\.cost\?\.contextUsage \?\? null/);
+  assert.match(appShell, /contextUsage = liveContextUsage \?\? topBarDetails\.cost\?\.contextUsage \?\? sessionStats\?\.contextUsage \?\? null/);
   assert.doesNotMatch(appShell, /useEffect\(\(\) => \{\s*const usage = topBarDetails\.cost\?\.contextUsage;\s*if \(usage\) setContextUsage\(usage\);/);
 });

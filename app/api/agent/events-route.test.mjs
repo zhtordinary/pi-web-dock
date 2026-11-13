@@ -14,6 +14,8 @@ test("agent SSE observes persisted files and live wrappers without initializing 
   assert.match(agentEventsSource, /if \(req\.signal\.aborted\) return new Response\(null, \{ status: 204 \}\)/);
   assert.match(agentEventsSource, /"Cache-Control": "no-cache, no-transform"/);
   assert.match(agentEventsSource, /"X-Accel-Buffering": "no"/);
+  assert.match(agentEventsSource, /holderValue === "foreground" \|\| holderValue === "background"/);
+  assert.doesNotMatch(agentEventsSource, /\[A-Za-z0-9\._:-\]\{1,64\}/);
 });
 
 test("agent SSE reuses one TextEncoder per stream", () => {

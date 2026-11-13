@@ -16,24 +16,26 @@ const cwd = join(root, "project");
 const outside = join(root, "outside");
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousDisable = process.env.PI_WEB_DISABLE_MCP;
+const previousPolicy = process.env.PI_WEB_FILE_PERMISSIONS_FILE;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+process.env.PI_WEB_FILE_PERMISSIONS_FILE = join(root, "file-permissions.json");
 delete process.env.PI_WEB_DISABLE_MCP;
 await mkdir(agentDir, { recursive: true });
 await mkdir(join(cwd, ".pi"), { recursive: true });
 await mkdir(outside, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 const { clearMcpStatuses } = await jiti.import("../../../../lib/mcp-status.ts");
 const { POST } = await jiti.import("./route.ts");
 const { GET } = await jiti.import("../route.ts");
-allowFileRoot(cwd);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   if (previousDisable === undefined) delete process.env.PI_WEB_DISABLE_MCP;
   else process.env.PI_WEB_DISABLE_MCP = previousDisable;
+  if (previousPolicy === undefined) delete process.env.PI_WEB_FILE_PERMISSIONS_FILE;
+  else process.env.PI_WEB_FILE_PERMISSIONS_FILE = previousPolicy;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -111,13 +113,12 @@ test("a global server is tested from its file and answers with what it found", a
   assert.ok(!JSON.parse(readFileSync(envFile, "utf8")).includes("PI_WEB_PASSWORD"));
 });
 
-test("with a project, a global stdio server runs in it, and the project must be an allowed folder", async () => {
+test("with a project, a global stdio server runs in the chosen existing folder", async () => {
   const { body } = await post({ scope: "global", name: "lint", cwd });
   assert.equal(body.result.cwd, cwd);
-  assert.deepEqual(await post({ scope: "global", name: "lint", cwd: outside }), {
-    status: 403,
-    body: { error: "Access denied", reason: "cwd-denied" },
-  });
+  const outsideResult = await post({ scope: "global", name: "lint", cwd: outside });
+  assert.equal(outsideResult.status, 200);
+  assert.equal(outsideResult.body.result.cwd, outside);
   assert.equal((await post({ scope: "global", name: "lint", cwd: `${cwd}/../project` })).body.reason, "cwd-denied");
   assert.equal((await post({ scope: "global", name: "lint", cwd: "project" })).body.reason, "cwd-invalid");
 });

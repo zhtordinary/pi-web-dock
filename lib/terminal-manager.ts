@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { homedir } from "os";
 import type { IPty } from "node-pty";
+import { getPowerShellConfig } from "@earendil-works/pi-coding-agent";
 import { samePath } from "./paths";
 
 export type TerminalEvent =
@@ -92,11 +93,14 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
       { cause: error },
     );
   }
-  const shell = process.platform === "win32"
-    ? process.env.ComSpec ?? "cmd.exe"
-    : process.env.SHELL || "/bin/sh";
-  const args = process.platform === "win32" ? [] : ["-l"];
-  const pty = spawn(shell, args, {
+  let shell: string;
+  if (process.platform === "win32") {
+    try { shell = getPowerShellConfig().shell; }
+    catch { shell = process.env.ComSpec ?? "cmd.exe"; }
+  } else {
+    shell = process.env.SHELL || "/bin/sh";
+  }
+  const pty = spawn(shell, process.platform === "win32" ? [] : ["-l"], {
     name: "xterm-256color",
     cols: dimension(cols, 80),
     rows: dimension(rows, 24),

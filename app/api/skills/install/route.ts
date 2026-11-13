@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { runNpx } from "@/lib/npx";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { isExistingDirectory } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
 import { getPluginPackageIdentity } from "@/lib/plugin-project-status";
@@ -29,9 +29,8 @@ export async function POST(req: Request) {
     const isGlobal = scope !== "project";
     if (!isGlobal) {
       if (!cwd) return NextResponse.json({ error: "cwd required for project install" }, { status: 400 });
-      const allowedRoots = await getAllowedFileRoots();
-      if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      if (!isExistingDirectory(cwd)) {
+        return NextResponse.json({ error: "cwd must be an existing directory" }, { status: 400 });
       }
       if (!getProjectTrustStatus(cwd, getAgentDir()).trusted) {
         return NextResponse.json(
@@ -57,9 +56,9 @@ export async function POST(req: Request) {
     }
     // Analysis loads settings, project resources and model services for the
     // given directory, so it must never receive an unvalidated caller path.
-    const analysis = resolveAnalysisCwd(cwd, await getAllowedFileRoots());
+    const analysis = resolveAnalysisCwd(cwd);
     if (analysis.rejected) {
-      console.warn("[skills/install] trigger-mode analysis skipped for an unauthorized cwd");
+      console.warn("[skills/install] trigger-mode analysis skipped for an unavailable cwd");
     }
     const analysisCwd = analysis.cwd;
     const installScope = isGlobal ? "global" : "project";

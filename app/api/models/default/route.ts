@@ -1,7 +1,7 @@
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { createAgentSessionServices, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   isThinkingLevel,
   projectSettingsPath,
@@ -9,10 +9,10 @@ import {
   writeDefaultPreferences,
   type DefaultPreferencesEdit,
 } from "@/lib/default-preferences";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { resolveVisibleModels } from "@/lib/model-scope";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { createReaderAgentSessionServices } from "@/lib/model-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -69,15 +69,10 @@ export async function PUT(req: Request) {
   if (!cwdStat.isDirectory()) {
     return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
   }
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-    return Response.json({ error: "Access denied" }, { status: 403 });
-  }
-
   try {
     const agentDir = getAgentDir();
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
-    const services = await createAgentSessionServices({
+    const services = await createReaderAgentSessionServices({
       cwd,
       agentDir,
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),

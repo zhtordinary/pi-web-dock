@@ -13,6 +13,7 @@ interface OpenFileTabInput {
   projectRoot?: string;
   modeHint?: "diff";
   page?: number;
+  anchor?: string;
   sourceSessionId?: string | null;
   tabId: string;
 }
@@ -30,8 +31,9 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
         cwd: input.cwd,
         projectRoot: input.projectRoot,
         sourceSessionId: input.sourceSessionId,
-        initialDisplayMode: input.modeHint,
+        initialDisplayMode: input.anchor ? "preview" : input.modeHint,
         page: input.page,
+        anchor: input.anchor,
         viewerState: input.modeHint ? {
           displayMode: input.modeHint,
           wrapLines: false,
@@ -51,7 +53,8 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
     || existing.projectRoot !== input.projectRoot;
   const sourceUnchanged = !sourceChanged;
   const pageChanged = existing.page !== input.page;
-  if (sourceUnchanged && !contextChanged && !input.modeHint && !pageChanged) return tabs;
+  const anchorChanged = Boolean(input.anchor) || existing.anchor !== input.anchor;
+  if (sourceUnchanged && !contextChanged && !input.modeHint && !pageChanged && !anchorChanged) return tabs;
 
   return tabs.map((tab) => {
     if (tab.id !== input.tabId) return tab;
@@ -71,14 +74,17 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
       next.page = input.page;
       bumpRevision = true;
     }
-    if (input.modeHint) {
-      next.initialDisplayMode = input.modeHint;
+    if (anchorChanged) next.anchor = input.anchor;
+    const displayMode = input.anchor ? "preview" : input.modeHint;
+    if (displayMode) {
+      next.initialDisplayMode = displayMode;
       next.viewerState = {
-        displayMode: input.modeHint,
+        displayMode,
         wrapLines: tab.viewerState?.wrapLines ?? false,
         scrollTop: 0,
         scrollLeft: 0,
       };
+      if (input.anchor) next.dirty = false;
       bumpRevision = true;
     }
     if (bumpRevision) next.viewerRevision = (tab.viewerRevision ?? 0) + 1;
@@ -104,6 +110,14 @@ export function replaceFileTab(
   const next = [...tabs];
   next[activeIndex] = replacement;
   return { tabs: next, activeTabId: replacement.id };
+}
+
+export function clearFileTabAnchor(tabs: Tab[], tabId: string, viewerRevision: number): Tab[] {
+  const index = tabs.findIndex((tab) => tab.id === tabId);
+  if (index === -1 || (tabs[index].viewerRevision ?? 0) !== viewerRevision || !tabs[index].anchor) return tabs;
+  const next = [...tabs];
+  next[index] = { ...next[index], anchor: undefined };
+  return next;
 }
 
 export function saveFileViewerState(

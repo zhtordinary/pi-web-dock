@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+import { createJiti } from "jiti";
+
+const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 
 test("QuoteCardGroup implements numbered badges [1], [2] and click-to-edit interface", async () => {
   const source = await readFile(new URL("./QuoteCardGroup.tsx", import.meta.url), "utf8");
@@ -73,9 +76,27 @@ test("ChatInput mounts QuoteCardGroup and guards commands from quote prefixing",
   // Command guard check
   assert.match(
     source,
-    /const isCommand = msg\.startsWith\("\/"\) \|\| msg\.startsWith\("!"\);/,
-    "must detect slash commands and bash commands to protect them from quote injection",
+    /export function withQuoteContext\(message: string, quoteMarkdown: string\): string \{/,
+    "must route quote injection through withQuoteContext so commands stay protected",
   );
+  assert.match(source, /withQuoteContext\(msg, quoteMarkdown\)/, "must attach quotes on send and on streaming queue");
+});
+
+test("withQuoteContext sends quotes as a skill argument and skips other commands", async () => {
+  const { withQuoteContext } = await jiti.import("./ChatInput.tsx");
+  const quotes = "> quoted passage";
+
+  assert.equal(withQuoteContext("/skill:plan-execute 请继续", quotes), `/skill:plan-execute 请继续\n\n${quotes}`);
+  assert.equal(
+    withQuoteContext("/skill:plan-execute", quotes),
+    `/skill:plan-execute ${quotes}`,
+    "a bare skill command needs one space so pi reads the name, not the quotes",
+  );
+  assert.equal(withQuoteContext("", quotes), quotes);
+  assert.equal(withQuoteContext("question", quotes), `${quotes}\n\nquestion`);
+  assert.equal(withQuoteContext("/compact", quotes), "/compact");
+  assert.equal(withQuoteContext("!ls", quotes), "!ls");
+  assert.equal(withQuoteContext("/skill:plan-execute", ""), "/skill:plan-execute");
 });
 
 test("ChatWindow binds quote shortcut and dispatches to addQuote", async () => {

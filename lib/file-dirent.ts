@@ -1,6 +1,6 @@
 import fs from "fs";
 
-type DirentType = Pick<fs.Dirent, "isDirectory" | "isFile">;
+type DirentType = Pick<fs.Dirent, "isDirectory" | "isFile"> & Partial<Pick<fs.Dirent, "isSymbolicLink">>;
 
 export function resolveDirentIsDirectory(
   dirent: DirentType,
@@ -12,6 +12,6 @@ export function resolveDirentIsDirectory(
   try {
     return fs.statSync(fullPath).isDirectory();
   } catch {
-    return null;
+    return dirent.isSymbolicLink?.() ? false : null;
   }
 }

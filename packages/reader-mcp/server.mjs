@@ -61,8 +61,11 @@ const STOP_RECEIPT_TIMEOUT_MS = configuredTimeoutMs(
   process.env.PI_WEB_READER_STOP_RECEIPT_TIMEOUT_MS,
   DEFAULT_STOP_RECEIPT_TIMEOUT_MS,
 );
-const SAFE_CREATE_TOOL_NAMES = ["read", "grep", "find", "ls"];
-const SAFE_CREATE_TOOL_NAME_SET = new Set(SAFE_CREATE_TOOL_NAMES);
+// Reader's own built-in tool names (lib/tool-presets.ts PRESET_FULL + powershell).
+const BUILTIN_TOOL_NAMES = ["bash", "read", "edit", "write", "grep", "find", "ls", "powershell"];
+const BUILTIN_TOOL_NAME_SET = new Set(BUILTIN_TOOL_NAMES);
+// Actions Reader starts a persisted session's runtime for, exactly like opening the session in the UI.
+const RUNTIME_START_CONTROL_ACTIONS = new Set(["prompt", "continue", "steer", "follow_up", "open_session"]);
 const CONTROL_PLANE_AREAS = Object.freeze({
   models: {
     route: "/api/models",
@@ -220,6 +223,14 @@ const SERVER_CAPABILITIES = {
       durableLedger: "reader-required",
       gapRecovery: "reader-required",
     },
+    "reader.streamDiagnostics": {
+      readOnly: true,
+      deviceBinding: "response deviceId must equal requested deviceId",
+      fields: ["deviceId", "kind", "sessionId", "holder", "openedAt", "connectedAt", "lastWriteAt", "droppedEvents", "queuedBytes", "coverage"],
+      queuedBytes: "write-time ReadableStream desiredSize estimate, not a continuously drained queue length",
+      excludes: ["ip", "userAgent", "requestMetadata", "eventContent"],
+      remote: "Reader /api/remote proxy",
+    },
     "reader.control": {
       dryRunDefault: true,
       idempotency: "reader-persistent-contract-required",
@@ -333,9 +344,23 @@ const TOOLS = [
     },
   },
   {
+    name: "reader_get_stream_diagnostics",
+    description:
+      "Read in-process SSE and other long-connection counters for an exact Reader device. Returns kind, session/holder diagnostic labels, timestamps, queued bytes and dropped-event counts only; it never records or returns IP, User-Agent, request metadata, or event content. This is observe-only and supports remote devices through Reader's /api/remote proxy.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["deviceId"],
+      properties: {
+        deviceId: { type: "string", minLength: 1, maxLength: 160 },
+      },
+    },
+  },
+  {
     name: "reader_session_control",
     description:
-      "Inspect a live Reader runtime or execute control actions (prompt, continue, steer, follow_up, abort, stop, clear_queue, create_session, set_model, set_tools, get_tools).\n\n" +
+      "Inspect a live Reader runtime or execute the session actions a person can do in the Reader UI (prompt, continue, steer, follow_up, abort, stop, clear_queue, create_session, open_session, set_model, set_tools, get_tools, answer_question, rename_session, archive_session, unarchive_session, delete_session). " +
+      "Permission model: the caller has the same session permissions as a person using Reader, including sessions whose tools include bash/edit/write and persisted sessions that are not running (prompt/continue/steer/follow_up/open_session start the runtime exactly like opening the session in the UI). The adapter only verifies device/session/cwd identity; dry-run by default, confirm/confirmationReason/idempotencyKey, expectedBootId/expectedRevision checks and receipts remain.\n\n" +
       "[AI WORKFLOW GUIDE]\n" +
       "1. Discover: Call reader_list_sessions to inspect active sessions, statuses, lastUserMessage, and deviceId.\n" +
       `2. Check context: Call reader_read_tail(sessionId) for recent turns. If older history is needed and the result contains a non-empty sessionFilePath, inspect that path with local file-reading tools; if it is omitted, retry with maxEntries: 50 and maxBytes: ${MAX_TAIL_BYTES} and never read null.\n` +
@@ -348,7 +373,7 @@ const TOOLS = [
       additionalProperties: false,
       required: ["action", "deviceId"],
       properties: {
-        action: { type: "string", enum: ["inspect", "get_tools", "set_model", "set_tools", "prompt", "continue", "steer", "follow_up", "abort", "stop", "clear_queue", "create_session", "answer_question"] },
+        action: { type: "string", enum: ["inspect", "get_tools", "set_model", "set_tools", "prompt", "continue", "steer", "follow_up", "abort", "stop", "clear_queue", "create_session", "open_session", "answer_question", "rename_session", "archive_session", "unarchive_session", "delete_session"] },
         deviceId: { type: "string", minLength: 1, maxLength: 160 },
         sessionId: { type: "string", minLength: 1, maxLength: MAX_ID_LENGTH },
         message: { type: "string", maxLength: 32_000 },
@@ -371,13 +396,15 @@ const TOOLS = [
         confirmed: { type: "boolean", description: "Confirmation flag for answer_question." },
         cancelled: { type: "boolean", description: "Set to true to cancel or dismiss the interactive question." },
         cwd: { type: "string", maxLength: 2_000, description: "Required by create_session; Reader validates that the directory exists." },
-        provider: { type: "string", minLength: 1, maxLength: 256 },
+        provider: { type: "string", minLength: 1, maxLength: 256, description: "set_model target provider; create_session may also set the new session's model with provider+modelId." },
         modelId: { type: "string", minLength: 1, maxLength: 256 },
-        thinkingLevel: { type: "string", enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
-        toolNames: { type: "array", maxItems: 7, items: { type: "string", enum: ["bash", "read", "edit", "write", "grep", "find", "ls"] }, description: "create_session accepts only read/grep/find/ls or []; set_tools requires an explicit registered built-in selection in an idle live target. Reader preserves its existing strict policy and reports effective carried tools." },
-        strictToolAllowlist: { type: "boolean", description: "For create_session toolNames, require an exact per-session allow-list and disable discovered/project extensions. Supplying toolNames enables strict mode by default; omit both to preserve Reader's normal tool-selection semantics." },
+        thinkingLevel: { type: "string", enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"], description: "set_model thinking level (use the current provider/modelId to change only the thinking level); create_session may set the new session's initial thinking level." },
+        toolNames: { type: "array", maxItems: BUILTIN_TOOL_NAMES.length, items: { type: "string", enum: BUILTIN_TOOL_NAMES }, description: "Any unique subset of Reader's built-in tools (bash, read, edit, write, grep, find, ls, powershell), or [] for chat-only. create_session: omit toolNames for Reader's normal tool selection with extensions, MCP and Skills; a supplied list is a strict per-session allow-list unless strictToolAllowlist=false. set_tools: choose among the tools registered in the idle live runtime; a strict runtime registered only its create-time list, so it can only reorder within that list — that is what strict means, not a permission limit." },
+        strictToolAllowlist: { type: "boolean", description: "create_session with toolNames only. true (default when toolNames is supplied) registers exactly those built-in tools and loads no discovered/project extensions, MCP or Skills. false keeps Reader's normal runtime (extensions, MCP, Skills) and only narrows the active built-in selection. Omit toolNames to get Reader's normal tool-selection semantics." },
+        name: { type: "string", maxLength: 2_000, description: "Required by rename_session: the new session name (empty clears it, as in the UI)." },
+        force: { type: "boolean", description: "archive_session/unarchive_session/delete_session only: pass the UI's 'force' confirmation for sessions Reader flags (busy, favorite, recently modified)." },
         dryRun: { type: "boolean", default: true },
-        confirm: { type: "boolean", default: false, description: "Must be the JSON boolean true for any real prompt/steer/follow_up/abort/stop/clear_queue/create_session request; strings and query parameters are not accepted." },
+        confirm: { type: "boolean", default: false, description: "Must be the JSON boolean true for any real control request (anything but inspect/get_tools); strings and query parameters are not accepted." },
         idempotencyKey: { type: "string", minLength: 8, maxLength: 200, description: "Required for a real control request; repeated keys replay the original adapter-process receipt, while durable replay must be enforced by Reader." },
         expectedRevision: { type: "string", maxLength: 256, description: "Optional caller-observed Reader revision; the Reader endpoint must enforce it before a write." },
         expectedBootId: { type: "string", maxLength: 128, description: "create_session accepts a Reader-process boot id. Follow-up controls require the session-scoped createdSessionBootId; readerReceipt.bootId is process-scoped." },
@@ -730,6 +757,9 @@ async function handleToolCall(id, params, state) {
         payload = args.mode === "ui_requests" || args.mode === "wait_ui_requests"
           ? await readReaderUiRequests(state, args, id)
           : await readReaderLiveEvents(state, args);
+        break;
+      case "reader_get_stream_diagnostics":
+        payload = await readerGetStreamDiagnostics(state, args);
         break;
       case "reader_session_control":
         payload = await readerSessionControl(state, args);
@@ -1101,7 +1131,9 @@ function exactUiAnswerResult(body) {
 
 async function readReaderUiRequests(state, args, requestId) {
   const sessionId = validateSessionId(args.sessionId);
-  if (["cursor", "bootId", "maxBytes", "maxEvents"].some((key) => args[key] !== undefined)) {
+  const eventDefaults = { cursor: 0, maxBytes: DEFAULT_LIVE_EVENT_BYTES, maxEvents: DEFAULT_LIVE_EVENT_LIMIT };
+  if (Object.entries(eventDefaults).some(([key, defaultValue]) => args[key] !== undefined && args[key] !== defaultValue)
+    || args.bootId !== undefined) {
     throw new ToolInputError("UI request modes do not accept event cursors or truncation limits");
   }
   const waiting = args.mode === "wait_ui_requests";
@@ -1770,6 +1802,81 @@ async function getReaderApiSessionMetadata(baseUrl, args) {
   };
 }
 
+async function readerGetStreamDiagnostics(state, args) {
+  if (!state.readerUrl) throw new ToolInputError("reader_get_stream_diagnostics requires PI_WEB_READER_URL");
+  const deviceId = validateRequiredIdentity(args.deviceId, "deviceId");
+  const target = await locateControlDevice(state, deviceId);
+  if (!target.ok) return target.value;
+  const route = readerStreamDiagnosticsRoute(state.readerUrl, target.localDeviceId === deviceId, deviceId);
+  let body;
+  try {
+    body = await fetchWithBoundedJson(route.url, MAX_REMOTE_BODY_BYTES, REMOTE_TIMEOUT_MS);
+  } catch (error) {
+    return {
+      source: "reader-stream-diagnostics",
+      outcome: "unknown",
+      code: "reader_stream_diagnostics_unavailable",
+      error: publicRemoteError(error),
+      target: { deviceId, device: target.device },
+      coverage: target.coverage,
+      readOnlyTransport: true,
+      sideEffect: "reader-get-only",
+    };
+  }
+  if (body?.schemaVersion !== 1 || body?.coverage?.readOnly !== true || !Array.isArray(body.streams) || !isRecord(body.counts)) {
+    return {
+      source: "reader-stream-diagnostics",
+      outcome: "unknown",
+      code: "reader_contract_mismatch",
+      target: { deviceId, device: target.device },
+      coverage: target.coverage,
+      readOnlyTransport: true,
+      sideEffect: "reader-get-only",
+    };
+  }
+  if (body.deviceId !== deviceId) {
+    return {
+      source: "reader-stream-diagnostics",
+      outcome: "unknown",
+      code: "reader_device_mismatch",
+      target: { deviceId, device: target.device },
+      readerDeviceId: typeof body.deviceId === "string" ? sanitizeText(body.deviceId) : null,
+      coverage: target.coverage,
+      readOnlyTransport: true,
+      sideEffect: "reader-get-only",
+    };
+  }
+  const streams = body.streams.flatMap((stream) => {
+    if (!isRecord(stream) || typeof stream.kind !== "string") return [];
+    return [{
+      kind: sanitizeText(stream.kind),
+      sessionId: typeof stream.sessionId === "string" ? sanitizeText(stream.sessionId) : null,
+      holder: stream.holder === "foreground" || stream.holder === "background" ? stream.holder : null,
+      openedAt: safeFiniteNumber(stream.openedAt),
+      connectedAt: safeFiniteNumber(stream.connectedAt),
+      lastWriteAt: safeFiniteNumber(stream.lastWriteAt),
+      droppedEvents: safeNonNegativeInteger(stream.droppedEvents),
+      queuedBytes: safeNonNegativeInteger(stream.queuedBytes),
+    }];
+  });
+  return {
+    source: "reader-stream-diagnostics",
+    outcome: "observed",
+    target: { deviceId, device: target.device },
+    readerDeviceId: body.deviceId,
+    capturedAt: typeof body.capturedAt === "string" ? body.capturedAt : null,
+    counts: Object.fromEntries(Object.entries(body.counts).flatMap(([kind, count]) => {
+      const value = safeNonNegativeInteger(count);
+      return value === null ? [] : [[sanitizeText(kind), value]];
+    })),
+    streams,
+    coverage: target.coverage,
+    readerCoverage: projectReaderStreamCoverage(body.coverage),
+    readOnlyTransport: true,
+    sideEffect: "reader-get-only",
+  };
+}
+
 async function collectReaderApiRows(baseUrl, args, signal) {
   signal?.throwIfAborted();
   const scope = validateScope(args.scope || "both", true);
@@ -2238,6 +2345,49 @@ function safeNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function safeFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function safeNonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+const READER_STREAM_DIAGNOSTIC_KINDS = new Set([
+  "agent", "reader-events", "activity", "terminal", "file-watch", "ui-requests", "quick-ask", "provider-login",
+]);
+const READER_STREAM_DIAGNOSTIC_FIELDS = new Set([
+  "kind", "sessionId", "holder", "openedAt", "connectedAt", "lastWriteAt", "droppedEvents", "queuedBytes",
+]);
+
+function projectReaderStreamCoverage(value) {
+  if (!isRecord(value)) return null;
+  const streamKinds = isRecord(value.streamKinds) ? value.streamKinds : {};
+  const projectKinds = (candidate) => Array.isArray(candidate)
+    ? candidate.filter((kind) => READER_STREAM_DIAGNOSTIC_KINDS.has(kind)).slice(0, READER_STREAM_DIAGNOSTIC_KINDS.size)
+    : [];
+  const projectFields = (candidate) => Array.isArray(candidate)
+    ? candidate.filter((field) => READER_STREAM_DIAGNOSTIC_FIELDS.has(field)).slice(0, READER_STREAM_DIAGNOSTIC_FIELDS.size)
+    : [];
+  const sampling = isRecord(value.sampling) ? value.sampling : {};
+  return {
+    complete: value.complete === true,
+    scope: typeof value.scope === "string" ? sanitizeText(value.scope) : null,
+    streamCount: safeNonNegativeInteger(value.streamCount),
+    readOnly: value.readOnly === true,
+    streamKinds: {
+      included: projectKinds(streamKinds.included),
+      excluded: projectKinds(streamKinds.excluded),
+    },
+    includes: projectFields(value.includes),
+    excludes: projectFields(value.excludes),
+    sampling: {
+      queuedBytes: typeof sampling.queuedBytes === "string" ? sanitizeText(sampling.queuedBytes) : null,
+      timestamps: typeof sampling.timestamps === "string" ? sanitizeText(sampling.timestamps) : null,
+    },
+  };
+}
+
 function safeEnum(value, allowed) {
   return typeof value === "string" && allowed.includes(value) ? value : undefined;
 }
@@ -2253,16 +2403,17 @@ function readerRuntimeStatusSemantics() {
   };
 }
 
-const CONTROL_ACTIONS = new Set(["inspect", "get_tools", "set_model", "set_tools", "prompt", "continue", "steer", "follow_up", "abort", "stop", "clear_queue", "create_session", "answer_question"]);
+const CONTROL_ACTIONS = new Set(["inspect", "get_tools", "set_model", "set_tools", "prompt", "continue", "steer", "follow_up", "abort", "stop", "clear_queue", "create_session", "open_session", "answer_question", "rename_session", "archive_session", "unarchive_session", "delete_session"]);
+const SESSION_MUTATION_ACTIONS = { rename_session: "rename", archive_session: "archive", unarchive_session: "unarchive", delete_session: "delete" };
 
 function validateCreateToolNames(value) {
   if (
     !Array.isArray(value)
-    || value.length > SAFE_CREATE_TOOL_NAMES.length
-    || value.some((name) => typeof name !== "string" || !SAFE_CREATE_TOOL_NAME_SET.has(name))
+    || value.length > BUILTIN_TOOL_NAMES.length
+    || value.some((name) => typeof name !== "string" || !BUILTIN_TOOL_NAME_SET.has(name))
     || new Set(value).size !== value.length
   ) {
-    throw new ToolInputError(`create_session toolNames must be [] or a unique subset of: ${SAFE_CREATE_TOOL_NAMES.join(", ")}`);
+    throw new ToolInputError(`create_session toolNames must be [] or a unique subset of Reader's built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}`);
   }
   return [...value];
 }
@@ -2282,13 +2433,15 @@ async function readerSessionControl(state, args) {
   const requestedStrictToolAllowlist = args.strictToolAllowlist === undefined
     ? undefined
     : validateBoolean(args.strictToolAllowlist, "strictToolAllowlist");
-  if (requestedStrictToolAllowlist === true && action !== "create_session") {
-    throw new ToolInputError("strictToolAllowlist=true is supported only for create_session");
+  if (requestedStrictToolAllowlist !== undefined && action !== "create_session") {
+    throw new ToolInputError("strictToolAllowlist is supported only for create_session");
   }
   const toolNames = action === "create_session" && args.toolNames !== undefined
     ? validateCreateToolNames(args.toolNames)
     : action === "set_tools" ? args.toolNames : undefined;
   if (action === "set_tools" && (!Array.isArray(toolNames) || new Set(toolNames).size !== toolNames.length)) throw new ToolInputError("set_tools requires an explicit unique toolNames array");
+  // Supplying toolNames opts into a strict per-session allow-list unless the
+  // caller explicitly asks for Reader's normal runtime with a narrowed selection.
   const strictToolAllowlist = action === "create_session"
     ? requestedStrictToolAllowlist === undefined
       ? toolNames !== undefined
@@ -2297,14 +2450,26 @@ async function readerSessionControl(state, args) {
   if (strictToolAllowlist && toolNames === undefined) {
     throw new ToolInputError("strictToolAllowlist requires toolNames");
   }
-  if (action === "create_session" && toolNames !== undefined && !strictToolAllowlist) {
-    throw new ToolInputError("create_session toolNames requires strictToolAllowlist=true");
+  const creationModel = action === "create_session" ? validateCreationModel(args) : undefined;
+  if (action === "create_session" && args.sessionId !== undefined) throw new ToolInputError("create_session does not accept sessionId; Reader assigns the new session id");
+  if (args.name !== undefined && action !== "rename_session") throw new ToolInputError("name is supported only for rename_session");
+  if (action === "rename_session" && typeof args.name !== "string") throw new ToolInputError("rename_session requires a name string");
+  if (args.force !== undefined) {
+    validateBoolean(args.force, "force");
+    if (!["archive_session", "unarchive_session", "delete_session"].includes(action)) throw new ToolInputError("force is supported only for archive_session, unarchive_session or delete_session");
   }
+  const sessionMutation = SESSION_MUTATION_ACTIONS[action];
   if (action !== "create_session" && !sessionId) throw new ToolInputError(`${action} requires an exact sessionId`);
   if (action === "create_session" && (typeof args.cwd !== "string" || !args.cwd.trim())) {
     throw new ToolInputError("create_session requires cwd");
   }
-  if (["prompt", "continue", "steer", "follow_up"].includes(action) && (typeof args.message !== "string" || !args.message.trim())) {
+  const messageActions = ["prompt", "continue", "steer", "follow_up"];
+  if (args.message !== undefined && !messageActions.includes(action)) {
+    throw new ToolInputError(action === "create_session"
+      ? "create_session does not accept message; create the session first, then use prompt"
+      : "message is supported only for prompt, continue, steer, or follow_up");
+  }
+  if (messageActions.includes(action) && (typeof args.message !== "string" || !args.message.trim())) {
     throw new ToolInputError(`${action} requires a non-empty message`);
   }
   if (action === "answer_question" && (typeof args.questionId !== "string" || !args.questionId.trim())) {
@@ -2380,13 +2545,15 @@ async function readerSessionControl(state, args) {
     cwd: typeof args.cwd === "string" ? args.cwd.trim() : null,
     toolNames: toolNames ?? null,
     strictToolAllowlist,
+    ...(creationModel ? { creationModel } : {}),
+    ...(sessionMutation ? { name: args.name ?? null, force: args.force === true } : {}),
     expectedRevision: expectedRevision ?? null,
     expectedBootId: expectedBootId ?? null,
     ...(expectedQueueRevision === undefined ? {} : { expectedQueueRevision }),
     confirmationReason: confirmationReason ?? null,
   });
 
-  const target = await locateControlDevice(state, deviceId, sessionId);
+  const target = await locateControlDevice(state, deviceId, sessionId, action === "unarchive_session" ? "archived" : action === "rename_session" || action === "delete_session" ? "both" : "active");
   if (!target.ok) return target.value;
   const route = controlRoute(state.readerUrl, target.localDeviceId === deviceId, deviceId, sessionId);
 
@@ -2447,7 +2614,11 @@ async function readerSessionControl(state, args) {
       requestFingerprint,
       wouldCall: route.description,
       payloadSummary: action === "create_session"
-        ? { type: "ensure_session", cwdProvided: true, toolsDisabled: toolNames !== undefined, strictToolAllowlist }
+        ? { type: "ensure_session", cwdProvided: true, toolNames: toolNames ?? "reader-default-selection", strictToolAllowlist, ...(creationModel ? { model: `${creationModel.provider}/${creationModel.modelId}` } : {}), ...(creationModel?.thinkingLevel ? { thinkingLevel: creationModel.thinkingLevel } : {}) }
+        : sessionMutation
+        ? { type: "session_mutation", op: sessionMutation, force: args.force === true }
+        : action === "open_session"
+        ? { type: "initialize_runtime", startsPersistedRuntime: true }
         : action === "answer_question"
         ? { type: action, questionId: args.questionId, runtimeGeneration: args.runtimeGeneration, pendingRequestValidation: "Reader validates the current resolver when the real command is submitted" }
         : { type: action === "continue" ? "prompt" : action === "stop" ? "abort" : action, messageProvided: typeof args.message === "string" && args.message.trim().length > 0 },
@@ -2486,16 +2657,24 @@ async function readerSessionControl(state, args) {
     return { ...existingReceipt, replayed: true };
   }
 
+  if (sessionMutation) {
+    return executeSessionMutationControl(state, { action, op: sessionMutation, deviceId, sessionId, name: args.name, force: args.force === true, idempotencyKey, requestFingerprint, receiptKey, target });
+  }
+
   if (action !== "create_session") {
     const runtime = await fetchControlState(route);
     if (!runtime.ok) return controlUnavailable(action, deviceId, sessionId, runtime);
-    if (runtime.body.running !== true) {
+    // A persisted session whose runtime is not running is started by Reader
+    // when a message (or open_session) arrives, exactly as when a person opens
+    // it in the UI. The other actions act on a running runtime, so without one
+    // there is nothing for them to act on.
+    if (runtime.body.running !== true && !RUNTIME_START_CONTROL_ACTIONS.has(action)) {
       return {
         source: "reader-runtime-api",
         action,
         target: { device: target.device, sessionId },
         outcome: "blocked",
-        reason: "target is not alive in the selected Reader process; no POST was sent and a persisted session was not auto-started",
+        reason: `target has no running runtime in the selected Reader process, so there is nothing for ${action} to act on; no POST was sent. prompt, continue, steer, follow_up and open_session start the runtime like opening the session in the UI.`,
         sideEffect: "none",
         requestFingerprint,
         runtime: sanitizePublicValue(runtime.body),
@@ -2505,7 +2684,9 @@ async function readerSessionControl(state, args) {
   }
 
   const payload = action === "create_session"
-    ? { cwd: args.cwd.trim(), type: "ensure_session", ...(toolNames !== undefined ? { toolNames, strictToolAllowlist: true } : {}), ...controlContractFields({ idempotencyKey, requestFingerprint, expectedRevision, expectedBootId, expectedQueueRevision, confirmationReason, confirm }) }
+    ? { cwd: args.cwd.trim(), type: "ensure_session", ...(toolNames !== undefined ? { toolNames, strictToolAllowlist } : {}), ...(creationModel ?? {}), ...controlContractFields({ idempotencyKey, requestFingerprint, expectedRevision, expectedBootId, expectedQueueRevision, confirmationReason, confirm }) }
+    : action === "open_session"
+    ? { type: "initialize_runtime", ...controlContractFields({ idempotencyKey, requestFingerprint, expectedRevision, expectedBootId, expectedQueueRevision, confirmationReason, confirm }) }
     : action === "answer_question"
     ? { type: "answer_question", questionId: args.questionId, runtimeGeneration: args.runtimeGeneration, ...(typeof args.answer === "string" ? { answer: args.answer } : {}), ...(typeof args.confirmed === "boolean" ? { confirmed: args.confirmed } : {}), ...(typeof args.cancelled === "boolean" ? { cancelled: args.cancelled } : {}), ...controlContractFields({ idempotencyKey, requestFingerprint, expectedRevision, expectedBootId, expectedQueueRevision, confirmationReason, confirm }) }
     : { type: action === "continue" ? "prompt" : action === "stop" ? "abort" : action,
@@ -2599,6 +2780,70 @@ async function readerSessionControl(state, args) {
     );
   }
   return finalReceipt;
+}
+
+function validateCreationModel(args) {
+  if ((args.provider === undefined) !== (args.modelId === undefined)) throw new ToolInputError("create_session provider and modelId must be provided together");
+  if (args.provider === undefined && args.thinkingLevel === undefined) return undefined;
+  return {
+    ...(args.provider === undefined ? {} : { provider: args.provider, modelId: args.modelId }),
+    ...(args.thinkingLevel === undefined ? {} : { thinkingLevel: args.thinkingLevel }),
+  };
+}
+
+// rename/archive/unarchive/delete use Reader's durable session-mutation owner,
+// the same one the UI uses: the idempotency key is its operationId and Reader
+// keeps the receipt, so a replay after an adapter restart never repeats it.
+async function executeSessionMutationControl(state, { action, op, deviceId, sessionId, name, force, idempotencyKey, requestFingerprint, receiptKey, target }) {
+  const isLocal = target.localDeviceId === deviceId;
+  const url = new URL(`/api/${isLocal ? "" : "remote/"}session-mutations`, `${state.readerUrl}/`);
+  if (!isLocal) url.searchParams.set("peer", deviceId);
+  const command = { operationId: idempotencyKey, deviceId, sessionId, op, ...(op === "rename" ? { name } : {}), force };
+  const baseReceipt = {
+    source: "reader-session-mutations",
+    receiptId: randomUUID(),
+    idempotencyKey,
+    requestFingerprint,
+    action,
+    target: { device: target.device, sessionId },
+    submittedAt: new Date().toISOString(),
+    retryPolicy: "never-auto-retry-unknown",
+    sideEffect: "reader-command-submitted",
+    coverage: target.coverage,
+  };
+  let result;
+  try {
+    result = await postControlCommand({ url }, command);
+  } catch (error) {
+    const receipt = { ...baseReceipt, outcome: "unknown", transportAccepted: false, sideEffect: "unknown", error: publicRemoteError(error),
+      note: "The transport outcome is unknown; query Reader with the same idempotencyKey (the operationId) before any further attempt." };
+    state.controlReceipts.set(receiptKey, receipt);
+    return receipt;
+  }
+  // The mutation owner answers with its own receipt, not the control-command
+  // accepted/success envelope, so a 2xx response is the transport fact.
+  const httpOk = result.status >= 200 && result.status < 300;
+  const readerStatus = safeEnum(result.body?.status, ["not_found", "accepted", "running", "completed", "failed", "unknown", "conflict"]);
+  const outcome = !httpOk ? "rejected"
+    : readerStatus === "completed" ? "completed"
+    : readerStatus === "failed" ? "rejected"
+    : readerStatus === "conflict" ? "conflict"
+    : readerStatus === "accepted" || readerStatus === "running" ? "accepted"
+    : "unknown";
+  const receipt = {
+    ...baseReceipt,
+    outcome,
+    transportAccepted: httpOk,
+    httpStatus: result.status,
+    ...(readerStatus ? { readerOutcome: readerStatus } : {}),
+    ...(Number.isInteger(result.body?.httpStatus) ? { readerHttpStatus: result.body.httpStatus } : {}),
+    ...(typeof result.body?.error === "string" ? { error: sanitizeText(result.body.error) } : {}),
+    note: outcome === "completed"
+      ? "Reader's durable session-mutation receipt reports the operation completed."
+      : "Reader did not report a completed session mutation; inspect the same operationId before any further attempt.",
+  };
+  state.controlReceipts.set(receiptKey, receipt);
+  return receipt;
 }
 
 async function readerReadControlPlane(state, args) {
@@ -3086,9 +3331,9 @@ function validateWriteControlPlaneOperationFields(area, operation, args) {
   if (area === "compaction") requireFields("enabled");
 }
 
-async function locateControlDevice(state, deviceId, sessionId) {
+async function locateControlDevice(state, deviceId, sessionId, storageScope = "active") {
   const baseUrl = state.readerUrl;
-  const collected = await collectReaderApiRows(baseUrl, { scope: "active", visibility: "all", limit: MAX_LIST_LIMIT, offset: 0 });
+  const collected = await collectReaderApiRows(baseUrl, { scope: storageScope, visibility: "all", limit: MAX_LIST_LIMIT, offset: 0 });
   const device = collected.devices.find((candidate) => candidate.id === deviceId);
   if (!device) {
     return {
@@ -3148,7 +3393,7 @@ async function locateControlDevice(state, deviceId, sessionId) {
           source: "reader-runtime-api",
           outcome: collected.coverage.complete ? "blocked" : "unknown",
           reason: collected.coverage.complete
-            ? "sessionId is not present on the selected device's active Reader snapshot; no control request was sent"
+            ? `sessionId is not present on the selected device's ${storageScope === "both" ? "Reader" : storageScope} snapshot; no control request was sent`
             : "sessionId-to-device ownership could not be verified because Reader coverage is incomplete",
           target: { device, sessionId },
           coverage: collected.coverage,
@@ -3163,57 +3408,21 @@ function controlBindingKey(deviceId, sessionId) {
   return `${deviceId}\u0000${sessionId}`;
 }
 
+// A create receipt binds one session id to one device and cwd. This checks only
+// that identity: Reader must be reachable, and a live runtime must still be in
+// the receipt's cwd. Tool selection is not part of the identity, and a runtime
+// Reader has recycled is still the same session (Reader restarts it from the
+// persisted session when a message arrives, as when the UI opens it).
 async function verifyCreatedSessionBinding(route, binding, signal) {
   const runtime = await fetchControlState(route, signal);
   signal?.throwIfAborted();
   if (!runtime.ok) {
     return { ok: false, reason: "created session runtime could not be inspected; no control request was sent" };
   }
-  if (runtime.body.running !== true) {
-    return { ok: false, reason: "created session is not alive in the selected Reader process; no control request was sent" };
-  }
-  if (runtime.body?.state?.runtimeInspection?.cwd !== binding.cwd) {
+  if (runtime.body.running === true && runtime.body?.state?.runtimeInspection?.cwd !== binding.cwd) {
     return { ok: false, reason: "created session cwd does not match the create receipt; no control request was sent" };
   }
-  if (!Array.isArray(binding.toolNames)) {
-    return { ok: false, reason: "created session has no explicit safe tool allow-list; no control request was sent" };
-  }
-  if (binding.toolNames.length === 0 && !isChatOnlyRuntime(runtime.body)) {
-    return { ok: false, reason: "created session runtime is not the same chat-only runtime; no control request was sent" };
-  }
-  if (binding.toolNames.length > 0 && !isRestrictedToolRuntime(runtime.body, binding.toolNames)) {
-    return { ok: false, reason: "created session runtime does not match the safe read-only tool allow-list; no control request was sent" };
-  }
-  if (binding.strictToolAllowlist === true && runtime.body?.state?.strictToolAllowlist !== true) {
-    return { ok: false, reason: "created session runtime did not confirm strict tool allow-list mode; no control request was sent" };
-  }
   return { ok: true, runtime: runtime.body };
-}
-
-function isChatOnlyRuntime(body) {
-  const inspection = body?.state?.runtimeInspection;
-  const tools = inspection?.tools;
-  return body?.running === true
-    && inspection?.systemPrompt?.characters === 0
-    && Array.isArray(tools)
-    && tools.every((tool) => isRecord(tool) && tool.active !== true);
-}
-
-function isRestrictedToolRuntime(body, expectedToolNames) {
-  const inspection = body?.state?.runtimeInspection;
-  const tools = inspection?.tools;
-  if (!Array.isArray(tools)) return false;
-  const activeToolNames = tools
-    .filter((tool) => tool && tool.active === true && typeof tool.name === "string")
-    .map((tool) => tool.name);
-  if (activeToolNames.some((name) => !SAFE_CREATE_TOOL_NAME_SET.has(name))) return false;
-  return sameStringSet(activeToolNames, expectedToolNames);
-}
-
-function sameStringSet(left, right) {
-  const a = [...new Set(left)].sort();
-  const b = [...new Set(right)].sort();
-  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 function controlRoute(baseUrl, isLocal, deviceId, sessionId) {
@@ -3246,6 +3455,12 @@ function readerToolResultRoute(baseUrl, isLocal, deviceId, sessionId, entryId) {
 
 function readerLiveEventsRoute(baseUrl, isLocal, deviceId, sessionId) {
   const route = new URL(`/api/${isLocal ? "" : "remote/"}agent/${encodeURIComponent(sessionId)}/live`, `${baseUrl}/`);
+  if (!isLocal) route.searchParams.set("peer", deviceId);
+  return { url: route };
+}
+
+function readerStreamDiagnosticsRoute(baseUrl, isLocal, deviceId) {
+  const route = new URL(`/api/${isLocal ? "" : "remote/"}reader/stream-diagnostics`, `${baseUrl}/`);
   if (!isLocal) route.searchParams.set("peer", deviceId);
   return { url: route };
 }
@@ -3484,7 +3699,7 @@ function validateSchemaValue(value, schema, label) {
           validateSchemaValue(value[index], schema.items, `${label}[${index}]`);
         } catch (error) {
           if (label.endsWith(".toolNames") && error instanceof ToolInputError) {
-            throw new ToolInputError(`create_session toolNames must be [] or a unique subset of: ${SAFE_CREATE_TOOL_NAMES.join(", ")}`);
+            throw new ToolInputError(`create_session toolNames must be [] or a unique subset of Reader's built-in tools: ${BUILTIN_TOOL_NAMES.join(", ")}`);
           }
           throw error;
         }

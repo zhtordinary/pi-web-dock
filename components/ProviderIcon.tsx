@@ -1,6 +1,8 @@
 const PROVIDER_ICONS: Record<string, { symbol: string; color: boolean }> = {
   anthropic: { symbol: "anthropic", color: false },
   openai: { symbol: "openai", color: false },
+  "openai-subscription": { symbol: "openai", color: false },
+  "openai-api": { symbol: "openai", color: false },
   "openai-codex": { symbol: "openai", color: false },
   google: { symbol: "google", color: true },
   "google-vertex": { symbol: "google", color: true },

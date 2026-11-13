@@ -423,6 +423,21 @@ test("keeps linked images as routed bare images without nested preview controls"
   assert.doesNotMatch(html, /<button[^>]*>[\s\S]*<\/a>/);
 });
 
+test("custom extension text preserves terminal lines and indentation without changing HTML safety", () => {
+  const layout = (text) => renderMarkdown(text, { keepTextLayout: true });
+  assert.match(layout("╔═══╗\n  ║  42%  ║\n╚═══╝"), /<p>╔═══╗<br\/> {2}║ {2}42% {2}║<br\/>╚═══╝<\/p>/);
+  assert.match(layout("  alpha\n      beta\ngamma"), /<p> {2}alpha<br\/> {6}beta<br\/>gamma<\/p>/);
+  assert.match(layout("see https://example.test\n  **strong**\n    end"), /<\/a><br\/> {2}<strong>strong<\/strong><br\/> {4}end/);
+  assert.match(layout("`one\ntwo`\n    three\n  four"), />one two<\/code><br\/> {4}three<br\/> {2}four/);
+  assert.match(layout("a\r\n  b\r\n    c"), /<p>a<br\/> {2}b<br\/> {4}c<\/p>/);
+  assert.match(layout("- alpha\n  beta\n- gamma"), /<li>alpha<br\/>beta<\/li>/);
+  assert.match(layout("<b>safe</b>\nnext"), /<b>safe<\/b><br\/>next/);
+  assert.doesNotMatch(layout('<img src="x" onerror="alert(1)">'), /onerror/i);
+  assert.match(renderMarkdown("one\n  two", { keepLineBreaks: true }), /<p>one<br\/>two<\/p>/);
+  assert.match(renderMarkdown("one\n  two"), /<p>one\ntwo<\/p>/);
+  assert.match(globalsCss, /\.markdown-custom-message\.is-terminal-layout p \{ white-space: pre-wrap; \}/);
+});
+
 test("keeps user line endings only when keepLineBreaks is requested", () => {
   assert.doesNotMatch(renderMarkdown("one\ntwo"), /<br/);
   for (const markdown of ["one\ntwo", "one\r\ntwo", "one\rtwo", "one  \t\n  two"]) {

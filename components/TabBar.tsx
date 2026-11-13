@@ -18,6 +18,7 @@ export interface Tab {
   sourceSessionId?: string | null;
   initialDisplayMode?: FileViewerDisplayMode;
   page?: number;
+  anchor?: string;
   viewerState?: FileViewerState;
   viewerRevision?: number;
   dirty?: boolean;
@@ -28,12 +29,15 @@ interface Props {
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onReorderTab?: (source: string, target: string, after: boolean) => void;
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onReorderTab }: Props) {
   const { t } = useI18n();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; after: boolean } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const draggedId = useRef<string | null>(null);
 
   useEffect(() => {
     const list = listRef.current;
@@ -78,7 +82,56 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
         return (
           <div
             key={tab.id}
+            role="tab"
+            aria-selected={isActive}
+            tabIndex={isActive ? 0 : -1}
             data-active={isActive ? "true" : undefined}
+            draggable={Boolean(onReorderTab && !tab.closing)}
+            onDragStart={(event) => {
+              if (!onReorderTab || tab.closing) return;
+              draggedId.current = tab.id;
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", tab.id);
+            }}
+            onDragOver={(event) => {
+              if (!draggedId.current || draggedId.current === tab.id || tab.closing) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              const rect = event.currentTarget.getBoundingClientRect();
+              const after = event.clientX >= rect.left + rect.width / 2;
+              setDropTarget((prev) => prev?.id === tab.id && prev.after === after ? prev : { id: tab.id, after });
+            }}
+            onDrop={(event) => {
+              if (!draggedId.current || draggedId.current === tab.id || tab.closing) return;
+              event.preventDefault();
+              event.stopPropagation();
+              const rect = event.currentTarget.getBoundingClientRect();
+              onReorderTab?.(draggedId.current, tab.id, event.clientX >= rect.left + rect.width / 2);
+              draggedId.current = null;
+              setDropTarget(null);
+            }}
+            onDragLeave={(event) => {
+              if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+              setDropTarget((prev) => prev?.id === tab.id ? null : prev);
+            }}
+            onDragEnd={() => {
+              draggedId.current = null;
+              setDropTarget(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelectTab(tab.id);
+                return;
+              }
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const index = tabs.findIndex((item) => item.id === tab.id);
+              const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1
+                : Math.max(0, Math.min(tabs.length - 1, index + (event.key === "ArrowRight" ? 1 : -1)));
+              onSelectTab(tabs[next].id);
+              (event.currentTarget.parentElement?.children[next] as HTMLElement | undefined)?.focus();
+            }}
             onClick={() => onSelectTab(tab.id)}
             onMouseDown={(e) => {
               if (e.button === 1) e.preventDefault();
@@ -106,6 +159,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
               flexShrink: 0,
               userSelect: "none",
               transition: "background 0.1s, color 0.1s",
+              boxShadow: dropTarget?.id === tab.id ? `inset ${dropTarget.after ? "-2px" : "2px"} 0 var(--accent)` : undefined,
             }}
           >
             <span style={{ flexShrink: 0, opacity: isActive ? 1 : 0.7, display: "flex", alignItems: "center" }}>
@@ -136,6 +190,9 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
               </span>
             )}
             <button
+              type="button"
+              draggable={false}
+              onDragStart={(event) => event.stopPropagation()}
               onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
               onMouseEnter={() => setHoveredClose(tab.id)}
               onMouseLeave={() => setHoveredClose(null)}
