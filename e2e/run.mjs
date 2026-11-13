@@ -380,7 +380,8 @@ try {
     } else {
       assert.equal(thinkingCount, 0);
     }
-    const processText = await processDetails.locator("..").innerText();
+    // Process blocks may be split between the folded group and the final-answer view; check their transcript order together.
+    const processText = await page.locator("body").innerText();
     assert.ok(processText.indexOf("E2E intermediate reasoning") < processText.indexOf("echo E2E tool output"));
     assert.ok(processText.indexOf("echo E2E tool output") < processText.indexOf("E2E follow-up reasoning"));
     assert.ok(processText.indexOf("E2E follow-up reasoning") < processText.indexOf("E2E process note"));
