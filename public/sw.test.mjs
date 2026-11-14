@@ -9,6 +9,7 @@ globalThis.self = {
   },
   addEventListener: (type, listener) => listeners.set(type, listener),
   clients: null,
+  skipWaiting: async () => {},
 };
 
 await import("./sw.js");
@@ -25,6 +26,65 @@ function dispatchNotificationClick(data) {
   });
   return { pending, wasClosed: () => closed };
 }
+
+function dispatchInstall() {
+  let pending;
+  listeners.get("install")({
+    waitUntil: (promise) => { pending = promise; },
+  });
+  return { pending };
+}
+
+test("install pre-caches the complete public app shell", async () => {
+  let openedCache;
+  let cachedUrls;
+  let skipped = false;
+  self.skipWaiting = async () => { skipped = true; };
+  globalThis.caches = {
+    open: async (name) => {
+      openedCache = name;
+      return {
+        addAll: async (urls) => { cachedUrls = [...urls]; },
+      };
+    },
+  };
+
+  const event = dispatchInstall();
+  await event.pending;
+
+  assert.equal(openedCache, "pi-web-static-test");
+  assert.deepEqual(cachedUrls, [
+    "/offline.html",
+    "/manifest.webmanifest",
+    "/icons/icon-192.png",
+    "/icons/icon-512.png",
+    "/icons/apple-touch-icon.png",
+  ]);
+  assert.equal(skipped, true);
+});
+
+test("install fails when a public app-shell resource is missing", async () => {
+  let skipped = false;
+  self.skipWaiting = async () => { skipped = true; };
+  globalThis.caches = {
+    open: async () => ({
+      addAll: async (urls) => {
+        assert.deepEqual(urls, [
+          "/offline.html",
+          "/manifest.webmanifest",
+          "/icons/icon-192.png",
+          "/icons/icon-512.png",
+          "/icons/apple-touch-icon.png",
+        ]);
+        throw new Error("synthetic missing precache resource");
+      },
+    }),
+  };
+
+  const event = dispatchInstall();
+  await assert.rejects(event.pending, /synthetic missing precache resource/);
+  assert.equal(skipped, false);
+});
 
 function dispatchPush(payload, clients, getNotifications = async () => []) {
   let pending;

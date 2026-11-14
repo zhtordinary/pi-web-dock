@@ -45,6 +45,15 @@ test("every PR workflow uses hosted runners without persistent credentials or sh
   assert.ok(files.length > 0, "no workflows found");
   const checked = files.filter((file) => checkPullRequestWorkflow(load(readFileSync(join(workflows, file), "utf8"))));
   assert.ok(checked.length > 0, "no PR workflow found");
+  const ci = load(readFileSync(join(workflows, "ci.yml"), "utf8"));
+  const windowsPackage = ci.jobs?.["package-windows"];
+  assert.ok(windowsPackage, "Windows package job must exist");
+  assert.equal(windowsPackage["continue-on-error"], undefined, "Windows packaging failures must fail CI");
+  assert.ok(windowsPackage.steps.some((step) => step.run === "npm test"), "Windows package job must run npm test");
+  const smoke = readFileSync(join(workflows, "../scripts/package-smoke.sh"), "utf8");
+  for (const output of ["package tarball sha256:", "package tarball npm integrity:", "package tarball file count:"]) {
+    assert.match(smoke, new RegExp(output), `package smoke must print ${output}`);
+  }
 });
 
 test("the guard rejects privileged triggers, persistent credentials and shared caches", () => {

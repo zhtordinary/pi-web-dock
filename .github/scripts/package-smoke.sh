@@ -6,9 +6,30 @@ set -euo pipefail
 work="${RUNNER_TEMP:-$(mktemp -d)}/pi-web-dock-package"
 rm -rf "$work"
 mkdir -p "$work/pack" "$work/app" "$work/home"
-npm pack --pack-destination "$work/pack" >/dev/null
+pack_json="$work/pack.json"
+npm pack --json --pack-destination "$work/pack" > "$pack_json"
 # npm names a scoped package tarball <scope>-<name>-<version>.tgz.
-tarball="$(ls "$work"/pack/zhtordinary-pi-web-dock-*.tgz)"
+tarball="$(node - "$pack_json" <<'NODE'
+const { readFileSync } = require("node:fs");
+const [packJson] = process.argv.slice(2);
+const [pack] = JSON.parse(readFileSync(packJson, "utf8"));
+if (!pack?.filename || !pack.integrity || !Array.isArray(pack.files)) throw new Error("npm pack metadata is incomplete");
+process.stdout.write(pack.filename);
+NODE
+)"
+tarball="$work/pack/$tarball"
+node - "$pack_json" "$tarball" <<'NODE'
+const { createHash } = require("node:crypto");
+const { readFileSync, statSync } = require("node:fs");
+const [packJson, tarball] = process.argv.slice(2);
+const [pack] = JSON.parse(readFileSync(packJson, "utf8"));
+const bytes = readFileSync(tarball);
+console.log(`package tarball: ${tarball}`);
+console.log(`package tarball bytes: ${statSync(tarball).size}`);
+console.log(`package tarball sha256: ${createHash("sha256").update(bytes).digest("hex")}`);
+console.log(`package tarball npm integrity: ${pack.integrity}`);
+console.log(`package tarball file count: ${pack.files.length}`);
+NODE
 
 cd "$work/app"
 npm init -y >/dev/null
