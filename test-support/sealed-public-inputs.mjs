@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { copyFile, mkdir, mkdtemp, readFile, realpath, symlink, utimes, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { currentPiPackage } from "./current-pi-package.mjs";
-const fixtureRoot = resolve(new URL("../test-fixtures/shared-pricing/", import.meta.url).pathname);
+const fixtureRoot = fileURLToPath(new URL("../test-fixtures/shared-pricing/", import.meta.url));
 const ENV_KEYS = ["HOME", "XDG_CACHE_HOME", "PI_CONVERSATION_COST_SCRIPT", "PI_GENAI_PRICES_CLI", "PI_GENAI_PRICES_NODE", "PI_CODING_AGENT_DIR"];
 
 async function sha256(filePath) { return createHash("sha256").update(await readFile(filePath)).digest("hex"); }

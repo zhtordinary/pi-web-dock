@@ -3,7 +3,7 @@ import { appendFileSync, closeSync, constants, existsSync, fstatSync, fsyncSync,
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { acquireStateWriteLock, assertNoLegacyStateWriterLock } from "../bin/state-write-lock.cjs";
-import { writePrivateFileAtomicSync } from "./atomic-file";
+import { directoryOpenMode, writePrivateFileAtomicSync } from "./atomic-file";
 import type { AgentEventLike } from "./agent-event-wire";
 import { LIVE_EVENT_MAX_EVENT_BYTES, type LiveAgentEventRecord } from "./live-agent-events";
 
@@ -214,7 +214,7 @@ export function appendDurableLiveEvent(input: {
       appendFileSync(fd, line, { encoding: "utf8" });
       fsyncSync(fd);
       if (!confirmedDirectorySync.has(path)) {
-        const directoryFd = openSync(dirname(path), "r");
+        const directoryFd = openSync(dirname(path), directoryOpenMode());
         try { fsyncSync(directoryFd); }
         catch (error) { if (!["EINVAL", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
         finally { closeSync(directoryFd); }

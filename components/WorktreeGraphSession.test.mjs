@@ -67,7 +67,7 @@ test("associated session rows open the exact local or remote session", () => {
 
 test("opening the graph prefers the current session worktree", () => {
   assert.match(graph, /preferredWorktreePath\(graph\?\.worktrees \?\? \[\], currentWorktreePath, currentSessionId, creationHistory\)/);
-  assert.match(graph, /sameWorktreePath\(w\.path, sessionPreferredPath\)/);
+  assert.match(graph, /filteredWorktrees\.some\(\(w\) => w\.path === sessionPreferredPath\)/);
   assert.match(graph, /currentWorktreePath && sameWorktreePath\(currentWorktreePath, wt\.path\)/);
   assert.match(appShell, /openWorktreeGraph\(topBarProjectPath, device, \{ id: topBarSession\?\.id \?\? null, cwd: topBarSession\?\.cwd \?\? null \}\)/);
   assert.match(appShell, /currentSessionId=\{worktreeGraphSessionId \?\? topBarSessionId\}/);
@@ -82,6 +82,18 @@ test("a verified creation record selects the linked worktree for its current ses
     partial: false,
     records: [{ worktreePath: "/repo/.worktrees/task", sessionId: "creator", createdAt: "2026-01-01" }],
   }), "/repo/.worktrees/task");
+});
+
+test("the current path is preferred when no creation record matches", () => {
+  const worktrees = [
+    { path: "/repo", isMain: true },
+    { path: "/repo/.worktrees/task", isMain: false },
+  ];
+  const history = { partial: false, records: [], bindings: [
+    { worktreePath: "/repo/.worktrees/task", sessionId: "current", relation: "task-root", createdAt: "2026-01-01" },
+  ] };
+  assert.equal(preferredWorktreePath(worktrees, "/repo/", "current", history), "/repo");
+  assert.equal(preferredWorktreePath(worktrees, "/repo/missing", "current", history), null);
 });
 
 test("verified worktree creators appear in the associated-session list", () => {

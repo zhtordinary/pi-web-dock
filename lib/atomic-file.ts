@@ -15,6 +15,10 @@ export class UnresolvableLinkError extends Error {
   }
 }
 
+export function directoryOpenMode(platform: NodeJS.Platform = process.platform): "r" | "r+" {
+  return platform === "win32" ? "r+" : "r";
+}
+
 /**
  * Replace a file atomically without exposing credentials through default
  * process permissions. The caller must create the parent directory first.
@@ -53,7 +57,7 @@ export function writePrivateFileAtomicSync(path: string, contents: string, final
     });
     if (finalMode !== 0o600) chmodSync(tempPath, finalMode);
     renameSync(tempPath, targetPath);
-    const directoryFd = openSync(dir, "r");
+    const directoryFd = openSync(dir, directoryOpenMode());
     try { fsyncSync(directoryFd); }
     catch (error) { if (!["EINVAL", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
     finally { closeSync(directoryFd); }

@@ -1,4 +1,5 @@
-import type { LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { getAgentDir, type LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "./types";
 
 /** Persistent authority ceiling for a session created by a Side Ask. */
@@ -12,6 +13,14 @@ export interface SideAskPeerOwnership {
 export const SIDE_ASK_PEER_OWNERSHIP = "pi-web:side-ask-peer-ownership";
 export const SIDE_ASK_CHILD = "quick_ask_child";
 export const SIDE_ASK_NATIVE_CHILD = "reader.side_ask_child";
+
+export function sideAskChildReference(sessionId: string, sessionPath: string, parentSessionPath: string) {
+  const childPath = relative(resolve(getAgentDir(), "sessions"), sessionPath);
+  if (!sessionId || !childPath || isAbsolute(childPath) || childPath === ".." || childPath.startsWith(`..${sep}`)) {
+    throw new Error("Side Ask child session is outside the native session root");
+  }
+  return { version: 1, sessionId, childPath, parentSessionPath };
+}
 
 /** Ensure delegated create_session uses the ownership-aware Reader tool. */
 export function preferSideAskSessionControl(base: LoadExtensionsResult): LoadExtensionsResult {

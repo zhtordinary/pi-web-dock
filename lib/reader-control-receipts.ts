@@ -3,7 +3,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { writePrivateFileAtomicSync } from "./atomic-file";
+import { directoryOpenMode, writePrivateFileAtomicSync } from "./atomic-file";
 import { withStateFileTransaction } from "./state-file-transaction";
 import { redactLiveValue } from "./live-agent-events";
 import { validateSessionMutationCommand } from "./session-mutation-command";
@@ -223,7 +223,11 @@ function openWriter(): DatabaseSync {
           for (const receipt of Object.values(legacy!.receipts)) writeReceipt(db, receipt);
           db.prepare("INSERT INTO metadata(key,value) VALUES ('legacy_hash', ?)").run(hash);
           db.exec("COMMIT");
-        } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
+        } catch (error) {
+          try { db.exec("ROLLBACK"); }
+          catch (rollbackError) { /* Preserve the original migration error; rollback cleanup is best effort. */ void rollbackError; }
+          throw error;
+        }
       }
       // COMMIT is durable before the pointer switches. A crash in between is
       // replayed using the hash, without overwriting newer indexed receipts.
@@ -233,14 +237,17 @@ function openWriter(): DatabaseSync {
     // that recovery obligation in SQLite, across processes, until the filename
     // is confirmed durable. An existing marker alone is not sufficient.
     if (!db.prepare("SELECT value FROM metadata WHERE key='marker_durable'").get()) {
-      const directoryFd = openSync(physicalStoreDirectory(), "r");
+      const directoryFd = openSync(physicalStoreDirectory(), directoryOpenMode());
       try { fsyncSync(directoryFd); }
       catch (error) { if (!["EINVAL", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
       finally { closeSync(directoryFd); }
       db.prepare("INSERT INTO metadata(key,value) VALUES ('marker_durable','1')").run();
     }
     return db;
-  } catch (error) { db.close(); throw error; }
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 async function withStore<T>(operation: (db: DatabaseSync) => T): Promise<T> {
@@ -251,8 +258,11 @@ async function withStore<T>(operation: (db: DatabaseSync) => T): Promise<T> {
       const result = operation(db);
       db.exec("COMMIT");
       return result;
-    } catch (error) { try { db.exec("ROLLBACK"); } catch {} throw error; }
-    finally { db.close(); }
+    } catch (error) {
+      try { db.exec("ROLLBACK"); }
+      catch (rollbackError) { /* Preserve the original transaction error; rollback cleanup is best effort. */ void rollbackError; }
+      throw error;
+    } finally { db.close(); }
   });
 }
 

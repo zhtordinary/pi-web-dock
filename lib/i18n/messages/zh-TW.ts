@@ -1148,8 +1148,6 @@ export const zhTWLocale: LocalePlugin = {
     "i18n.skillUseState.inheritHint": "繼承全域設定的使用方式",
     "i18n.skillGroupSetState": "全部設為{state}",
     "i18n.skillAdviceIsRecommendation": "建議不代表實際觸發統計，也不會自動修改設定。",
-    "worktreeGraph.filterAttention": "目前與待處理 ({count})",
-    "worktreeGraph.filterAttentionHint": "顯示主線、目前工作樹、未合併變更、未提交內容及需要核實或收尾的狀態；其他保留在「全部」中。",
     "i18n.skillGroupEnablePlugin": "啟用所属外掛",
     "i18n.skillGroupRestore": "恢复上一次批量操作前狀態",
     "i18n.skillInvocationMode": "呼叫模式",

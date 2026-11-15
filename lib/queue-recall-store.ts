@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, statfsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { writePrivateFileAtomicSync } from "./atomic-file";
+import { directoryOpenMode, writePrivateFileAtomicSync } from "./atomic-file";
 import { withStateFileTransaction } from "./state-file-transaction";
 import { readQueuedDraftState, recalledQueuedDrafts, type QueuedDraftState } from "./queued-draft";
 import { updateControlReceipt } from "./reader-control-receipts";
@@ -114,7 +114,7 @@ function write(path: string, record: RecallRecord): void {
   // Both the payload and a newly created session directory must be durable
   // before prepare returns permission to clear the SDK queue.
   for (const parent of new Set([dirname(path), storeRoot()])) {
-    const directory = openSync(parent, "r");
+    const directory = openSync(parent, directoryOpenMode());
     try { fsyncSync(directory); } finally { closeSync(directory); }
   }
 }

@@ -36,7 +36,6 @@ import {
   buildWorktreeNodePrompt,
   WORKTREE_LANE_COLORS,
   worktreeLaneColor,
-  worktreeNeedsAttention,
   type WorktreeGraph,
   type WorktreeGraphItem,
   type WorktreeInspection,
@@ -55,7 +54,7 @@ interface Props {
   onNewSessionFromNode: (worktree: WorktreeGraphItem, initialPrompt: string) => void;
 }
 
-type FilterTab = "attention" | "all" | "active" | "at_base";
+type FilterTab = "all" | "active" | "at_base";
 
 type WorktreeAssociationRelation = "cwd" | "creator" | "task-root";
 
@@ -268,7 +267,7 @@ export function WorktreeGraphOverlay({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [filterTab, setFilterTab] = useState<FilterTab>("attention");
+  const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [collapsedNodes, setCollapsedNodes] = useState<Record<string, boolean>>({});
   const [inspection, setInspection] = useState<WorktreeInspection | null>(null);
@@ -289,7 +288,7 @@ export function WorktreeGraphOverlay({
 
   useEffect(() => {
     setGraph(null);
-    setFilterTab("attention");
+    setFilterTab("all");
     setSearch("");
     setSelectedPath(null);
     setInspection(null);
@@ -548,8 +547,6 @@ export function WorktreeGraphOverlay({
     if (!graph) return [];
     const term = search.trim().toLowerCase();
     return graph.worktrees.filter((w) => {
-      const isSessionPreferred = Boolean(sessionPreferredPath && sameWorktreePath(w.path, sessionPreferredPath));
-      if (filterTab === "attention" && !isSessionPreferred && !worktreeNeedsAttention(w, currentWorktreePath)) return false;
       if (filterTab === "active" && w.status !== "active") return false;
       if (filterTab === "at_base" && w.status !== "at_base") return false;
       if (!term) return true;
@@ -567,7 +564,7 @@ export function WorktreeGraphOverlay({
         .toLowerCase();
       return haystack.includes(term);
     });
-  }, [currentWorktreePath, filterTab, graph, search, sessionPreferredPath]);
+  }, [filterTab, graph, search]);
 
   const matchedPaths = useMemo(() => {
     return new Set(filteredWorktrees.map((w) => w.path));
@@ -752,16 +749,13 @@ export function WorktreeGraphOverlay({
         <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 5, minWidth: 0, gridColumn: isMobile ? "1 / -1" : undefined, gridRow: isMobile ? 2 : undefined }}>
           {(
             [
-              ["attention", t("worktreeGraph.filterAttention", { count: graph?.worktrees.filter((worktree) => Boolean(sessionPreferredPath && sameWorktreePath(worktree.path, sessionPreferredPath)) || worktreeNeedsAttention(worktree, currentWorktreePath)).length ?? 0 })],
               ["all", t("worktreeGraph.filterAll", { count: graph?.totalWorktrees ?? 0 })],
               ["active", t("worktreeGraph.filterActive", { count: graph?.counts.active ?? 0 })],
               ["at_base", t("worktreeGraph.filterAtBase", { count: graph?.counts.atBase ?? 0 })],
             ] as const
           ).map(([key, label]) => {
             const active = filterTab === key;
-            const hint = key === "attention"
-              ? t("worktreeGraph.filterAttentionHint")
-              : key === "all"
+            const hint = key === "all"
               ? t("worktreeGraph.filterAllHint")
               : key === "active"
                 ? t("worktreeGraph.filterActiveHint")
@@ -1915,10 +1909,7 @@ export function WorktreeGraphOverlay({
 
   function renderWorktreeRow(wt: WorktreeGraphItem) {
     const isSelected = selectedPath === wt.path;
-    const isCurrent = Boolean(
-      (sessionPreferredPath && sameWorktreePath(sessionPreferredPath, wt.path))
-      || (currentWorktreePath && sameWorktreePath(currentWorktreePath, wt.path)),
-    );
+    const isCurrent = Boolean(currentWorktreePath && sameWorktreePath(currentWorktreePath, wt.path));
     const laneColor = worktreeLaneColor(wt.laneColorIndex);
 
     return (

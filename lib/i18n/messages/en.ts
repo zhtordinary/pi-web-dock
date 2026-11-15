@@ -1319,8 +1319,6 @@ export const enLocale: LocalePlugin = {
     "i18n.skillUseState.inheritHint": "Inherit global use mode setting",
     "i18n.skillGroupSetState": "Set all to {state}",
     "i18n.skillAdviceIsRecommendation": "Advice is not measured trigger data and does not change your settings.",
-    "worktreeGraph.filterAttention": "Current and needs attention ({count})",
-    "worktreeGraph.filterAttentionHint": "Show main, current, unmerged, dirty and unresolved worktrees. Other retained trees remain available under All.",
     "i18n.skillGroupRestore": "Restore previous bulk state",
     "i18n.skillGroupEnablePlugin": "Enable parent plugin",
     "i18n.filtered": "filtered",

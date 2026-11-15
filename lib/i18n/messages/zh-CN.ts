@@ -1319,8 +1319,6 @@ export const zhCNLocale: LocalePlugin = {
     "i18n.skillUseState.inheritHint": "继承全局设置的使用方式",
     "i18n.skillGroupSetState": "全部设为{state}",
     "i18n.skillAdviceIsRecommendation": "建议不代表实际触发统计，也不会自动修改设置。",
-    "worktreeGraph.filterAttention": "当前与待处理 ({count})",
-    "worktreeGraph.filterAttentionHint": "显示主线、当前工作树、未合并变更、未提交内容和需要核实或收尾的状态；其余保留在“全部”中。",
     "i18n.skillGroupRestore": "恢复上一次批量操作前状态",
     "i18n.skillGroupEnablePlugin": "启用所属插件",
     "i18n.filtered": "已筛选",

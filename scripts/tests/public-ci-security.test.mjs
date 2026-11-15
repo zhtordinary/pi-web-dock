@@ -7,6 +7,15 @@ import { load } from "js-yaml";
 
 const workflows = fileURLToPath(new URL("../../.github/workflows/", import.meta.url));
 
+function checkWindowsFullTestCommand(workflow) {
+  const windowsPackage = workflow.jobs?.["package-windows"];
+  assert.ok(windowsPackage, "Windows package job must exist");
+  assert.equal(windowsPackage["continue-on-error"], undefined, "Windows packaging failures must fail CI");
+  const testCommands = windowsPackage.steps.filter((step) => typeof step.run === "string" && step.run.startsWith("npm test")).map((step) => step.run);
+  assert.deepEqual(testCommands, ["npm test -- --test-reporter=tap"], "Windows must run the complete suite with live TAP output");
+  assert.doesNotMatch(testCommands[0], /--test-(?:name-pattern|only|skip-pattern|force-exit)(?:=|\b)/, "Windows test command must not skip tests or force exit");
+}
+
 function checkPullRequestWorkflow(workflow) {
   const events = typeof workflow.on === "string" ? [workflow.on]
     : Array.isArray(workflow.on) ? workflow.on : Object.keys(workflow.on ?? {});
@@ -46,10 +55,7 @@ test("every PR workflow uses hosted runners without persistent credentials or sh
   const checked = files.filter((file) => checkPullRequestWorkflow(load(readFileSync(join(workflows, file), "utf8"))));
   assert.ok(checked.length > 0, "no PR workflow found");
   const ci = load(readFileSync(join(workflows, "ci.yml"), "utf8"));
-  const windowsPackage = ci.jobs?.["package-windows"];
-  assert.ok(windowsPackage, "Windows package job must exist");
-  assert.equal(windowsPackage["continue-on-error"], undefined, "Windows packaging failures must fail CI");
-  assert.ok(windowsPackage.steps.some((step) => step.run === "npm test"), "Windows package job must run npm test");
+  checkWindowsFullTestCommand(ci);
   const smoke = readFileSync(join(workflows, "../scripts/package-smoke.sh"), "utf8");
   for (const output of ["package tarball sha256:", "package tarball npm integrity:", "package tarball file count:"]) {
     assert.match(smoke, new RegExp(output), `package smoke must print ${output}`);
@@ -71,5 +77,17 @@ test("the guard rejects privileged triggers, persistent credentials and shared c
     const candidate = structuredClone(current);
     mutate(candidate);
     assert.throws(() => checkPullRequestWorkflow(candidate));
+  }
+  const windowsCommandCases = [
+    (workflow) => { workflow.jobs["package-windows"].steps.find((step) => step.run === "npm test -- --test-reporter=tap").run = "npm test -- --test-name-pattern=one"; },
+    (workflow) => { workflow.jobs["package-windows"].steps.find((step) => step.run === "npm test -- --test-reporter=tap").run = "npm test -- --test-only"; },
+    (workflow) => { workflow.jobs["package-windows"].steps.find((step) => step.run === "npm test -- --test-reporter=tap").run = "npm test -- --test-skip-pattern=one"; },
+    (workflow) => { workflow.jobs["package-windows"].steps.find((step) => step.run === "npm test -- --test-reporter=tap").run = "npm test -- --test-force-exit"; },
+    (workflow) => { workflow.jobs["package-windows"]["continue-on-error"] = true; },
+  ];
+  for (const mutate of windowsCommandCases) {
+    const candidate = structuredClone(current);
+    mutate(candidate);
+    assert.throws(() => checkWindowsFullTestCommand(candidate));
   }
 });

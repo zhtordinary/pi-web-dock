@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-const entry = new URL("./session-wait-service.cjs", import.meta.url).pathname;
+import { fileURLToPath } from "node:url";
+const entry = fileURLToPath(new URL("./session-wait-service.cjs", import.meta.url));
 test("service entry renders a bound lifecycle plan without invoking a manager", () => {
   const root = mkdtempSync(join(tmpdir(), "session-service-entry-")); const oldHome = process.env.HOME; process.env.HOME = join(root, "home"); try {
     const dry = spawnSync(process.execPath, [entry, "--dry-run", "--platform=linux", "--state-root", join(root, "space root"), "--health-file", join(root, "health.json")], { encoding: "utf8" });

@@ -24,7 +24,7 @@ import { createHash, randomUUID } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import { historyEntryOrderKey, historyClientMessageIds, CLIENT_MESSAGE_CUSTOM_TYPE } from "./transcript-order";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { resolve, relative, isAbsolute, sep } from "path";
+import { resolve, relative, isAbsolute } from "path";
 import lockfile from "proper-lockfile";
 import { acquireSessionRuntimeOwnership, type SessionRuntimeOwnership } from "./session-runtime-ownership";
 import { recordSessionMessageOutcome } from "./session-messages";
@@ -99,7 +99,7 @@ import {
 } from "./rpc-session-tool-policy";
 export { readSessionThinkingLevel, resolveActiveToolNames } from "./rpc-session-tool-policy";
 import { createSessionControlExtension, isProtectedSideAskControl } from "./session-control";
-import { SIDE_ASK_CHILD, SIDE_ASK_NATIVE_CHILD, SIDE_ASK_PEER_OWNERSHIP, preferSideAskSessionControl, readSideAskPeerOwnership, type SideAskPeerOwnership } from "./side-ask-ownership";
+import { SIDE_ASK_CHILD, SIDE_ASK_NATIVE_CHILD, SIDE_ASK_PEER_OWNERSHIP, preferSideAskSessionControl, readSideAskPeerOwnership, sideAskChildReference, type SideAskPeerOwnership } from "./side-ask-ownership";
 import { drainLocalOwnerOutboxes, persistSessionWaitEvent, persistSessionUiRequestEvent, invalidateSessionUiRequestWaits } from "./session-waits";
 import { drainPendingSessionWakes } from "./session-control-wake-queue";
 import { createSubagentExtension, preferPiWebSubagentExtension, type SubagentExecution, type SubagentExtensionRuntime } from "./subagent-extension";
@@ -1072,6 +1072,9 @@ export class AgentSessionWrapper {
     const parent = this.inner as unknown as Pick<AgentSession, "getCallableToolNames" | "getAllTools">;
     if (typeof parent.getCallableToolNames !== "function") throw new QuickAskError("Side Ask tool scope is unavailable", 503);
     const activeTools = [...this.inner.getActiveToolNames()];
+    const activeSet = new Set(activeTools);
+    const requiredNamespaces = new Set(parent.getAllTools().flatMap((tool) =>
+      activeSet.has(tool.name) && isMcpTool(tool) && tool.namespace?.name ? [tool.namespace.name] : []));
     const allowedTools = new Set([...activeTools, ...parent.getCallableToolNames()]);
     const peerOwnership: SideAskPeerOwnership = { version: 1, sourceSessionId: this.sessionId,
       activeTools, callableTools: [...allowedTools] };
@@ -1289,11 +1292,12 @@ export class AgentSessionWrapper {
         prepare: async () => {
           const summaryNamespaces = model.provider === "openai-codex" && model.api === "openai-codex-responses"
             ? quickAskCachedMcpSummaries(input.memory.buildSessionContext().messages) : undefined;
-          await builtinResources?.mcpHost?.prepareForPrompt(input.signal, { summaryNamespaces });
+          await builtinResources?.mcpHost?.prepareForPrompt(input.signal, { summaryNamespaces, requiredNamespaces });
           if (input.signal.aborted) throw new QuickAskError("Side Ask was stopped", 499);
           session.setActiveToolsByName(activeTools);
           const actual = new Set(session.getActiveToolNames());
-          if (activeTools.some((name) => !actual.has(name))) throw new QuickAskError("Side Ask tools differ from the source session", 503);
+          const missingTools = activeTools.filter((name) => !actual.has(name));
+          if (missingTools.length) throw new QuickAskError(`Side Ask tools differ from the source session: ${JSON.stringify(missingTools)}`, 503);
           if (model.provider === REMOTE_CLAUDE_PROVIDER_ID) {
             if (!this.remoteClaudeHost || resolveRemoteClaudeHost(session.sessionId)) {
               throw new QuickAskError("Remote Claude Side Ask parent scope is unavailable", 503);
@@ -6930,14 +6934,6 @@ export function associateRemoteClaudeProviderSession(
   input: Parameters<typeof associateRemoteClaudeProviderHostSession>[0],
 ) {
   return associateRemoteClaudeProviderHostSession(input);
-}
-
-function sideAskChildReference(sessionId: string, sessionPath: string, parentSessionPath: string) {
-  const childPath = relative(resolve(getAgentDir(), "sessions"), sessionPath);
-  if (!sessionId || !childPath || isAbsolute(childPath) || childPath === ".." || childPath.startsWith(`..${sep}`)) {
-    throw new Error("Side Ask child session is outside the native session root");
-  }
-  return { version: 1, sessionId, childPath, parentSessionPath };
 }
 
 function createSideAskPeerGuard(ownership: SideAskPeerOwnership) {

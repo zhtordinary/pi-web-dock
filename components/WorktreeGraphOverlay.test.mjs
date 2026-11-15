@@ -12,7 +12,6 @@ const messageSources = await Promise.all([
 ]);
 const jiti = createJiti(import.meta.url, { fsCache: false, tsconfigPaths: true, jsx: { runtime: "automatic" } });
 const { WORKTREE_GRAPH_GEOMETRY, getWorktreeGraphMarkerLeft } = await jiti.import("./WorktreeGraphOverlay.tsx");
-const { worktreeNeedsAttention } = await jiti.import("../lib/worktree-graph-types.ts");
 
 test("status tabs filter timeline rows without requiring a search term", () => {
   assert.match(source, /filterTab === "active"/);
@@ -21,13 +20,6 @@ test("status tabs filter timeline rows without requiring a search term", () => {
   assert.doesNotMatch(source, /search \? matchedPaths\.has\(w\.path\) : true/);
   assert.doesNotMatch(source, /filterTab === "(?:merged|wip)"|worktreeGraph\.filter(?:Merged|Wip)/);
   for (const messages of messageSources) assert.doesNotMatch(messages, /"worktreeGraph\.filter(?:Merged|Wip)(?:Hint)?"/);
-});
-
-test("attention still includes merged worktrees with dirty or unknown state", () => {
-  const worktree = { path: "/merged", isMain: false, status: "merged" };
-  assert.equal(worktreeNeedsAttention({ ...worktree, dirtySummary: { state: "dirty", hasUncommitted: true } }), true);
-  assert.equal(worktreeNeedsAttention({ ...worktree, dirtySummary: { state: "unavailable", hasUncommitted: false } }), true);
-  assert.equal(worktreeNeedsAttention({ ...worktree, dirtySummary: { state: "clean", hasUncommitted: false } }), false);
 });
 
 test("worktree rows use the graph batch dirty projection and refresh inspection by path", () => {

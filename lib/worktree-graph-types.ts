@@ -55,13 +55,6 @@ export interface WorktreeGraphItem {
   dirtySummary?: WorktreeDirtySummary;
 }
 
-/** Focus view: the main and current checkouts, unmerged work, and uncommitted or unreadable state. */
-export function worktreeNeedsAttention(worktree: WorktreeGraphItem, currentPath?: string | null): boolean {
-  if (worktree.isMain || worktree.path === currentPath) return true;
-  if (worktree.status === "active") return true;
-  return Boolean(worktree.dirtySummary?.hasUncommitted) || worktree.dirtySummary?.state === "unavailable";
-}
-
 export interface WorktreeTimelineNode {
   sha: string;
   shortSha: string;

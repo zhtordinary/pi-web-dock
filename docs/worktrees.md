@@ -84,7 +84,7 @@ The worktree graph, the sidebar worktree menu, and **By worktree** grouping all 
 
 Creating a physical checkout is a separate, explicit operation: use **New worktree...** in the worktree menu and provide a branch name. A DevSpace, task, or other externally-created checkout is an ordinary Git worktree to Pi Web: it may open it, start a session there, and group its sessions; the graph's New session action never creates, renames, or removes it.
 
-The Git graph inspector's **Associated sessions** list includes visible, non-archived sessions whose `cwd` matches the selected worktree path, sessions whose successful tool history confirms they created that worktree, and sessions with a verified structured `pi-web:worktree-binding` record. Subagent sessions are projected onto their owning main session, including nested subagents, so child transcripts do not create a separate row; orphaned or cyclic subagent metadata is omitted when no main session can be resolved. Each main Session ID appears once; a row may carry more than one relation (`cwd`, `creator`, or `task-root`). Rows show the session title, short Session ID, relation labels, and activity status when available. Click a row to open that session directly. When the graph is opened from an active session, it selects that session's matching worktree, including a linked worktree identified by a verified creation record or structured binding. A worktree with no associated sessions shows an explicit empty state.
+The Git graph inspector's **Associated sessions** list includes visible, non-archived sessions whose `cwd` matches the selected worktree path, sessions whose successful tool history confirms they created that worktree, and sessions with a verified structured `pi-web:worktree-binding` record. Subagent sessions are projected onto their owning main session, including nested subagents, so child transcripts do not create a separate row; orphaned or cyclic subagent metadata is omitted when no main session can be resolved. Each main Session ID appears once; a row may carry more than one relation (`cwd`, `creator`, or `task-root`). Rows show the session title, short Session ID, relation labels, and activity status when available. Click a row to open that session directly. When the graph is opened from an active session, it selects that session's matching worktree or a linked worktree identified by a verified creation record. A worktree with no associated sessions shows an explicit empty state.
 
 A structured binding is an append-only native session entry with this shape:
 
@@ -105,6 +105,8 @@ A structured binding is an append-only native session entry with this shape:
 In **By worktree** grouping, the main checkout is labelled `Main`. Every linked worktree is labelled with the exact Git branch it has checked out, or with its directory path when its `HEAD` is detached.
 
 ### Reading graph status
+
+The graph opens with **All** selected. `CURRENT` marks only the current worktree path when it matches a listed checkout. Creation history, structured bindings, and associated session activity do not set this marker.
 
 The graph separates Git position from integration history:
 

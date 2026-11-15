@@ -704,14 +704,14 @@ class HostInstance {
     return synced;
   }
 
-  async prepareForPrompt(signal: AbortSignal, wait: boolean, summaryNamespaces?: ReadonlySet<string>): Promise<void> {
+  async prepareForPrompt(signal: AbortSignal, wait: boolean, summaryNamespaces?: ReadonlySet<string>, requiredNamespaces?: ReadonlySet<string>): Promise<void> {
     this.clearIdle();
     // The wrapper prepares only prompts sent while no run is going, so none is running
     // now; this also recovers from a run whose agent_end never arrived.
     this.runActive = false;
     this.preparing += 1;
     try {
-      await this.waitForServers(signal, wait, summaryNamespaces);
+      await this.waitForServers(signal, wait, summaryNamespaces, requiredNamespaces);
     } finally {
       this.preparing -= 1;
       // Started now in case the prompt starts no run; agent_start stops it if one does.
@@ -719,19 +719,21 @@ class HostInstance {
     }
   }
 
-  private async waitForServers(signal: AbortSignal, wait: boolean, summaryNamespaces?: ReadonlySet<string>): Promise<void> {
+  private async waitForServers(signal: AbortSignal, wait: boolean, summaryNamespaces?: ReadonlySet<string>, requiredNamespaces?: ReadonlySet<string>): Promise<void> {
     const stopped = aborted(signal);
     await Promise.race([this.sync(), stopped]);
     if (signal.aborted || !wait) return;
-    const needsSummary = (name: string) => summaryNamespaces?.has(`mcp__${name.replace(/-/g, "_")}`);
-    if (summaryNamespaces?.size) {
+    const namespace = (name: string) => `mcp__${name.replace(/-/g, "_")}`;
+    const needsSummary = (name: string) => summaryNamespaces?.has(namespace(name));
+    const required = (name: string) => requiredNamespaces?.has(namespace(name));
+    if (summaryNamespaces?.size || requiredNamespaces?.size) {
       for (const entry of this.extensionEntries()) {
-        if (!entry.config.description?.trim() && needsSummary(entry.name)) this.attemptFor(entry);
+        if (required(entry.name) || (!entry.config.description?.trim() && needsSummary(entry.name))) this.attemptFor(entry);
       }
     }
     const connecting = [...this.attempts.values(), ...this.extensionAttempts.values()]
-      .filter((attempt) => (attempt.declaresTools || (attempt.hasDynamicSummary && needsSummary(attempt.target.name)))
-        && !attempt.settled && !attempt.waited);
+      .filter((attempt) => (attempt.declaresTools || required(attempt.target.name)
+        || (attempt.hasDynamicSummary && needsSummary(attempt.target.name))) && !attempt.settled && !attempt.waited);
     if (connecting.length === 0) return;
     const deadline = delay(this.options.promptWaitMs);
     const timedOut = await Promise.race([
@@ -1157,8 +1159,8 @@ export class McpHost {
    * connecting, unless `wait` is false (the built-in `/mcp`, which starts no
    * run but acts on the registered servers; `mcpPromptPreparation()`).
    */
-  prepareForPrompt(signal: AbortSignal, options: { wait?: boolean; summaryNamespaces?: ReadonlySet<string> } = {}): Promise<void> {
-    return this.current?.prepareForPrompt(signal, options.wait ?? true, options.summaryNamespaces) ?? Promise.resolve();
+  prepareForPrompt(signal: AbortSignal, options: { wait?: boolean; summaryNamespaces?: ReadonlySet<string>; requiredNamespaces?: ReadonlySet<string> } = {}): Promise<void> {
+    return this.current?.prepareForPrompt(signal, options.wait ?? true, options.summaryNamespaces, options.requiredNamespaces) ?? Promise.resolve();
   }
 
   serverStates(): McpHostServerStatus[] {
