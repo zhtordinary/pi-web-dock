@@ -6,7 +6,7 @@ import { createJiti } from "jiti";
 import { CJK_TEXT, testTranslator } from "./test-locale.mjs";
 
 const jiti = createJiti(import.meta.url, { fsCache: false, jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { MessageView } = await jiti.import("./MessageView.tsx");
 const { formatSideBranchTitle } = await jiti.import("./BranchNavigator.tsx");
 const { SidekickAnswer, SidekickHeader, SidekickQuestion, restoreSidekickDraft } = await jiti.import("./SidekickDrawer.tsx");

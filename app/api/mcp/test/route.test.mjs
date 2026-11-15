@@ -96,6 +96,7 @@ test("a global server is tested from its file and answers with what it found", a
   const home = join(root, "home");
   await mkdir(home, { recursive: true });
   setEnvFor(t, "HOME", home);
+  setEnvFor(t, "USERPROFILE", home);
   assert.equal(homedir(), home);
   const { status, body } = await post({ scope: "global", name: "lint" });
   assert.equal(status, 200);

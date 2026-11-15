@@ -35,13 +35,13 @@ test("worktree documentation keeps physical creation separate from session creat
 
 test("worktree inspector lists sessions by cwd with an explicit empty state", () => {
   assert.match(graph, /session-runs\?scope=local/);
-  assert.match(graph, /sameWorktreePath\(item\.session\.cwd, selectedPath\)/);
+  assert.match(graph, /worktreeForCwd\(worktrees, item\.session\.cwd\)\?\.path === selectedPath/);
   assert.match(graph, /data-testid="worktree-associated-sessions"/);
   assert.match(graph, /worktreeGraph\.noAssociatedSessions/);
   assert.match(graph, /worktreeGraph\.sessionId/);
   assert.match(graph, /item\.id\.slice\(0, 8\)/);
   assert.match(graph, /sessionActivity\.status\.\$\{item\.status\}/);
-  assert.match(docs, /cwd.*matches the selected worktree path/);
+  assert.match(docs, /cwd.*matches the selected worktree path or is inside it/);
   assert.match(graph, /worktreeGraph\.relationTaskRoot/);
 });
 
@@ -66,9 +66,9 @@ test("associated session rows open the exact local or remote session", () => {
 });
 
 test("opening the graph prefers the current session worktree", () => {
-  assert.match(graph, /preferredWorktreePath\(graph\?\.worktrees \?\? \[\], currentWorktreePath, currentSessionId, creationHistory\)/);
+  assert.match(graph, /preferredWorktreePath\(graph\?\.worktrees \?\? \[\], currentGraphWorktreePath, currentSessionId, creationHistory, preferredPath\)/);
   assert.match(graph, /filteredWorktrees\.some\(\(w\) => w\.path === sessionPreferredPath\)/);
-  assert.match(graph, /currentWorktreePath && sameWorktreePath\(currentWorktreePath, wt\.path\)/);
+  assert.match(graph, /currentGraphWorktreePath === wt\.path/);
   assert.match(appShell, /openWorktreeGraph\(topBarProjectPath, device, \{ id: topBarSession\?\.id \?\? null, cwd: topBarSession\?\.cwd \?\? null \}\)/);
   assert.match(appShell, /currentSessionId=\{worktreeGraphSessionId \?\? topBarSessionId\}/);
 });
@@ -78,10 +78,12 @@ test("a verified creation record selects the linked worktree for its current ses
     { path: "/repo", isMain: true },
     { path: "/repo/.worktrees/task", isMain: false },
   ];
-  assert.equal(preferredWorktreePath(worktrees, "/repo", "creator", {
+  const history = {
     partial: false,
     records: [{ worktreePath: "/repo/.worktrees/task", sessionId: "creator", createdAt: "2026-01-01" }],
-  }), "/repo/.worktrees/task");
+  };
+  assert.equal(preferredWorktreePath(worktrees, "/repo", "creator", history), "/repo/.worktrees/task");
+  assert.equal(preferredWorktreePath(worktrees, "/repo", "creator", history, "/repo"), "/repo", "the originating node wins over creation history");
 });
 
 test("the current path is preferred when no creation record matches", () => {
@@ -93,17 +95,18 @@ test("the current path is preferred when no creation record matches", () => {
     { worktreePath: "/repo/.worktrees/task", sessionId: "current", relation: "task-root", createdAt: "2026-01-01" },
   ] };
   assert.equal(preferredWorktreePath(worktrees, "/repo/", "current", history), "/repo");
-  assert.equal(preferredWorktreePath(worktrees, "/repo/missing", "current", history), null);
+  assert.equal(preferredWorktreePath(worktrees, "/repo/.worktrees/task/src", "current", history), "/repo/.worktrees/task");
+  assert.equal(preferredWorktreePath(worktrees, "/repo-other/missing", "current", history), null);
 });
 
 test("verified worktree creators appear in the associated-session list", () => {
   assert.match(graph, /creationHistory: "1"/);
-  assert.match(graph, /mergeAssociatedWorktreeSessions\(selectedPath, associatedSessions, creationHistory\)/);
+  assert.match(graph, /mergeAssociatedWorktreeSessions\(selectedPath, associatedSessions, creationHistory, graph\?\.worktrees\)/);
   assert.match(graph, /data-testid="worktree-associated-sessions"/);
   assert.doesNotMatch(graph, /data-testid="worktree-creation-history"|worktreeGraph\.creationHistory/);
   assert.match(graph, /associatedSessionsIncomplete/);
   assert.match(graph, /associatedSessionsRefreshKey, fetchCreationHistory/);
-  assert.match(docs, /whose `cwd` matches the selected worktree path, sessions whose successful tool history confirms they created that worktree, and sessions with a verified structured/);
+  assert.match(docs, /whose `cwd` matches the selected worktree path or is inside it, sessions whose successful tool history confirms they created that worktree/);
 });
 
 test("cwd sessions and verified creators share one list without duplicate IDs", () => {
@@ -138,7 +141,7 @@ test("collapses subagent-associated sessions to their owning main session", () =
     { worktreePath: "/repo/.worktrees/task", sessionId: "grandchild", sessionName: "Child creator", createdAt: "2026-01-01" },
   ] });
   assert.deepEqual(result, [
-    { id: "main", title: "Main session", status: "idle", relations: ["cwd", "creator"] },
+    { id: "main", title: "Main session", status: "idle", relations: ["child-cwd", "child-creator"] },
   ]);
 });
 
@@ -241,13 +244,41 @@ async function beginLocalOpen(stateRef, sessionId) {
   });
 }
 
-test("local associated session selects once after graph close rerenders and replaces callbacks", async () => {
+test("reopening Git after following an association retains its originating worktree only for that session and device", async () => {
+  const selected = [];
+  const mounted = await mountWorktree(makeCallbacks({
+    loadLocalSession: async (id) => ({ id, cwd: "/repo" }), selected,
+  }));
+  try {
+    await beginLocalOpen(mounted.stateRef, "target");
+    await React.act(async () => {
+      mounted.stateRef.current.openWorktreeGraph("/repo", undefined, { id: "target", cwd: "/repo" });
+      await tick();
+    });
+    assert.equal(mounted.stateRef.current.worktreeGraphPreferredPath, "/repo/.worktrees/task");
+    await React.act(async () => {
+      mounted.stateRef.current.openWorktreeGraph("/repo", undefined, { id: "other", cwd: "/repo" });
+      await tick();
+    });
+    assert.equal(mounted.stateRef.current.worktreeGraphPreferredPath, null);
+    await React.act(async () => {
+      mounted.stateRef.current.openWorktreeGraph("/repo", { id: "other-device", name: "Other" }, { id: "target", cwd: "/repo" });
+      await tick();
+    });
+    assert.equal(mounted.stateRef.current.worktreeGraphPreferredPath, null);
+  } finally {
+    await unmountWorktree(mounted);
+  }
+});
+
+test("local associated session selects once after a pending lookup and callback replacement", async () => {
   const request = deferred();
   const selected = [];
   const callbacks = makeCallbacks({ loadLocalSession: () => request.promise, selected });
   const mounted = await mountWorktree(callbacks);
   try {
     await beginLocalOpen(mounted.stateRef, "local-session");
+    assert.equal(mounted.stateRef.current.worktreeGraphOpen, true, "keep the graph visible while loading");
     // AppShell replaces the callback bundle on every render. The request stays
     // valid because its production guard is the request serial, not callback identity.
     mounted.callbacksRef.current = {
@@ -261,6 +292,7 @@ test("local associated session selects once after graph close rerenders and repl
       await tick();
     });
     assert.deepEqual(selected, [session]);
+    assert.equal(mounted.stateRef.current.worktreeGraphOpen, false, "close only after a successful lookup");
   } finally {
     await unmountWorktree(mounted);
   }
@@ -280,6 +312,7 @@ test("local associated session reports load failures and missing sessions", asyn
       await beginLocalOpen(mounted.stateRef, sessionId);
       await React.act(async () => { await tick(); });
       assert.equal(selected.length, 0);
+      assert.equal(mounted.stateRef.current.worktreeGraphOpen, true, "a failure preserves the selected graph");
       assert.deepEqual(alerts, [expected]);
     } finally {
       await unmountWorktree(mounted);
@@ -371,7 +404,7 @@ test("remote associated sessions keep the remote open path", async () => {
   const mounted = await mountWorktree(callbacks);
   try {
     await React.act(async () => {
-      mounted.stateRef.current.openWorktreeGraph("/remote/repo", { id: "remote-device", name: "Remote" }, { id: "remote-session", cwd: "/remote/repo/task" });
+      mounted.stateRef.current.openWorktreeGraph("/remote/repo", { id: "remote-device", name: "Remote", url: "https://remote.example" }, { id: "remote-session", cwd: "/remote/repo/task" });
       await tick();
     });
     await React.act(async () => {
@@ -379,8 +412,27 @@ test("remote associated sessions keep the remote open path", async () => {
       await tick();
     });
     assert.equal(remoteOpened.length, 1);
-    assert.deepEqual(remoteOpened[0].slice(0, 3), [{ id: "remote-device", name: "Remote" }, "remote-session", null]);
+    assert.deepEqual(remoteOpened[0], [{ id: "remote-device", name: "Remote", url: "https://remote.example" }, "remote-session", null, { worktreePath: "/remote/repo/task" }]);
     assert.deepEqual(selected, []);
+  } finally {
+    await unmountWorktree(mounted);
+  }
+});
+
+test("an embedded remote graph reads the origin only for the matching session", async () => {
+  const mounted = await mountWorktree(makeCallbacks());
+  try {
+    window.history.replaceState(null, "", "/?session=remote-session&worktreeFocus=%2Frepo%2F.worktrees%2Ftask");
+    await React.act(async () => {
+      mounted.stateRef.current.openWorktreeGraph("/repo", { id: "local-device", name: "Local" }, { id: "remote-session", cwd: "/repo" });
+      await tick();
+    });
+    assert.equal(mounted.stateRef.current.worktreeGraphPreferredPath, "/repo/.worktrees/task");
+    await React.act(async () => {
+      mounted.stateRef.current.openWorktreeGraph("/repo", { id: "local-device", name: "Local" }, { id: "other-session", cwd: "/repo" });
+      await tick();
+    });
+    assert.equal(mounted.stateRef.current.worktreeGraphPreferredPath, null);
   } finally {
     await unmountWorktree(mounted);
   }

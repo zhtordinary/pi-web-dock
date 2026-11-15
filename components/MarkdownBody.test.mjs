@@ -15,7 +15,7 @@ const jiti = createJiti(import.meta.url, {
 await installEnglishTestLocale(jiti);
 const { MarkdownBody, getMarkdownImageWidth } = await jiti.import("./MarkdownBody.tsx");
 const { readImageGenerationCosts } = await jiti.import("../lib/image-generation-cost.ts");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { normalizeDisplayMath, markdownPreviewRemarkPlugins, markdownPreviewRehypePlugins } = await jiti.import("../lib/markdown.ts");
 const globalsCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
 const markdownBodySource = readFileSync(new URL("./MarkdownBody.tsx", import.meta.url), "utf8");

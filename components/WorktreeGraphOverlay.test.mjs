@@ -87,12 +87,16 @@ test("mainline nodes center on the spine while worktree status markers stay insi
   assert.doesNotMatch(source, /position: "absolute",\s*left: -26,\s*top: "50%"/);
 });
 
-test("graph cleanup removes the checkout through the plain worktree API and keeps its branch", () => {
+test("graph removal never requests force and is disabled when safety cannot be established", () => {
   assert.match(source, /apiPathForPeer\(remotePeer, "worktrees"\)/);
   assert.match(source, /method: "DELETE"/);
-  assert.match(source, /JSON\.stringify\(\{ cwd: projectRoot, path: targetPath, force: true \}\)/);
+  assert.match(source, /JSON\.stringify\(\{ cwd: projectRoot, path: targetPath \}\)/);
+  assert.match(source, /selectedWorktreeSessions\.length > 0/);
+  assert.match(source, /selectedWorktree\.dirtySummary\.ignoredCount > 0/);
+  assert.match(source, /res\.status === 502 \|\| res\.status === 504/);
+  assert.match(source, /worktreeGraph\.cleanupResultUnknown/);
   assert.match(source, /window\.confirm\(t\("worktreeGraph\.removeConfirm"\)\)/);
-  assert.match(testTranslator("en")("worktreeGraph.removeConfirm"), /the branch is kept/);
+  assert.match(testTranslator("en")("worktreeGraph.removeConfirm"), /branch is kept/i);
 });
 
 test("mainline checkout renders directly under the main head node with one dirty status badge", () => {

@@ -47,7 +47,7 @@ test("header keeps actions in the title row and places search beside the filters
 test("the graph renders one search input and only the supported filter buttons", async () => {
   const jiti = createJiti(import.meta.url, { tsconfigPaths: true, fsCache: false, jsx: { runtime: "automatic" } });
   const { WorktreeGraphOverlay } = await jiti.import("./WorktreeGraphOverlay.tsx");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const html = renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(WorktreeGraphOverlay, {
     open: true, projectRoot: "/project", onClose() {}, onOpenSession() {}, onNewSessionFromNode() {},
   })));

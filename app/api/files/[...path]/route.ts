@@ -35,7 +35,8 @@ import {
   writeTextFileAtomicSync,
 } from "@/lib/file-edit";
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
-import { linkedWorktreeForTrash, unregisterTrashedWorktree } from "@/lib/worktree";
+import { assertWorktreeDirectoryIdentity, linkedWorktreeForTrash, unregisterTrashedWorktree } from "@/lib/worktree";
+import { assertWorktreeRemovalSafe } from "@/lib/worktree-removal-safety";
 import { renamePathNoClobberSync } from "@/lib/file-rename";
 import { isBinaryTextFile, readTextPreviewChunk } from "@/lib/text-preview";
 import {
@@ -745,7 +746,18 @@ export async function DELETE(
     } catch {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    const worktree = stat.isDirectory() ? await linkedWorktreeForTrash(filePath) : null;
+    const gitEntry = stat.isDirectory() ? fs.lstatSync(path.join(filePath, ".git"), { throwIfNoEntry: false }) : undefined;
+    const worktree = gitEntry ? await linkedWorktreeForTrash(filePath) : null;
+    if (gitEntry && !worktree) return NextResponse.json({ error: "Git checkout removal refused: the linked worktree could not be verified" }, { status: 409 });
+    if (worktree) {
+      try {
+        const identity = await assertWorktreeRemovalSafe(worktree.cwd, worktree.path);
+        if (request.signal.aborted) throw new Error("Worktree safety unknown: the request was cancelled");
+        assertWorktreeDirectoryIdentity(filePath, identity);
+      } catch (error) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 });
+      }
+    }
     await moveToSystemTrash(filePath);
     if (worktree) {
       try { await unregisterTrashedWorktree(worktree); }

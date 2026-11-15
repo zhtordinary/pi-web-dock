@@ -47,16 +47,18 @@ interface Props {
   deviceName?: string | null;
   currentWorktreePath?: string | null;
   currentSessionId?: string | null;
+  preferredPath?: string | null;
   remotePeer?: string;
   onClose: () => void;
   onSwitchWorktree?: (path: string) => void;
   onOpenSession: (sessionId: string, worktreePath: string) => void;
+  onSelectWorktree?: () => void;
   onNewSessionFromNode: (worktree: WorktreeGraphItem, initialPrompt: string) => void;
 }
 
 type FilterTab = "all" | "active" | "at_base";
 
-type WorktreeAssociationRelation = "cwd" | "creator" | "task-root";
+type WorktreeAssociationRelation = "cwd" | "creator" | "task-root" | "child-cwd" | "child-creator" | "child-task-root";
 
 interface WorktreeCreationHistory {
   records: Array<{ worktreePath: string; sessionId: string; createdAt: string; sessionName?: string }>;
@@ -119,7 +121,21 @@ function normalizeWorktreePath(value: string): string {
 }
 
 function sameWorktreePath(left: string, right: string): boolean {
-  return normalizeWorktreePath(left) === normalizeWorktreePath(right);
+  const a = normalizeWorktreePath(left);
+  const b = normalizeWorktreePath(right);
+  return /^[a-z]:\//i.test(a) && /^[a-z]:\//i.test(b) ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function worktreeForCwd<T extends { path: string }>(worktrees: readonly T[], cwd: string | null | undefined): T | null {
+  if (!cwd || cwd.split(/[\\/]/).some((part) => part === ".." || part === ".")) return null;
+  const normalized = normalizeWorktreePath(cwd);
+  const windows = /^[a-z]:\//i.test(normalized) || normalized.startsWith("//");
+  const candidate = windows ? normalized.toLowerCase() : normalized;
+  return [...worktrees].sort((a, b) => b.path.length - a.path.length).find((worktree) => {
+    const path = normalizeWorktreePath(worktree.path);
+    const root = windows ? path.toLowerCase() : path;
+    return candidate === root || candidate.startsWith(root === "/" ? root : `${root}/`);
+  }) ?? null;
 }
 
 export function preferredWorktreePath(
@@ -127,14 +143,16 @@ export function preferredWorktreePath(
   currentWorktreePath: string | null | undefined,
   currentSessionId: string | null | undefined,
   history: WorktreeCreationHistory | null,
+  navigationPath?: string | null,
 ): string | null {
   const historyMatches = (history?.records ?? [])
     .filter((record) => record.sessionId === currentSessionId)
     .map((record) => worktrees.find((worktree) => sameWorktreePath(worktree.path, record.worktreePath)))
     .filter((worktree): worktree is WorktreeGraphItem => Boolean(worktree));
-  return historyMatches.find((worktree) => !worktree.isMain)?.path
+  return worktrees.find((worktree) => navigationPath && sameWorktreePath(worktree.path, navigationPath))?.path
+    ?? historyMatches.find((worktree) => !worktree.isMain)?.path
     ?? historyMatches[0]?.path
-    ?? worktrees.find((worktree) => currentWorktreePath && sameWorktreePath(worktree.path, currentWorktreePath))?.path
+    ?? worktreeForCwd(worktrees, currentWorktreePath)?.path
     ?? null;
 }
 
@@ -150,6 +168,7 @@ export function mergeAssociatedWorktreeSessions(
   selectedPath: string | null,
   sessions: readonly SessionActivityItem[],
   history: WorktreeCreationHistory | null,
+  worktrees: readonly { path: string }[] = selectedPath ? [{ path: selectedPath }] : [],
 ): WorktreeAssociatedSession[] {
   if (!selectedPath) return [];
   const sessionsById = new Map(sessions.map((item) => [item.session.id, item]));
@@ -173,10 +192,11 @@ export function mergeAssociatedWorktreeSessions(
   const ensureActivityOwner = (activity: SessionActivityItem, relation: WorktreeAssociationRelation) => {
     const owner = ownerBySessionId.get(activity.session.id);
     if (!owner) return;
-    ensure(owner.session.id, associatedSessionTitle(owner.session), owner.status, relation);
+    const actualRelation = owner.session.id === activity.session.id ? relation : `child-${relation}` as WorktreeAssociationRelation;
+    ensure(owner.session.id, associatedSessionTitle(owner.session), owner.status, actualRelation);
   };
   for (const item of sessions) {
-    if (sameWorktreePath(item.session.cwd, selectedPath)) ensureActivityOwner(item, "cwd");
+    if (worktreeForCwd(worktrees, item.session.cwd)?.path === selectedPath) ensureActivityOwner(item, "cwd");
   }
   for (const record of history?.records ?? []) {
     if (!sameWorktreePath(record.worktreePath, selectedPath)) continue;
@@ -190,10 +210,11 @@ export function mergeAssociatedWorktreeSessions(
   for (const record of history?.bindings ?? []) {
     if (!sameWorktreePath(record.worktreePath, selectedPath)) continue;
     const activity = sessionsById.get(record.sessionId);
+    const relation = record.relation === "creator" ? "creator" : "task-root";
     if (activity) {
-      ensureActivityOwner(activity, "task-root");
+      ensureActivityOwner(activity, relation);
     } else {
-      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, "task-root");
+      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, relation);
     }
   }
   return [...associated.values()];
@@ -207,6 +228,9 @@ function associationRelationLabel(
     case "cwd": return translate("worktreeGraph.relationCwd");
     case "creator": return translate("worktreeGraph.relationCreator");
     case "task-root": return translate("worktreeGraph.relationTaskRoot");
+    case "child-cwd": return translate("worktreeGraph.relationChildCwd");
+    case "child-creator": return translate("worktreeGraph.relationChildCreator");
+    case "child-task-root": return translate("worktreeGraph.relationChildTaskRoot");
   }
 }
 
@@ -255,15 +279,18 @@ export function WorktreeGraphOverlay({
   deviceName,
   currentWorktreePath,
   currentSessionId,
+  preferredPath,
   remotePeer,
   onClose,
   onSwitchWorktree,
   onOpenSession,
+  onSelectWorktree,
   onNewSessionFromNode,
 }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [graph, setGraph] = useState<WorktreeGraph | null>(null);
+  const [resolvedSessionWorktree, setResolvedSessionWorktree] = useState<{ cwd: string; path: string | null } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -288,6 +315,7 @@ export function WorktreeGraphOverlay({
 
   useEffect(() => {
     setGraph(null);
+    setResolvedSessionWorktree(null);
     setFilterTab("all");
     setSearch("");
     setSelectedPath(null);
@@ -329,6 +357,7 @@ export function WorktreeGraphOverlay({
         const query = new URLSearchParams({
           cwd: projectRoot,
           graph: "1",
+          ...(currentWorktreePath ? { sessionCwd: currentWorktreePath } : {}),
           ...(forceRefresh ? { refresh: "1" } : {}),
         });
         const url = apiPathForPeer(remotePeer, `worktrees?${query.toString()}`);
@@ -337,9 +366,11 @@ export function WorktreeGraphOverlay({
           const body = (await res.json().catch(() => ({}))) as { error?: string };
           throw new Error(body.error || `HTTP ${res.status}`);
         }
-        const data = (await res.json()) as { graph?: WorktreeGraph; error?: string };
+        const data = (await res.json()) as { graph?: WorktreeGraph; error?: string; sessionWorktreePath?: string | null };
         if (data.error) throw new Error(data.error);
         if (requestId !== graphRequestRef.current) return;
+        setResolvedSessionWorktree(currentWorktreePath && (data.sessionWorktreePath === null || typeof data.sessionWorktreePath === "string")
+          ? { cwd: currentWorktreePath, path: data.sessionWorktreePath } : null);
         if (data.graph) {
           setGraph(data.graph);
         } else {
@@ -354,7 +385,7 @@ export function WorktreeGraphOverlay({
         if (requestId === graphRequestRef.current) setLoading(false);
       }
     },
-    [projectRoot, remotePeer],
+    [currentWorktreePath, projectRoot, remotePeer],
   );
 
   useEffect(() => {
@@ -445,8 +476,8 @@ export function WorktreeGraphOverlay({
   }, [graph, selectedPath]);
 
   const selectedWorktreeSessions = useMemo(
-    () => mergeAssociatedWorktreeSessions(selectedPath, associatedSessions, creationHistory),
-    [associatedSessions, creationHistory, selectedPath],
+    () => mergeAssociatedWorktreeSessions(selectedPath, associatedSessions, creationHistory, graph?.worktrees),
+    [associatedSessions, creationHistory, selectedPath, graph],
   );
   const associatedSessionsIncomplete = Boolean(associatedSessionsError || creationHistoryError || creationHistory?.partial);
 
@@ -512,17 +543,19 @@ export function WorktreeGraphOverlay({
       const res = await fetch(apiPathForPeer(remotePeer, "worktrees"), {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: projectRoot, path: targetPath, force: true }),
+        body: JSON.stringify({ cwd: projectRoot, path: targetPath }),
       });
       if (res.ok) {
         setSelectedPath(null);
         await fetchGraph(true);
+      } else if (res.status === 502 || res.status === 504) {
+        alert(t("worktreeGraph.cleanupResultUnknown"));
       } else {
         const err = (await res.json().catch(() => ({}))) as { error?: string };
         alert(t("worktreeGraph.cleanupFailed", { error: err.error || res.statusText }));
       }
-    } catch (e) {
-      alert(t("worktreeGraph.cleanupRequestFailed", { error: e instanceof Error ? e.message : String(e) }));
+    } catch {
+      alert(t("worktreeGraph.cleanupResultUnknown"));
     } finally {
       setDeletingPath(null);
     }
@@ -538,9 +571,12 @@ export function WorktreeGraphOverlay({
     return new Map(graph.worktrees.map((w) => [w.path, w]));
   }, [graph]);
 
+  const currentGraphWorktreePath = resolvedSessionWorktree && resolvedSessionWorktree.cwd === currentWorktreePath
+    ? graph?.worktrees.find((worktree) => resolvedSessionWorktree.path && sameWorktreePath(worktree.path, resolvedSessionWorktree.path))?.path ?? null
+    : graph?.worktrees.find((worktree) => currentWorktreePath && sameWorktreePath(worktree.path, currentWorktreePath))?.path ?? null;
   const sessionPreferredPath = useMemo(
-    () => preferredWorktreePath(graph?.worktrees ?? [], currentWorktreePath, currentSessionId, creationHistory),
-    [creationHistory, currentSessionId, currentWorktreePath, graph],
+    () => preferredWorktreePath(graph?.worktrees ?? [], currentGraphWorktreePath, currentSessionId, creationHistory, preferredPath),
+    [creationHistory, currentSessionId, currentGraphWorktreePath, graph, preferredPath],
   );
 
   const filteredWorktrees = useMemo(() => {
@@ -1518,8 +1554,9 @@ export function WorktreeGraphOverlay({
                           <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 11, fontWeight: 600 }}>{item.title}</span>
                           <span style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, minWidth: 0, color: "var(--text-dim)", fontSize: 10, lineHeight: 1.3 }}>
                             <span title={item.id} style={{ flexShrink: 0, fontFamily: "var(--font-mono)" }}>{t("worktreeGraph.sessionId")} #{item.id.slice(0, 8)}</span>
+                            {item.id === currentSessionId && <span>{t("worktreeGraph.currentSession")}</span>}
                             {item.relations.map((relation) => <span key={relation} style={{ flexShrink: 0, padding: "1px 4px", borderRadius: 3, background: "var(--bg-hover)", color: "var(--text-muted)" }}>{associationRelationLabel(relation, t)}</span>)}
-                            {item.status && <><span aria-hidden="true">·</span><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: sessionActivityStatusColor(item.status) }}>{t(`sessionActivity.status.${item.status}`)}</span></>}
+                            {item.status && <><span aria-hidden="true">·</span><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: sessionActivityStatusColor(item.status) }}>{item.relations.some((relation) => relation.startsWith("child-")) ? t("worktreeGraph.ownerStatus", { status: t(`sessionActivity.status.${item.status}`) }) : t(`sessionActivity.status.${item.status}`)}</span></>}
                           </span>
                         </button>
                       ))}
@@ -1627,10 +1664,11 @@ export function WorktreeGraphOverlay({
                   </a>
                 )}
 
-                {!selectedWorktree.isMain && selectedWorktree.path !== currentWorktreePath && (
+                {!selectedWorktree.isMain && selectedWorktree.path !== currentGraphWorktreePath && (
                   <button
                     type="button"
-                    disabled={deletingPath === selectedWorktree.path}
+                    title={t("worktreeGraph.cleanupSafetyHint")}
+                    disabled={deletingPath === selectedWorktree.path || associatedSessionsLoading || creationHistoryLoading || associatedSessionsIncomplete || selectedWorktreeSessions.length > 0 || selectedWorktree.dirtySummary?.state !== "clean" || selectedWorktree.dirtySummary.ignoredCount > 0}
                     onClick={() => void handleDeleteWorktree(selectedWorktree.path)}
                     style={{
                       width: "100%",
@@ -1909,7 +1947,7 @@ export function WorktreeGraphOverlay({
 
   function renderWorktreeRow(wt: WorktreeGraphItem) {
     const isSelected = selectedPath === wt.path;
-    const isCurrent = Boolean(currentWorktreePath && sameWorktreePath(currentWorktreePath, wt.path));
+    const isCurrent = currentGraphWorktreePath === wt.path;
     const laneColor = worktreeLaneColor(wt.laneColorIndex);
 
     return (
@@ -1921,12 +1959,14 @@ export function WorktreeGraphOverlay({
         aria-label={wt.label}
         title={t("worktreeGraph.deltaBasisHint")}
         onClick={() => {
+          onSelectWorktree?.();
           selectionManuallySetRef.current = true;
           setSelectedPath(wt.path);
         }}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
+            onSelectWorktree?.();
             selectionManuallySetRef.current = true;
             setSelectedPath(wt.path);
           }
@@ -2127,6 +2167,7 @@ export function WorktreeGraphOverlay({
 
         {isCurrent && (
           <span
+            title={t("worktreeGraph.currentSessionDirectory")}
             style={{
               padding: "0 5px",
               borderRadius: 3,

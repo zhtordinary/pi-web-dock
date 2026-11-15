@@ -448,7 +448,7 @@ function pricingInput(input: BillingUsageInput): BillingUsageInput {
 function runPriceProcess(scriptPath: string, payload: readonly BillingUsageInput[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("python3", ["-c", PRICE_ADAPTER, scriptPath], {
-      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+      env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";

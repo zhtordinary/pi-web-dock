@@ -83,7 +83,7 @@ export function useAppShellWorktreeCapability(capabilityPath: string | null) {
 
 export interface AppShellWorktreeCallbacks {
   handleSelectSession: (session: SessionInfo) => void;
-  openRemoteSession: (device: SessionActivityDevice, sessionId: string, searchTerm?: string | null, options?: { cwd?: string; path?: string }) => void;
+  openRemoteSession: (device: SessionActivityDevice, sessionId: string, searchTerm?: string | null, options?: { cwd?: string; path?: string; worktreePath?: string }) => void;
   loadLocalSession: (sessionId: string) => Promise<SessionInfo | null>;
   invalidateWorkspaceRestore: () => void;
   handleNewActivitySession: (cwd: string, device?: SessionActivityDevice, subprojectId?: string, subprojectLabel?: string, options?: {
@@ -110,6 +110,7 @@ export interface AppShellWorktreeState {
   worktreeGraphDevice: SessionActivityDevice | null;
   worktreeGraphSessionId: string | null;
   worktreeGraphSessionPath: string | null;
+  worktreeGraphPreferredPath: string | null;
   closeTalkMap: () => void;
   closeWorktreeGraph: () => void;
   openTalkMap: (projectRoot: string | null, device?: SessionActivityDevice, focusSessionId?: string | null) => void;
@@ -153,6 +154,8 @@ export function useAppShellWorktree({
   const [worktreeGraphDevice, setWorktreeGraphDevice] = useState<SessionActivityDevice | null>(null);
   const [worktreeGraphSessionId, setWorktreeGraphSessionId] = useState<string | null>(null);
   const [worktreeGraphSessionPath, setWorktreeGraphSessionPath] = useState<string | null>(null);
+  const [worktreeGraphPreferredPath, setWorktreeGraphPreferredPath] = useState<string | null>(null);
+  const worktreeOriginRef = useRef<{ sessionId: string; deviceId: string; projectRoot: string | null; path: string } | null>(null);
   const worktreeOpenRequestSerialRef = useRef(0);
   const talkMapSidebarSessionIdRef = useRef<string | null>(null);
   talkMapSidebarSessionIdRef.current = talkMapSidebarSessionId;
@@ -176,6 +179,7 @@ export function useAppShellWorktree({
     setWorktreeGraphDevice(null);
     setWorktreeGraphSessionId(null);
     setWorktreeGraphSessionPath(null);
+    setWorktreeGraphPreferredPath(null);
   }, [cancelWorktreeGraphOpen]);
   const openTalkMap = useCallback((projectRoot: string | null, device?: SessionActivityDevice, focusSessionId: string | null = null) => {
     const root = projectRoot?.trim();
@@ -195,8 +199,16 @@ export function useAppShellWorktree({
     setWorktreeGraphDevice(device ?? null);
     setWorktreeGraphSessionId(sessionContext?.id ?? null);
     setWorktreeGraphSessionPath(sessionContext?.cwd?.trim() || null);
+    const origin = worktreeOriginRef.current;
+    const params = typeof window === "undefined" ? null : new URLSearchParams(window.location.search);
+    const remotePath = params?.get("worktreeFocus");
+    const remoteSession = params?.get("session");
+    const matchesOrigin = origin && origin.sessionId === sessionContext?.id
+      && origin.deviceId === (device?.id ?? localDeviceId)
+      && (!origin.projectRoot || origin.projectRoot === root);
+    setWorktreeGraphPreferredPath(matchesOrigin ? origin.path : remoteSession === sessionContext?.id && (!device || device.id === localDeviceId) ? remotePath ?? null : null);
     setWorktreeGraphOpen(true);
-  }, [cancelWorktreeGraphOpen]);
+  }, [cancelWorktreeGraphOpen, localDeviceId]);
   const handleOpenWorktreeGraph = useCallback((projectRoot: string | null, device?: SessionActivityDevice) => {
     openWorktreeGraph(projectRoot, device);
   }, [openWorktreeGraph]);
@@ -210,11 +222,13 @@ export function useAppShellWorktree({
   }, [callbacksRef, closeWorktreeGraph, worktreeGraphDevice, worktreeGraphProjectRoot]);
   const handleWorktreeGraphOpenSession = useCallback((sessionId: string, worktreePath: string) => {
     const device = worktreeGraphDevice;
-    closeWorktreeGraph();
+    const projectRoot = worktreeGraphProjectRoot;
     const callbacks = callbacksRef.current;
     if (!callbacks) return;
     if (device && localDeviceId && device.id !== localDeviceId) {
-      callbacks.openRemoteSession(device, sessionId, null, { cwd: worktreePath });
+      if (!device.url) { window.alert(`Device ${device.name} is unavailable`); return; }
+      closeWorktreeGraph();
+      callbacks.openRemoteSession(device, sessionId, null, { worktreePath });
       return;
     }
     callbacks.invalidateWorkspaceRestore();
@@ -222,13 +236,15 @@ export function useAppShellWorktree({
     void callbacks.loadLocalSession(sessionId).then((session) => {
       if (requestSerial !== worktreeOpenRequestSerialRef.current) return;
       if (!session) throw new Error(`Session ${sessionId} not found`);
+      closeWorktreeGraph();
+      worktreeOriginRef.current = { sessionId, deviceId: device?.id ?? localDeviceId, projectRoot, path: worktreePath };
       callbacksRef.current?.handleSelectSession(session);
     }).catch((cause) => {
       if (requestSerial === worktreeOpenRequestSerialRef.current) {
         window.alert(cause instanceof Error ? cause.message : String(cause));
       }
     });
-  }, [callbacksRef, closeWorktreeGraph, localDeviceId, worktreeGraphDevice]);
+  }, [callbacksRef, closeWorktreeGraph, localDeviceId, worktreeGraphDevice, worktreeGraphProjectRoot]);
 
   const handleOpenTalkMapForSession = useCallback((projectRoot: string | null, device: SessionActivityDevice | undefined, sessionId?: string | null) => {
     openTalkMap(projectRoot, device, sessionId);
@@ -352,7 +368,7 @@ export function useAppShellWorktree({
 
   return {
     talkMapOpen, talkMapProjectRoot, talkMapDevice, talkMapFocusSessionId, talkMapSidebarSessionId,
-    worktreeGraphOpen, worktreeGraphProjectRoot, worktreeGraphDevice, worktreeGraphSessionId, worktreeGraphSessionPath,
+    worktreeGraphOpen, worktreeGraphProjectRoot, worktreeGraphDevice, worktreeGraphSessionId, worktreeGraphSessionPath, worktreeGraphPreferredPath,
     closeTalkMap, closeWorktreeGraph, openTalkMap, openWorktreeGraph, handleOpenWorktreeGraph,
     handleWorktreeGraphNewSession, handleWorktreeGraphOpenSession, handleOpenTalkMapForSession,
     handleTalkMapSession, talkMapActionDevice, handleTalkMapSelectCard, handleTalkMapSessionMutation,
@@ -372,7 +388,9 @@ export function AppShellWorktreeOverlays({
   worktreeGraphDevice,
   worktreeGraphSessionId,
   worktreeGraphSessionPath,
+  worktreeGraphPreferredPath,
   worktreeGraphCurrentPath,
+  currentDeviceId,
   topBarSessionId,
   currentSessionId,
   localDeviceId,
@@ -390,6 +408,7 @@ export function AppShellWorktreeOverlays({
   onCloseWorktreeGraph,
   onSwitchWorktree,
   onOpenSession,
+  onSelectWorktree,
   onNewSessionFromNode,
 }: {
   talkMapOpen: boolean;
@@ -402,7 +421,9 @@ export function AppShellWorktreeOverlays({
   worktreeGraphDevice: SessionActivityDevice | null;
   worktreeGraphSessionId: string | null;
   worktreeGraphSessionPath: string | null;
+  worktreeGraphPreferredPath: string | null;
   worktreeGraphCurrentPath: string | null;
+  currentDeviceId: string;
   topBarSessionId: string | null;
   currentSessionId?: string | null;
   localDeviceId: string;
@@ -420,6 +441,7 @@ export function AppShellWorktreeOverlays({
   onCloseWorktreeGraph: () => void;
   onSwitchWorktree?: (path: string) => void;
   onOpenSession: (sessionId: string, worktreePath: string) => void;
+  onSelectWorktree: () => void;
   onNewSessionFromNode: (worktree: WorktreeGraphItem, prompt: string) => void;
 }) {
   return <>
@@ -448,12 +470,14 @@ export function AppShellWorktreeOverlays({
         open={worktreeGraphOpen}
         projectRoot={worktreeGraphProjectRoot}
         deviceName={worktreeGraphDevice?.name ?? localDeviceName ?? undefined}
-        currentWorktreePath={worktreeGraphSessionPath ?? worktreeGraphCurrentPath}
-        currentSessionId={currentSessionId ?? worktreeGraphSessionId ?? topBarSessionId}
+        currentWorktreePath={worktreeGraphSessionPath ?? (!worktreeGraphDevice || worktreeGraphDevice.id === currentDeviceId ? worktreeGraphCurrentPath : null)}
+        currentSessionId={worktreeGraphSessionId ?? (!worktreeGraphDevice || worktreeGraphDevice.id === currentDeviceId ? currentSessionId ?? topBarSessionId : null)}
+        preferredPath={worktreeGraphPreferredPath}
         remotePeer={worktreeGraphDevice && localDeviceId && worktreeGraphDevice.id !== localDeviceId ? worktreeGraphDevice.id : undefined}
         onClose={onCloseWorktreeGraph}
         onSwitchWorktree={onSwitchWorktree}
         onOpenSession={onOpenSession}
+        onSelectWorktree={onSelectWorktree}
         onNewSessionFromNode={onNewSessionFromNode}
       />
     )}

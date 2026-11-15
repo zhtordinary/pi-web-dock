@@ -11,7 +11,7 @@ const jiti = createJiti(import.meta.url, {
 await installEnglishTestLocale(jiti);
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-const { I18nProvider } = await jiti.import("@/hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { McpConfig, McpConfigView, mcpVisibleFocusFallback } = await jiti.import("./McpConfig.tsx");
 const { enLocale } = await jiti.import("@/lib/i18n/messages/en.ts");
 const source = await readFile(new URL("./McpConfig.tsx", import.meta.url), "utf8");

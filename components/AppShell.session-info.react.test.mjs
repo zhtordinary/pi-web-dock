@@ -7,7 +7,7 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { fsCache: false, jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { SessionInfoResourcePanel } = await jiti.import("./SessionInfoResourcePanel.tsx");
 const { SessionTopBarStats } = await jiti.import("./SessionTopBarStats.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
 const { useSessionDetails } = await jiti.import("../hooks/useSessionDetails.ts");
 const details = await jiti.import("../lib/session-details-client.ts");

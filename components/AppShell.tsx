@@ -727,7 +727,10 @@ async function loadLocalSession(sessionId: string): Promise<SessionInfo | null> 
     const session = body.sessions.find((item) => item.id === sessionId);
     if (session) return session;
   }
-  return null;
+  const response = await fetch(`/api/sessions?sessionId=${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+  if (!response.ok) throw new Error("Session lookup HTTP " + response.status);
+  const body = await response.json() as { sessions: SessionInfo[] };
+  return body.sessions.find((session) => session.id === sessionId) ?? null;
 }
 
 function withSearchHighlight(url: string, searchTerm?: string | null): string {
@@ -939,7 +942,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
   const worktreeCallbacksRef = useRef<AppShellWorktreeCallbacks | null>(null);
   const {
     talkMapOpen, talkMapProjectRoot, talkMapDevice, talkMapFocusSessionId, talkMapSidebarSessionId,
-    worktreeGraphOpen, worktreeGraphProjectRoot, worktreeGraphDevice, worktreeGraphSessionId, worktreeGraphSessionPath,
+    worktreeGraphOpen, worktreeGraphProjectRoot, worktreeGraphDevice, worktreeGraphSessionId, worktreeGraphSessionPath, worktreeGraphPreferredPath,
     closeTalkMap, closeWorktreeGraph, openTalkMap, openWorktreeGraph, handleOpenWorktreeGraph,
     handleWorktreeGraphNewSession, handleWorktreeGraphOpenSession, handleOpenTalkMapForSession,
     handleTalkMapSession, talkMapActionDevice, handleTalkMapSelectCard, handleTalkMapSessionMutation,
@@ -2804,7 +2807,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     device: SessionActivityDevice,
     sessionId: string,
     searchTerm?: string | null,
-    context?: { cwd?: string | null; path?: string | null },
+    context?: { cwd?: string | null; path?: string | null; worktreePath?: string | null },
   ) => {
     invalidateWorkspaceRestore();
     if (device.id === localDeviceId) {
@@ -2825,7 +2828,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     if (device.url) writeDeviceUrlCache(device.id, device.url);
     const url = buildEmbeddedReaderUrl(device, { localDeviceId, sessionId, sessionOnly: true });
     if (!url) return;
-    const highlightedUrl = withSearchHighlight(url, searchTerm);
+    const highlightedUrl = new URL(withSearchHighlight(url, searchTerm));
+    if (context?.worktreePath) highlightedUrl.searchParams.set("worktreeFocus", context.worktreePath);
     setExplorerOpen(false);
     setEmbeddedResourceSession({
       deviceId: device.id,
@@ -2837,7 +2841,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     setEmbeddedDeviceId(null);
     setEmbeddedIframeSessionId(null);
     setEmbeddedScopeAll(false);
-    setEmbeddedReaderUrl(highlightedUrl);
+    setEmbeddedReaderUrl(highlightedUrl.toString());
     setActiveTopPanel(null);
     setActivitySidebarMode(true);
     setReaderMode(false);
@@ -7471,7 +7475,9 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       worktreeGraphDevice={worktreeGraphDevice}
       worktreeGraphSessionId={worktreeGraphSessionId}
       worktreeGraphSessionPath={worktreeGraphSessionPath}
+      worktreeGraphPreferredPath={worktreeGraphPreferredPath}
       worktreeGraphCurrentPath={worktreeGraphCurrentPath}
+      currentDeviceId={remoteSession?.device.id ?? localDeviceId}
       topBarSessionId={topBarSessionId} currentSessionId={worktreeGraphSessionId ?? topBarSessionId}
       localDeviceId={localDeviceId}
       localDeviceName={localDeviceName}
@@ -7490,6 +7496,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         handleCwdChange(wtPath, worktreeGraphProjectRoot);
       }}
       onOpenSession={handleWorktreeGraphOpenSession}
+      onSelectWorktree={cancelWorktreeGraphOpen}
       onNewSessionFromNode={handleWorktreeGraphNewSession}
     />
     </>

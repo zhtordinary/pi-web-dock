@@ -7,7 +7,7 @@ import {renderToStaticMarkup} from 'react-dom/server';
 import {markupText,testTranslator} from './test-locale.mjs';
 const jiti=createJiti(import.meta.url,{jsx:{runtime:'automatic'},tsconfigPaths:true});
 const {MessageView}=await jiti.import('./MessageView.tsx');
-const {I18nProvider}=await jiti.import('../hooks/useI18n.tsx');
+const {I18nProvider}=await jiti.import("@/hooks/useI18n");
 const {createHistoryProjection,getHistoryWindow,readHistoryContent}=await jiti.import('../lib/session-history.ts');
 const {readHistoryEditMessage}=await jiti.import('../lib/history-edit-message.ts');
 const {TranscriptReader}=await jiti.import('../lib/transcript-reader.ts');

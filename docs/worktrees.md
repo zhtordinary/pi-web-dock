@@ -66,7 +66,7 @@ Removing a worktree does not delete:
 - Pi Web session history.
 - The main checkout.
 
-If the worktree has uncommitted or untracked files, Git refuses the removal. The worktree group then asks again before a force removal. Force removal discards the uncommitted files in that checkout, so use it only when you no longer need those changes. The graph's cleanup button states this up front and removes with force after its confirmation.
+Reader does not force-remove a checkout. Removal is refused if uncommitted, untracked or ignored files, associated session history or a process using the directory are found. The server checks the directory identity again at removal time and refuses when another Reader channel, the complete session inventory (including deleted session files), or process inspection cannot be confirmed. Windows currently refuses this action because process inspection is unavailable. These checks are snapshots, not locks against other tools starting concurrently; a network timeout leaves the outcome unknown and must not be retried automatically.
 
 ## Sessions and Worktrees
 
@@ -84,7 +84,7 @@ The worktree graph, the sidebar worktree menu, and **By worktree** grouping all 
 
 Creating a physical checkout is a separate, explicit operation: use **New worktree...** in the worktree menu and provide a branch name. A DevSpace, task, or other externally-created checkout is an ordinary Git worktree to Pi Web: it may open it, start a session there, and group its sessions; the graph's New session action never creates, renames, or removes it.
 
-The Git graph inspector's **Associated sessions** list includes visible, non-archived sessions whose `cwd` matches the selected worktree path, sessions whose successful tool history confirms they created that worktree, and sessions with a verified structured `pi-web:worktree-binding` record. Subagent sessions are projected onto their owning main session, including nested subagents, so child transcripts do not create a separate row; orphaned or cyclic subagent metadata is omitted when no main session can be resolved. Each main Session ID appears once; a row may carry more than one relation (`cwd`, `creator`, or `task-root`). Rows show the session title, short Session ID, relation labels, and activity status when available. Click a row to open that session directly. When the graph is opened from an active session, it selects that session's matching worktree or a linked worktree identified by a verified creation record. A worktree with no associated sessions shows an explicit empty state.
+The Git graph inspector's **Associated sessions** list includes visible, non-archived sessions whose `cwd` matches the selected worktree path or is inside it, sessions whose successful tool history confirms they created that worktree, and sessions with a verified structured `pi-web:worktree-binding` record. Subagent sessions are projected onto their owning main session, including nested subagents; relation labels distinguish child evidence from the main session's own directory, creation or binding. A row's activity status is the main session's status. Orphaned or cyclic subagent metadata is omitted when no main session can be resolved. Click a row to open that main session; reopening Git preserves the originating worktree selection for that session and device. Otherwise the graph selects the session's matching worktree or one identified by a verified creation record. The current session is identified in its row, and a worktree with no associated sessions shows an explicit empty state.
 
 A structured binding is an append-only native session entry with this shape:
 
@@ -106,7 +106,7 @@ In **By worktree** grouping, the main checkout is labelled `Main`. Every linked 
 
 ### Reading graph status
 
-The graph opens with **All** selected. `CURRENT` marks only the current worktree path when it matches a listed checkout. Creation history, structured bindings, and associated session activity do not set this marker.
+The graph opens with **All** selected. `CURRENT` marks the listed checkout containing the current session's actual working directory, including a subdirectory; the deepest matching checkout wins. An older peer that cannot resolve subdirectories does not guess the marker. The selected node can differ from `CURRENT`. Creation history, structured bindings, and associated session activity do not set this marker.
 
 The graph separates Git position from integration history:
 

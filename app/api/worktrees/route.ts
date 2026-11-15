@@ -16,6 +16,7 @@ import { isExistingDirectory } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { filterHiddenSessions } from "@/lib/hidden-filter";
 import { getSessionEntries, listAllSessions } from "@/lib/session-reader";
+import { assertWorktreeRemovalSafe } from "@/lib/worktree-removal-safety";
 import { findWorktreeCreationRecords } from "@/lib/worktree-creation-history";
 import { findWorktreeBindingRecords } from "@/lib/worktree-bindings";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
@@ -116,12 +117,15 @@ export async function GET(req: Request) {
     const graph = searchParams.get("graph") === "1" && isGit
       ? await buildWorktreeGraph(existsSync(cwd) ? cwd : project.projectRoot, { forceRefresh: searchParams.get("refresh") === "1" })
       : undefined;
+    const sessionCwd = searchParams.get("sessionCwd");
+    const sessionWorktreePath = sessionCwd && isExistingDirectory(sessionCwd) ? findCurrentWorktreePath(worktrees, sessionCwd) : null;
     return NextResponse.json({
       projectRoot: project.projectRoot,
       projectKey,
       isGit,
       isTopLevel: project.isTopLevel,
       currentWorktreePath,
+      ...(searchParams.has("sessionCwd") ? { sessionWorktreePath } : {}),
       worktrees,
       ...(graph ? { graph: { ...graph, projectKey } } : {}),
       ...(graph?.githubRepository ? { githubRepository: graph.githubRepository } : {}),
@@ -165,7 +169,7 @@ export async function PATCH(req: Request) {
   }
 }
 
-// DELETE /api/worktrees  body: { cwd, path, force? }
+// DELETE /api/worktrees  body: { cwd, path }
 export async function DELETE(req: Request) {
   const body = await readMutationBody(req);
   if (body instanceof NextResponse) return body;
@@ -174,13 +178,15 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "path is required" }, { status: 400 });
   }
   try {
-    await removeWorktree(body.cwd, path, body.force === true);
+    const identity = await assertWorktreeRemovalSafe(body.cwd, path);
+    if (req.signal.aborted) throw new Error("Worktree safety unknown: the request was cancelled");
+    await removeWorktree(body.cwd, path, false, identity);
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = errorMessage(error);
-    // Git refuses to remove a worktree with uncommitted files or submodule
-    // state without --force; report it so the UI can ask before discarding.
+    // Report dirty or unavailable safety evidence without offering a force retry.
     const dirty = worktreeRemovalRequiresForce(message);
-    return NextResponse.json({ error: message, dirty }, { status: dirty ? 409 : 400 });
+    const unsafe = message.startsWith("Worktree removal refused:") || message.startsWith("Worktree safety unknown:");
+    return NextResponse.json({ error: message, dirty }, { status: dirty || unsafe ? 409 : 400 });
   }
 }

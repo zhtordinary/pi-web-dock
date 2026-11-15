@@ -12,7 +12,7 @@ const {
   getConfigSidebarMaxWidth,
   ConfigPanelRefreshButton,
 } = await jiti.import("./ConfigPanelShared.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { getLocalePlugin } = await jiti.import("../lib/i18n/registry.ts");
 
 test("skills and plugins share the same bounded sidebar defaults", () => {

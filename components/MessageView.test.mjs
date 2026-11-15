@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
-import { installEnglishTestLocale, markupText, testTranslator } from "./test-locale.mjs";
+import { installEnglishTestLocale, loadI18nTestModule, markupText, testTranslator } from "./test-locale.mjs";
 
 const jiti = createJiti(import.meta.url, {
   fsCache: false,
@@ -22,7 +22,7 @@ const {
   replaceUserMessageText,
 } = await jiti.import("./MessageView.tsx");
 const { scrollSessionSearchTarget } = await jiti.import("../lib/session-search-dom.ts");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await loadI18nTestModule(jiti);
 
 function renderMessage(message, props = {}) {
   return renderToStaticMarkup(

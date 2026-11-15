@@ -133,6 +133,22 @@ test("model config relay requests receive time for their 20 second upstream budg
   }
 });
 
+test("remote worktree removal has time for safety checks without changing other mutation deadlines", async () => {
+  const originalTimeout = AbortSignal.timeout;
+  const observed = [];
+  AbortSignal.timeout = (milliseconds) => { observed.push(milliseconds); return new AbortController().signal; };
+  const mock = mockFetch(() => jsonResponse({ ok: true }));
+  try {
+    await DELETE(new Request("http://x/api/remote/worktrees?peer=debian", {
+      method: "DELETE", headers: { "content-type": "application/json" }, body: "{}",
+    }), { params: Promise.resolve({ path: ["worktrees"] }) });
+    assert.deepEqual(observed, [60_000]);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+    mock.restore();
+  }
+});
+
 test("GET forwards Range and preserves 206 file metadata without a short timeout", async () => {
   let captured = {};
   const mock = mockFetch((url, init) => {

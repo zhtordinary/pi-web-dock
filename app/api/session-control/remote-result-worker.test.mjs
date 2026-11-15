@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,8 +10,8 @@ const require = createRequire(import.meta.url); const core = require("../../../b
 import { runProcess as run } from "../../../test-support/test-process.mjs";
 
 test("remote tool result returns through a real worker and signed owner peer route", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "remote-result-worker-")); const rootA = join(base, "a"); const rootB = join(base, "b"); const keyA = core.generatePeerKeyPair(); const keyB = core.generatePeerKeyPair(); t.after(() => rmSync(base, { recursive: true, force: true }));
-  const owner = { deviceId: "device-a", sessionId: "owner", sessionFile: "/fixture/a/owner.jsonl" }; const target = { deviceId: "device-b", sessionId: "worker", sessionFile: "/fixture/b/worker.jsonl" };
+  const base = mkdtempSync(join(tmpdir(), "remote-result-worker-")); const rootA = join(base, "a"); const rootB = join(base, "b"); mkdirSync(rootA, { recursive: true }); mkdirSync(rootB, { recursive: true }); const keyA = core.generatePeerKeyPair(); const keyB = core.generatePeerKeyPair(); t.after(() => rmSync(base, { recursive: true, force: true }));
+  const owner = { deviceId: "device-a", sessionId: "owner", sessionFile: join(rootA, "owner.jsonl") }; const target = { deviceId: "device-b", sessionId: "worker", sessionFile: join(rootB, "worker.jsonl") };
   const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, interopDefault: true, moduleCache: false }); const route = await jiti.import("./peer/route.ts");
   const old = { root: process.env.PI_WEB_SESSION_WAIT_STATE_ROOT, device: process.env.PI_WEB_DEVICE_ID, config: process.env.PI_WEB_SESSION_ACTIVITY_CONFIG }; t.after(() => { for (const [key, value] of Object.entries({ PI_WEB_SESSION_WAIT_STATE_ROOT: old.root, PI_WEB_DEVICE_ID: old.device, PI_WEB_SESSION_ACTIVITY_CONFIG: old.config })) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
   const server = createServer(async (request, response) => { const chunks = []; for await (const chunk of request) chunks.push(chunk); const oldEnv = { root: process.env.PI_WEB_SESSION_WAIT_STATE_ROOT, device: process.env.PI_WEB_DEVICE_ID, config: process.env.PI_WEB_SESSION_ACTIVITY_CONFIG }; process.env.PI_WEB_SESSION_WAIT_STATE_ROOT = rootA; process.env.PI_WEB_DEVICE_ID = "device-a"; process.env.PI_WEB_SESSION_ACTIVITY_CONFIG = JSON.stringify({ device: { id: "device-a" }, peers: [{ id: "device-b", url: `http://127.0.0.1:${server.address().port}` }] }); try { const result = await route.POST(new Request(`http://127.0.0.1${request.url}`, { method: request.method, headers: { "content-type": request.headers["content-type"] || "application/json", host: "127.0.0.1" }, body: Buffer.concat(chunks) })); response.writeHead(result.status, Object.fromEntries(result.headers.entries())); response.end(Buffer.from(await result.arrayBuffer())); } catch (error) { response.writeHead(500, { "content-type": "application/json" }); response.end(JSON.stringify({ error: String(error) })); } finally { process.env.PI_WEB_SESSION_WAIT_STATE_ROOT = oldEnv.root; process.env.PI_WEB_DEVICE_ID = oldEnv.device; process.env.PI_WEB_SESSION_ACTIVITY_CONFIG = oldEnv.config; } }); await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve)); t.after(() => server.close()); const peerUrl = `http://127.0.0.1:${server.address().port}`;

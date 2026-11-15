@@ -6,7 +6,7 @@ import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { interopDefault: true, jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { QueueRecoveryPanel } = await jiti.import("./QueueRecoveryPanel.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const entry = (status = "committed", imageCount = 1) => ({ operationId: "saved-copy", status, createdAt: "now", expected: { bootId: "boot", queueRevision: 1 }, queue: { bootId: "boot", queueRevision: 1, steering: [{ itemId: "item-A", role: "user", text: "captured", hasImages: imageCount > 0, imageCount }], followUp: [] } });
 function render(overrides = {}) {
   const recovery = { client: { hasDurableDraft: () => false }, entries: [], busy: null, loading: false, error: null, notice: null, copy: null, ...overrides };

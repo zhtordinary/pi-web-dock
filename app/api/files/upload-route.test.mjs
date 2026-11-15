@@ -18,11 +18,13 @@ fs.writeFileSync(projectsFile, JSON.stringify({ projects: [{ path: workspace, ad
 
 const previousEnv = {
   HOME: process.env.HOME,
+  USERPROFILE: process.env.USERPROFILE,
   XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
   PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
   PI_WEB_PROJECTS_FILE: process.env.PI_WEB_PROJECTS_FILE,
 };
 process.env.HOME = home;
+process.env.USERPROFILE = home;
 process.env.XDG_CONFIG_HOME = path.join(home, ".config");
 process.env.PI_CODING_AGENT_DIR = path.join(home, ".pi", "agent");
 process.env.PI_WEB_PROJECTS_FILE = projectsFile;

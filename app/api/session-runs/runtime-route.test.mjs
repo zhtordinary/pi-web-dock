@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { createJiti } from "jiti";
 
@@ -15,8 +16,34 @@ const bin = join(home, "bin");
 const gitCalls = join(home, "git-calls");
 for (const directory of [selectedProject, unrelatedProject, sessionsDir, bin]) await mkdir(directory, { recursive: true });
 for (const directory of [selectedProject, unrelatedProject]) await mkdir(join(directory, ".git"));
-const fakeGit = join(bin, "git");
-await writeFile(fakeGit, '#!/bin/sh\nprintf "%s\\n" "$2" >> "$PI_TEST_GIT_CALLS"\nif [ -n "$PI_TEST_GIT_GATE" ]; then printf "started\\n" > "$PI_TEST_GIT_STARTED"; while [ ! -f "$PI_TEST_GIT_GATE" ]; do /bin/sleep 0.05; done; fi\nprintf "%s\\n" "$2/.git" "$2/.git" "$2" main\n');
+let fakeGit;
+const previousNodeOptions = process.env.NODE_OPTIONS;
+if (process.platform === "win32") {
+  // Production resolves Git with execFile("git", ...), not a shell. A .cmd
+  // shim is therefore not executable here; copy the real Node executable and
+  // preload a fixture module so Windows exercises a genuine .exe path.
+  const fakeGitScript = join(bin, "git-fixture.mjs");
+  await writeFile(fakeGitScript, `import { appendFileSync, existsSync, writeFileSync, writeSync } from "node:fs";
+import { join } from "node:path";
+const args = [...process.execArgv, ...process.argv.slice(1)];
+const targetIndex = args.indexOf("-C");
+const target = targetIndex >= 0 ? args[targetIndex + 1] ?? "" : "";
+appendFileSync(process.env.PI_TEST_GIT_CALLS, String(target) + "\\n");
+if (process.env.PI_TEST_GIT_GATE) {
+  writeFileSync(process.env.PI_TEST_GIT_STARTED, "started\\n");
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  while (!existsSync(process.env.PI_TEST_GIT_GATE)) Atomics.wait(wait, 0, 0, 50);
+}
+writeSync(1, [join(target, ".git"), join(target, ".git"), target, "main"].join("\\n") + "\\n");
+process.exit(0);
+`, "utf8");
+  fakeGit = join(bin, "git.exe");
+  await copyFile(process.execPath, fakeGit);
+  process.env.NODE_OPTIONS = [previousNodeOptions, `--import=${pathToFileURL(fakeGitScript).href}`].filter(Boolean).join(" ");
+} else {
+  fakeGit = join(bin, "git");
+  await writeFile(fakeGit, '#!/bin/sh\nprintf "%s\\n" "$2" >> "$PI_TEST_GIT_CALLS"\nif [ -n "$PI_TEST_GIT_GATE" ]; then printf "started\\n" > "$PI_TEST_GIT_STARTED"; while [ ! -f "$PI_TEST_GIT_GATE" ]; do /bin/sleep 0.05; done; fi\nprintf "%s\\n" "$2/.git" "$2/.git" "$2" main\n', "utf8");
+}
 await chmod(fakeGit, 0o755);
 process.env.HOME = home;
 process.env.PATH = `${bin}${delimiter}${process.env.PATH ?? ""}`;
@@ -139,5 +166,6 @@ test("a session restored during new-favorite enrichment is not returned as archi
 });
 
 test.after(async () => {
+  if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previousNodeOptions;
   await rm(home, { recursive: true, force: true });
 });

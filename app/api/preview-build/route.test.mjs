@@ -10,6 +10,10 @@ const routeModule = await jiti.import("./route.ts");
 const buildModule = await jiti.import("../reader/build/route.ts");
 const { GET } = buildModule;
 
+function linkDirectory(target, link) {
+  symlinkSync(target, link, process.platform === "win32" ? "junction" : undefined);
+}
+
 test("preview route exports only the Next.js GET handler", () => {
   assert.deepEqual(Object.keys(routeModule).sort(), ["GET"]);
   assert.deepEqual(Object.keys(buildModule).sort(), ["GET"]);
@@ -58,7 +62,7 @@ test("preview identity binds 30142 to the physical production selector", async (
   const selector = join(install, "preview-30142");
   mkdirSync(releases, { recursive: true });
   const identity = writeIdentity(target);
-  symlinkSync(target, selector);
+  linkDirectory(target, selector);
   process.env.PI_WEB_INSTALL_DIR = install;
   process.env.PI_WEB_30142_SELECTOR = selector;
   process.env.PI_WEB_BOUND_PORT = "30142";
@@ -110,7 +114,7 @@ test("preview identity rejects test/source directories, schema-4 metadata and dr
   const selector = join(install, "preview-30142");
   mkdirSync(releases, { recursive: true });
   writeIdentity(target);
-  symlinkSync(target, selector);
+  linkDirectory(target, selector);
   process.env.PI_WEB_INSTALL_DIR = install;
   process.env.PI_WEB_30142_SELECTOR = selector;
   process.env.PI_WEB_BOUND_PORT = "30142";
@@ -134,7 +138,7 @@ test("preview identity rejects test/source directories, schema-4 metadata and dr
   mkdirSync(outside, { recursive: true });
   writeIdentity(outside);
   rmSync(selector);
-  symlinkSync(outside, selector);
+  linkDirectory(outside, selector);
   process.chdir(outside);
   assert.equal((await GET(new Request("http://localhost:30142/api/preview-build"))).status, 503);
 });
@@ -186,8 +190,8 @@ test("production checks current and never mistakes a newer preview for a product
   writeIdentity(production, { readerCommit: "d".repeat(40) });
   writeIdentity(preview);
   const currentSelector = join(install, "current"), previewSelector = join(install, "preview-30142");
-  symlinkSync(production, currentSelector);
-  symlinkSync(preview, previewSelector);
+  linkDirectory(production, currentSelector);
+  linkDirectory(preview, previewSelector);
   process.env.PI_WEB_INSTALL_DIR = install;
   process.env.PI_WEB_30142_SELECTOR = previewSelector;
   t.after(() => {
@@ -225,7 +229,7 @@ test("production checks current and never mistakes a newer preview for a product
   const outside = join(root, "outside-releases");
   writeIdentity(outside);
   rmSync(currentSelector);
-  symlinkSync(outside, currentSelector);
+  linkDirectory(outside, currentSelector);
   process.chdir(outside);
   assert.equal((await GET()).status, 503, "production retains the physical releases-root boundary");
 });

@@ -4,6 +4,7 @@ import { stat as statAsync } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { samePath, toNativePath } from "./paths";
+import { isPathWithinRoots } from "./path-security";
 import { getGitRemoteUrls } from "./git-changes";
 import { selectGitHubRepository } from "./git-github";
 import {
@@ -645,7 +646,11 @@ function findWorktreeByPath(worktrees: readonly WorktreeInfo[], candidate: strin
 }
 
 export function findCurrentWorktreePath(worktrees: readonly WorktreeInfo[], cwd: string): string | null {
-  return findWorktreeByPath(worktrees, realPathOrSelf(cwd))?.path ?? null;
+  if (!cwd || !existsSync(cwd)) return null;
+  const actualCwd = realPathOrSelf(cwd);
+  return [...worktrees]
+    .sort((a, b) => b.path.length - a.path.length)
+    .find((worktree) => isPathWithinRoots(actualCwd, new Set([realPathOrSelf(worktree.path)])))?.path ?? null;
 }
 
 function sanitizeBranchForDir(branch: string): string {
@@ -732,13 +737,36 @@ export async function unregisterTrashedWorktree(target: { cwd: string; path: str
   invalidateProjectCache();
 }
 
-export async function removeWorktree(cwd: string, worktreePath: string, force = false): Promise<void> {
+export interface WorktreeDirectoryIdentity {
+  path: string;
+  dev: number;
+  ino: number;
+}
+
+export function assertWorktreeDirectoryIdentity(path: string, expected: WorktreeDirectoryIdentity): void {
+  try {
+    const stat = lstatSync(path);
+    if (Number.isSafeInteger(expected.dev) && Number.isSafeInteger(expected.ino) && expected.ino > 0
+      && stat.isDirectory() && !stat.isSymbolicLink() && stat.dev === expected.dev && stat.ino === expected.ino
+      && samePath(realpathSync(path), expected.path)) return;
+  } catch { /* The captured directory is no longer accessible. */ }
+  throw new Error("Worktree safety unknown: directory identity changed");
+}
+
+export async function removeWorktree(cwd: string, worktreePath: string, force = false, expected?: WorktreeDirectoryIdentity): Promise<void> {
   const worktrees = await listWorktrees(cwd);
   // Git reports worktrees by their real path; the caller's may run through a link
   // (macOS's /var and /tmp are links to /private/...).
   const target = findWorktreeByPath(worktrees, realPathOrSelf(worktreePath));
   if (!target) throw new Error(`Not a worktree of this repository: ${worktreePath}`);
   if (target.isMain) throw new Error("Cannot remove the main worktree");
+  if (expected) assertWorktreeDirectoryIdentity(target.path, expected);
+  if (!force) {
+    const summary = (await collectWorktreeDirtySummaries([target])).get(target.path);
+    if (!summary || summary.state === "unavailable") throw new Error("Worktree safety unknown: working tree status is unavailable");
+    if (summary.ignoredCount) throw new Error("Worktree removal refused: ignored files are present");
+  }
+  if (expected) assertWorktreeDirectoryIdentity(target.path, expected);
 
   try {
     await git(cwd, ["worktree", "remove", ...(force ? ["--force"] : []), target.path]);

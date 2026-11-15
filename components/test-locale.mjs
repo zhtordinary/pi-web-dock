@@ -20,6 +20,25 @@ export async function installEnglishTestLocale(jiti) {
 }
 
 /**
+ * Load the provider through the same canonical specifier used by components.
+ * Keep the extensionful variant as a Windows Jiti identity diagnostic.
+ */
+export async function loadI18nTestModule(jiti) {
+  const canonical = await jiti.import("@/hooks/useI18n");
+  const extensionful = await jiti.import("@/hooks/useI18n.tsx");
+  const canonicalStable = (await jiti.import("@/hooks/useI18n")).I18nProvider === canonical.I18nProvider;
+  const extensionfulMatches = extensionful.I18nProvider === canonical.I18nProvider;
+  if (!canonicalStable || !extensionfulMatches) {
+    console.warn(`[i18n-test-loader] ${JSON.stringify({
+      platform: process.platform,
+      canonicalStable,
+      extensionfulMatches,
+    })}`);
+  }
+  return canonical;
+}
+
+/**
  * Translate with the shipped catalog, for production code evaluated outside
  * React. An unknown key fails the test instead of rendering the key itself.
  */

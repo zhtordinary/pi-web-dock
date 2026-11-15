@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -55,12 +56,18 @@ test("GET /api/worktrees supports basic, graph, and inspect queries", async (t) 
   assert.equal(data1.worktrees.length, 2);
   assert.equal(data1.graph, undefined);
 
+  const nested = path.join(linked, "nested");
+  await mkdir(nested);
+  const nestedData = await (await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(nested)}`))).json();
+  assert.equal(nestedData.currentWorktreePath, linked, "a subdirectory resolves to its registered worktree");
+
   // 2. Query with graph=1
-  const req2 = new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&graph=1&refresh=1`);
+  const req2 = new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&graph=1&refresh=1&sessionCwd=${encodeURIComponent(nested)}`);
   const res2 = await GET(req2);
   assert.equal(res2.status, 200);
   const data2 = await res2.json();
   assert.ok(data2.graph);
+  assert.equal(data2.sessionWorktreePath, linked);
   assert.equal(data2.graph.totalWorktrees, 2);
   assert.equal(data2.graph.targetBranch, "main");
   assert.equal(data2.graph.counts.main, 1);
@@ -129,7 +136,7 @@ test("POST, PATCH and DELETE /api/worktrees manage plain Git worktrees and keep 
   const unconfigured = await POST(jsonRequest("POST", { cwd: repo, branch: "not-created" }));
   assert.equal(unconfigured.status, 400);
   assert.match((await unconfigured.json()).error, /Add \/.worktrees\/ to the project root .gitignore/);
-  await writeFile(path.join(repo, ".gitignore"), "/.worktrees/\n");
+  await writeFile(path.join(repo, ".gitignore"), "/.worktrees/\nfixture-cache/\n");
   await git(repo, ["add", ".gitignore"]);
   await git(repo, ["commit", "-m", "ignore task checkouts"]);
 
@@ -153,7 +160,32 @@ test("POST, PATCH and DELETE /api/worktrees manage plain Git worktrees and keep 
   assert.equal(refused.status, 409);
   assert.equal((await refused.json()).dirty, true);
   const forced = await DELETE(jsonRequest("DELETE", { cwd: repo, path: worktree.path, force: true }));
-  assert.equal(forced.status, 200);
+  assert.equal(forced.status, 409, "the API must not discard uncommitted data even when force is requested");
+  assert.equal(await readFile(path.join(worktree.path, "draft.txt"), "utf8"), "uncommitted\n");
+  await rm(path.join(worktree.path, "draft.txt"));
+
+  const ignored = path.join(worktree.path, "fixture-cache");
+  await mkdir(ignored);
+  await writeFile(path.join(ignored, "keep.txt"), "ignored data\n");
+  const ignoredResponse = await DELETE(jsonRequest("DELETE", { cwd: repo, path: worktree.path, force: true }));
+  assert.equal(ignoredResponse.status, 409, "ignored files must not be silently discarded");
+  assert.equal(await readFile(path.join(ignored, "keep.txt"), "utf8"), "ignored data\n");
+  await rm(ignored, { recursive: true });
+
+  const child = spawn(process.execPath, ["-e", "process.stdout.write('ready'); setInterval(() => {}, 1000)"], { cwd: worktree.path, stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  await once(child.stdout, "data");
+  const busy = await DELETE(jsonRequest("DELETE", { cwd: repo, path: worktree.path }));
+  assert.equal(busy.status, 409, "a process using the worktree prevents removal");
+  child.kill();
+  await once(child, "exit");
+  const removed = await DELETE(jsonRequest("DELETE", { cwd: repo, path: worktree.path }));
+  if (process.platform === "win32") {
+    assert.equal(removed.status, 409, "unsupported process inspection must fail closed");
+    assert.match((await removed.json()).error, /process inspection is unavailable/);
+    return;
+  }
+  assert.equal(removed.status, 200);
   const after = await (await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}`))).json();
   assert.equal(after.worktrees.length, 1);
   const { stdout } = await execFileAsync("git", ["-C", repo, "branch", "--list", "side-ask"]);

@@ -88,7 +88,7 @@ async function mount(embedded = false) {
   const previous = new Map(["fetch", "EventSource", "ResizeObserver", "IntersectionObserver", "requestAnimationFrame", "cancelAnimationFrame", "__readerOwnerProbe"].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   const restore = installDom(embedded);
   const { AppShell } = await jiti.import("./AppShell.tsx");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);

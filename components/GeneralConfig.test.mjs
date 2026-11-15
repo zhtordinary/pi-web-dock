@@ -10,7 +10,7 @@ const { getLocalePlugin, getSupportedLocales } = await jiti.import("../lib/i18n/
 const { translateMessage } = await jiti.import("../lib/i18n/format.ts");
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { GeneralConfig } = await jiti.import("./GeneralConfig.tsx");
 
 test("GeneralConfig renders a readable default shortcut and only the width slider", () => {

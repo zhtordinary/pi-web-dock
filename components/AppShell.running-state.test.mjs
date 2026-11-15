@@ -15,7 +15,7 @@ await installEnglishTestLocale(jiti);
 const inPageFork = markupText(testTranslator("en")("message.inPageFork"));
 const { MessageView } = await jiti.import("./MessageView.tsx");
 const { ProcessDetailsGroup } = await jiti.import("./ProcessDetailsGroup.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function runningHarness() {

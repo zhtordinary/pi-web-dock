@@ -26,7 +26,7 @@ const {
   collectAsyncStatusIds,
   mergeAsyncStatusModelMetadata,
 } = await jiti.import("./ExtensionWidgets.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 function renderWidgets(props) {
   return renderToStaticMarkup(

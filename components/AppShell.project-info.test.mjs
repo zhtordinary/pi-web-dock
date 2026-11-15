@@ -42,9 +42,15 @@ test("project info labels exist in every bundled Reader locale", () => {
 });
 
 
-test("worktree graph highlights the session cwd before its shared project root", () => {
+test("worktree graph uses the session cwd without borrowing a different device's path", () => {
   assert.match(appShell, /const worktreeGraphCurrentPath = remoteSession\?\.sessionInfo\?\.cwd[\s\S]*?selectedSession\?\.cwd[\s\S]*?selectedSession\?\.projectRoot/);
-  assert.match(worktreeShell, /currentWorktreePath=\{worktreeGraphSessionPath \?\? worktreeGraphCurrentPath\}/);
+  const expression = worktreeShell.match(/currentWorktreePath=\{([^\n]+)\}/)?.[1];
+  assert.ok(expression, "worktree graph current path expression missing");
+  const currentPath = new Function("worktreeGraphSessionPath", "worktreeGraphDevice", "currentDeviceId", "worktreeGraphCurrentPath", `return (${expression});`);
+  assert.equal(currentPath("/remote/task", { id: "remote" }, "local", "/local"), "/remote/task");
+  assert.equal(currentPath(null, { id: "local" }, "local", "/local"), "/local");
+  assert.equal(currentPath(null, null, "local", "/local"), "/local");
+  assert.equal(currentPath(null, { id: "remote" }, "local", "/local"), null);
   assert.match(appShell, /currentSessionId=\{worktreeGraphSessionId \?\? topBarSessionId\}/);
 });
 

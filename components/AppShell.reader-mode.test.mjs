@@ -1440,7 +1440,7 @@ function navigationHarness(options = {}) {
     "highlightTerm", "initialSessionRestored", "embeddedModalOpen", "embeddedModalKind", "embeddedSlashDetails", "embeddedImagePreview", "embeddedFileViewerOpen"]) {
     s[`set${name[0].toUpperCase()}${name.slice(1)}`] = (value) => { s[name] = typeof value === "function" ? value(s[name]) : value; };
   }
-  for (const name of ["buildEmbeddedReaderUrl", "loadLocalSession", "buildNewSessionDraftKey", "stripLegacyWorkspaceLayout"]) {
+  for (const name of ["buildEmbeddedReaderUrl", "loadLocalSession", "withSearchHighlight", "buildNewSessionDraftKey", "stripLegacyWorkspaceLayout"]) {
     const node = find(app, (node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
     if (node) s[name] = evaluate(`(() => { ${node.getText(app)}; return ${name}; })()`, h.scope);
   }
@@ -1559,6 +1559,16 @@ test("navigation: embedded forwarding uses device id rather than a shared hostna
   assert.equal(h.state.posted.length, 1);
   assert.equal(h.state.posted[0].type, "pi-web:open-session");
   assert.equal(h.state.posted[0].device.id, "remote");
+});
+
+test("navigation: remote graph origin is carried separately from the session execution cwd", () => {
+  const h = navigationHarness();
+  const s = h.state;
+  s.openRemoteSession({ id: "remote", name: "Remote", url: "https://remote.test:30143" }, "remote-session", null, { worktreePath: "/remote/repo/task" });
+  const url = new URL(s.embeddedReaderUrl);
+  assert.equal(url.searchParams.get("session"), "remote-session");
+  assert.equal(url.searchParams.get("worktreeFocus"), "/remote/repo/task");
+  assert.equal(s.embeddedResourceSession.cwd, null, "the selected worktree is not the remote session's cwd");
 });
 
 test("navigation: a forwarded local session resolves locally and a stale lookup cannot replace a newer draft", async () => {

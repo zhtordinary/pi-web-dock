@@ -15,7 +15,7 @@ import {
   getRpcSessionInfos,
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
-import { selectHiddenSessions } from "@/lib/hidden-filter";
+import { filterHiddenSessions, selectHiddenSessions } from "@/lib/hidden-filter";
 import { readFavoriteState } from "@/lib/favorite-state";
 import { readSessionCategoryState, sessionCategoryFromState } from "@/lib/session-category-state";
 import { matchesSessionStorageScope } from "@/lib/session-storage-scope";
@@ -44,6 +44,18 @@ export async function GET(req: Request) {
     const archivedOnly = searchParams.get("archived") === "1";
     const force = searchParams.get("force") === "1";
     const summary = searchParams.get("summary") === "1";
+    const requestedSessionId = searchParams.get("sessionId");
+
+    if (requestedSessionId) {
+      const [persisted, archived, runtime] = await Promise.all([
+        listAllSessions({ readOnly: true }),
+        listArchivedSessions({ readOnly: true }),
+        attachSessionProjectInfo(getRpcSessionInfos()),
+      ]);
+      const match = filterHiddenSessions([...mergeSessionLists(persisted, runtime), ...archived])
+        .find((session) => session.id === requestedSessionId);
+      return NextResponse.json({ sessions: applySubprojectAssignments(match ? [match] : []) }, { headers: { "Cache-Control": "no-store" } });
+    }
 
     if (archivedOnly) {
       const sessions = await listArchivedSessions({ force });

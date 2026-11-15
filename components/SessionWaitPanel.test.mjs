@@ -46,7 +46,7 @@ test("history is a lazy secondary disclosure and empty sessions do not render fl
   const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, alias: { "@": process.cwd() }, moduleCache: true });
   const React = await jiti.import("react");
   const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const { SessionWaitPanel, SessionWaitHistory } = await jiti.import("./SessionWaitPanel.tsx");
   const render = element => renderToStaticMarkup(React.createElement(I18nProvider, null, element));
   assert.equal(render(React.createElement(SessionWaitPanel, { sessionId: "A" })), "");

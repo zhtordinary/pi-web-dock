@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { createJiti } from "jiti";
 
@@ -21,7 +22,7 @@ test("rejects relative GitHub cwd", async () => {
 });
 
 test("does not expose a GitHub data shell without an eligible repository", async () => {
-  const response = await GET(request("cwd=%2Ftmp"));
+  const response = await GET(request(`cwd=${encodeURIComponent(tmpdir())}`));
   assert.equal(response.status, 200);
   const { snapshot } = await response.json();
   assert.equal(snapshot.available, false);

@@ -12,7 +12,7 @@ const jiti = createJiti(import.meta.url, {
 });
 await installEnglishTestLocale(jiti);
 const { SystemPromptInspector } = await jiti.import("./SystemPromptInspector.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 function inspectionWithCost(status = "calculated") {
   const baseline = { sha256: "a".repeat(64), characters: 14, estimatedTokens: 17 };

@@ -240,7 +240,7 @@ test("real composer isolates same-id peers and copies ambiguous legacy drafts on
   globalThis.fetch = async () => response({});
   const store = await jiti.import("../lib/draft-store.ts");
   const { ChatInput } = await jiti.import("./ChatInput.tsx");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const id = "legacy-draft-ownership-test";
   const peerA = store.sessionDraftKey(id, "peer-a");
   const peerB = store.sessionDraftKey(id, "peer-b");
@@ -314,7 +314,7 @@ test("production ChatWindow isolates 100 streaming deltas to StreamingReply in r
   };
 
   const { ChatWindow } = await jiti.import("./ChatWindow.tsx");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const counts = new Map();
   const probe = (component, entryId, streaming) => {
     const key = component === "MessageView"
@@ -438,7 +438,7 @@ test("production ChatWindow probe observes a real prop rerender on the same moun
   };
 
   const { ChatWindow } = await jiti.import("./ChatWindow.tsx");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const counts = new Map();
   const probe = (component, entryId, streaming) => {
     const key = component === "MessageView"
@@ -539,7 +539,7 @@ test("accepted draft promotion preserves the in-flight reply until the next delt
   };
   const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
   const { useStreamingSelector, selectStreamingMessage } = await jiti.import("../hooks/useStreamingSelector.ts");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const current = { agent: null, promoted: false };
   function LiveReply({ store }) {
     const message = useStreamingSelector(store, selectStreamingMessage);
@@ -625,7 +625,7 @@ test("late bash completion from an unmounted draft cannot promote or rekey its r
     return response({});
   };
   const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const calls = [];
   const inputRef = { current: { rekeyDraft: (...args) => calls.push(["old", ...args]), restoreSubmission() {} } };
   const state = { agent: null, promotions: [] };
@@ -669,7 +669,7 @@ test("a manually recovered legacy historical edit still submits as edit_history"
   const store = await jiti.import("../lib/draft-store.ts");
   const { ChatInput } = await jiti.import("./ChatInput.tsx");
   const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const peer = "peer-legacy-edit";
   const oldEditKey = store.legacyHistoryDraftKey(SESSION_ID, peer);
   const ownedKey = store.sessionDraftKey(SESSION_ID, peer);
@@ -756,7 +756,7 @@ test("historical edit acknowledgement preserves a reply that started before the 
     return response({});
   };
   const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const current = { agent: null };
   const chatInputRef = { current: { replaceMessage: () => true, restoreSubmission() {} } };
   function Harness() {
@@ -821,7 +821,7 @@ test("a late fork RPC from an unmounted session cannot navigate the new peer", a
     return response({});
   };
   const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const state = { agent: null, forks: [] };
   function Harness({ peer }) {
     state.agent = useAgentSession({ session, sessionRunning: false, newSessionCwd: null, newSessionDraftKey: null, remotePeer: peer, onSessionForked: (result) => state.forks.push(result) });
@@ -851,7 +851,7 @@ test("a late fork RPC from an unmounted session cannot navigate the new peer", a
 async function mountLiveMinimap(atLiveTail, withToolTurn = false) {
   const { ChatMinimap } = await jiti.import("./ChatMinimap.tsx");
   const { createStreamingStore } = await jiti.import("../lib/streaming-message.ts");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const store = createStreamingStore();
   store.dispatch({ type: "snapshot", message: { role: "assistant", content: [{ type: "text", text: "initial live answer" }], timestamp: 3, provider: "fixture", model: "fixture-model" } });
   const scroll = document.createElement("div");
@@ -953,7 +953,7 @@ test("the real Sidekick drawer dismisses only its floating view on parent messag
   Object.defineProperty(window, "parent", { configurable: true, value: parent });
   globalThis.fetch = async () => response({ entries: [] });
   const { SidekickDrawer, SIDEKICK_RIGHT_PANEL_TARGET_ID } = await jiti.import("./SidekickDrawer.tsx");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const { EMBEDDED_SIDEKICK_DISMISS_EVENT } = await jiti.import("../lib/embedded-modal.ts");
   const target = document.createElement("div");
   target.id = SIDEKICK_RIGHT_PANEL_TARGET_ID;
@@ -991,7 +991,7 @@ test("question analysis polls query-encoded remote entry and job IDs", async () 
     return response({ jobs: [{ ...job, status: "failed", error: "fixture failure" }] });
   };
   const { MessageView } = await jiti.import("./MessageView.tsx");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);

@@ -348,7 +348,6 @@ export function WorktreeSessionBuckets<T>({ items, sessionOf, deviceOf, renderIt
   const [renamingKey, setRenamingKey] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
-  const [deleteNeedsForce, setDeleteNeedsForce] = useState(false);
   const [mutationBusy, setMutationBusy] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
 
@@ -394,7 +393,7 @@ export function WorktreeSessionBuckets<T>({ items, sessionOf, deviceOf, renderIt
 
   // Mutations go to the device that owns the inventory, with its project root as cwd.
   const canManage = Boolean(inventoryUrl || inventoryProjectRoot);
-  const runMutation = async (method: "PATCH" | "DELETE", body: Record<string, unknown>): Promise<{ ok: boolean; dirty: boolean }> => {
+  const runMutation = async (method: "PATCH" | "DELETE", body: Record<string, unknown>): Promise<boolean> => {
     setMutationBusy(true);
     setMutationError(null);
     try {
@@ -405,17 +404,21 @@ export function WorktreeSessionBuckets<T>({ items, sessionOf, deviceOf, renderIt
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd, ...body }),
+      }).catch((error: unknown) => {
+        if (method === "DELETE") throw new Error(t("worktreeGraph.cleanupResultUnknown"));
+        throw error;
       });
       if (!res.ok) {
         const err = await res.json().catch(() => null) as { error?: string; dirty?: boolean } | null;
-        if (err?.dirty === true) return { ok: false, dirty: true };
+        if (method === "DELETE" && (res.status === 502 || res.status === 504)) throw new Error(t("worktreeGraph.cleanupResultUnknown"));
+        if (err?.dirty === true) throw new Error(t("worktreeBuckets.deleteDirtyBlocked"));
         throw new Error(err?.error || `HTTP ${res.status}`);
       }
       window.dispatchEvent(new CustomEvent("pi-web:worktree-management-changed"));
-      return { ok: true, dirty: false };
+      return true;
     } catch (err) {
       setMutationError(err instanceof Error ? err.message : t("worktreeBuckets.actionFailed"));
-      return { ok: false, dirty: false };
+      return false;
     } finally {
       setMutationBusy(false);
     }
@@ -427,23 +430,15 @@ export function WorktreeSessionBuckets<T>({ items, sessionOf, deviceOf, renderIt
       setRenamingKey(null);
       return;
     }
-    const result = await runMutation("PATCH", { path: group.path, branch: next });
-    if (result.ok) setRenamingKey(null);
+    if (await runMutation("PATCH", { path: group.path, branch: next })) setRenamingKey(null);
   };
 
   const handleDelete = async (group: WorktreeSessionGroup) => {
-    const result = await runMutation("DELETE", { path: group.path, force: deleteNeedsForce });
-    if (result.ok) {
-      setDeletingKey(null);
-      setDeleteNeedsForce(false);
-    } else if (result.dirty) {
-      setDeleteNeedsForce(true);
-    }
+    if (await runMutation("DELETE", { path: group.path })) setDeletingKey(null);
   };
 
   const cancelDelete = () => {
     setDeletingKey(null);
-    setDeleteNeedsForce(false);
     setMutationError(null);
   };
 
@@ -454,7 +449,6 @@ export function WorktreeSessionBuckets<T>({ items, sessionOf, deviceOf, renderIt
       setRenameValue(group.branch ?? "");
     } : undefined,
     remove: canManage && group.kind === "worktree" ? () => {
-      setDeleteNeedsForce(false);
       setMutationError(null);
       setDeletingKey(group.key);
     } : undefined,
@@ -462,7 +456,7 @@ export function WorktreeSessionBuckets<T>({ items, sessionOf, deviceOf, renderIt
 
   const renderDeleteConfirm = (group: WorktreeSessionGroup) => (
     <div className="activity-subproject-delete-confirm" role="alert" style={{ padding: "4px 10px" }}>
-      <span>{deleteNeedsForce ? t("worktreeBuckets.deleteDirtyConfirm", { label: group.label }) : t("worktreeBuckets.deleteConfirm", { label: group.label })}</span>
+      <span>{t("worktreeBuckets.deleteConfirm", { label: group.label })}</span>
       <button type="button" disabled={mutationBusy} onClick={() => void handleDelete(group)}>{t("chat.confirm")}</button>
       <button type="button" disabled={mutationBusy} onClick={cancelDelete}>{t("i18n.cancel")}</button>
     </div>

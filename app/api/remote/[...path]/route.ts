@@ -39,11 +39,14 @@ async function forward(req: Request, path: string[], peerId: string, method: str
   const isMcpTest = method === "POST" && path.length === 2 && path[0] === "mcp" && path[1] === "test";
   const isSessionClose = method === "POST" && path.length === 3 && path[0] === "sessions"
     && ["stop", "shutdown", "archive"].includes(path[2]);
+  const isWorktreeRemoval = method === "DELETE" && path.length === 1 && path[0] === "worktrees";
   // File/media transfers can legitimately exceed the short API timeout. Let
   // the streaming body drain; ordinary JSON APIs retain a bounded timeout.
   const signal = isSse || isFileTransfer
     ? method === "GET" ? req.signal : undefined
-    : isSessionClose
+    : isWorktreeRemoval
+      ? AbortSignal.timeout(60_000)
+      : isSessionClose
       ? AbortSignal.timeout(40_000)
       : isLongModelConfigRequest(path)
       ? AbortSignal.timeout(MODEL_CONFIG_LONG_TIMEOUT_MS)

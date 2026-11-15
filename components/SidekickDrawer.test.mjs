@@ -12,7 +12,7 @@ const en = testTranslator("en");
 async function renderInEnglish(element) {
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
-  const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   return renderToStaticMarkup(createElement(I18nProvider, { initialLocale: "en" }, element));
 }
 

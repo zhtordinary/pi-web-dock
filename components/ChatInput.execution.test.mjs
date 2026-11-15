@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { ChatInput } = await jiti.import("./ChatInput.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const render = props => renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(ChatInput, {
   onSend() {}, onAbort() {}, isStreaming: false, ...props,
 })));

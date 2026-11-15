@@ -50,7 +50,7 @@ test("creation history reads visible project sessions without executing or expos
   await writeSession("hidden-session");
   await writeFile(process.env.PI_WEB_HIDDEN_FILE, JSON.stringify({ sessions: ["hidden-session"], projects: [], devices: [], visibleSessions: [] }));
   const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
-  const { GET } = await jiti.import("./route.ts");
+  const { GET, DELETE } = await jiti.import("./route.ts");
   const response = await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&creationHistory=1`));
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -59,6 +59,53 @@ test("creation history reads visible project sessions without executing or expos
   assert.deepEqual(body.bindings.map((record) => [record.worktreePath, record.sessionId, record.relation]), [[linked, "visible-session", "task-root"]]);
   assert.equal(JSON.stringify(body).includes("must-not-run"), false);
   await assert.rejects(stat(marker), { code: "ENOENT" });
+  const removal = await DELETE(new Request("http://localhost/api/worktrees", {
+    method: "DELETE", headers: { Host: "localhost", "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: repo, path: linked, force: true }),
+  }));
+  assert.equal(removal.status, 409, "a recorded creator or binding prevents removal even with force");
+  assert.equal((await stat(linked)).isDirectory(), true);
   const missing = await GET(new Request("http://localhost/api/worktrees?cwd=%2Fnot-allowed&creationHistory=1"));
   assert.equal(missing.status, 400);
+});
+
+test("an unindexed session file makes worktree removal fail closed", async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-web-worktree-unknown-session-")));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  });
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
+  const sessionsDir = path.join(process.env.PI_CODING_AGENT_DIR, "sessions", "project");
+  await mkdir(sessionsDir, { recursive: true });
+  await writeFile(path.join(sessionsDir, "unreadable-session.jsonl"), "not valid session metadata\n");
+  const repo = path.join(root, "repo"), linked = path.join(root, "linked");
+  await execFileAsync("git", ["init", "-b", "main", repo]);
+  for (const [key, value] of [["user.name", "Test"], ["user.email", "test@example.invalid"], ["commit.gpgsign", "false"]]) {
+    await execFileAsync("git", ["-C", repo, "config", key, value]);
+  }
+  await writeFile(path.join(repo, "README.md"), "test\n");
+  await execFileAsync("git", ["-C", repo, "add", "README.md"]);
+  await execFileAsync("git", ["-C", repo, "commit", "-m", "initial"]);
+  await execFileAsync("git", ["-C", repo, "worktree", "add", "-b", "feat/unknown", linked]);
+  const { DELETE } = await createJiti(import.meta.url, { tsconfigPaths: true, moduleCache: false }).import("./route.ts");
+  const response = await DELETE(new Request("http://localhost/api/worktrees", {
+    method: "DELETE", headers: { Host: "localhost", "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: repo, path: linked }),
+  }));
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /session inventory is incomplete/);
+  assert.equal((await stat(linked)).isDirectory(), true);
+  await rm(path.join(sessionsDir, "unreadable-session.jsonl"));
+  const deletedDir = path.join(process.env.PI_CODING_AGENT_DIR, "deleted_sessions", "project");
+  await mkdir(deletedDir, { recursive: true });
+  await writeFile(path.join(deletedDir, "recoverable.jsonl"), JSON.stringify({ type: "session", id: "recoverable", cwd: linked, timestamp: "2026-01-01T00:00:00Z" }) + "\n");
+  const deletedReference = await DELETE(new Request("http://localhost/api/worktrees", {
+    method: "DELETE", headers: { Host: "localhost", "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: repo, path: linked }),
+  }));
+  assert.equal(deletedReference.status, 409, "recoverable deleted sessions are not treated as absent");
+  assert.equal((await stat(linked)).isDirectory(), true);
 });
