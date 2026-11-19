@@ -26,7 +26,7 @@ async function settingsComponents() {
         if (!candidate.endsWith(".tsx")) continue;
         try {
           await readFile(candidate, "utf8");
-          pending.push(path.relative(root, candidate));
+          pending.push(path.relative(root, candidate).split(path.sep).join("/"));
           break;
         } catch (error) {
           if (error.code !== "ENOENT" && error.code !== "EISDIR") throw error;

@@ -101,7 +101,7 @@ test("the current path is preferred when no creation record matches", () => {
 
 test("verified worktree creators appear in the associated-session list", () => {
   assert.match(graph, /creationHistory: "1"/);
-  assert.match(graph, /mergeAssociatedWorktreeSessions\(selectedPath, associatedSessions, creationHistory, graph\?\.worktrees\)/);
+  assert.match(graph, /mergeAssociatedWorktreeSessions\(selectedPath, associatedSessions, creationHistoryFresh \? creationHistory : null, graph\?\.worktrees\)/);
   assert.match(graph, /data-testid="worktree-associated-sessions"/);
   assert.doesNotMatch(graph, /data-testid="worktree-creation-history"|worktreeGraph\.creationHistory/);
   assert.match(graph, /associatedSessionsIncomplete/);

@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, { fsCache: false, jsx: { runtime: "auto
 const { useSessionDetails } = await jiti.import("./useSessionDetails.ts");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { SessionActivityMeta } = await jiti.import("../components/SessionActivityMeta.tsx");
-const details = await jiti.import("../lib/session-details-client.ts");
+const details = await jiti.import("@/lib/session-details-client");
 
 class ReactDomNodeShim {
   constructor(ownerDocument, nodeName = "div") {

@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readFile, realpath, symlink, utimes, rm } from "node:fs/promises";
+import { lstatSync, writeSync } from "node:fs";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, symlink, utimes, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { currentPiPackage } from "./current-pi-package.mjs";
 const fixtureRoot = fileURLToPath(new URL("../test-fixtures/shared-pricing/", import.meta.url));
-const ENV_KEYS = ["HOME", "XDG_CACHE_HOME", "PI_CONVERSATION_COST_SCRIPT", "PI_GENAI_PRICES_CLI", "PI_GENAI_PRICES_NODE", "PI_CODING_AGENT_DIR"];
+const ENV_KEYS = ["HOME", "TMPDIR", ...(process.platform === "win32" ? ["USERPROFILE", "TEMP", "TMP"] : []), "XDG_CACHE_HOME", "PI_CONVERSATION_COST_SCRIPT", "PI_GENAI_PRICES_CLI", "PI_GENAI_PRICES_NODE", "PI_CODING_AGENT_DIR"];
 
 async function sha256(filePath) { return createHash("sha256").update(await readFile(filePath)).digest("hex"); }
 
 export async function verifySharedPricingFixture() {
-  const manifest = JSON.parse(await readFile(join(fixtureRoot, "manifest.json"), "utf8"));
+  const content = await readFile(join(fixtureRoot, "manifest.json"), "utf8");
+  let manifest;
+  try { manifest = JSON.parse(content); }
+  catch (error) { throw new Error("Invalid shared pricing fixture manifest", { cause: error }); }
   assert.equal(manifest.schema, 1);
   assert.equal(manifest.role, "Reader test-only frozen public pricing inputs; not production pricing truth");
   for (const entry of manifest.files) {
@@ -26,18 +30,41 @@ export async function verifySharedPricingFixture() {
 export async function createSealedPublicInputEnvironment(label = "test") {
   const manifest = await verifySharedPricingFixture();
   const root = await mkdtemp(join(tmpdir(), `pi-web-sealed-${label}-`));
+  console.log(`[sealed-public-fixture] ${root}`);
+  process.once("exit", () => {
+    try {
+      lstatSync(root);
+      writeSync(2, `[sealed-public-fixture-exit-present] ${root}\n`);
+      process.exitCode = 1;
+    } catch (error) {
+      if (error?.code === "ENOENT") writeSync(1, `[sealed-public-fixture-exit-absent] ${root}\n`);
+      else {
+        writeSync(2, `[sealed-public-fixture-exit-unverified] ${root}\n`);
+        process.exitCode = 1;
+      }
+    }
+  });
   const home = join(root, "home");
+  const temp = join(root, "tmp");
   const cacheRoot = join(root, "cache");
   const agentDir = join(root, "agent");
   const cacheDir = join(cacheRoot, "pi-sync-maintenance");
   await mkdir(cacheDir, { recursive: true });
   await mkdir(agentDir, { recursive: true });
+  await mkdir(home, { recursive: true });
+  await mkdir(temp, { recursive: true });
   const cachePath = join(cacheDir, "genai-prices-v2.json");
   await copyFile(join(fixtureRoot, "data/genai-prices-v2.json"), cachePath);
   const fresh = new Date(Date.now());
   await utimes(cachePath, fresh, fresh);
   const previous = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
   process.env.HOME = home;
+  process.env.TMPDIR = temp;
+  if (process.platform === "win32") {
+    process.env.USERPROFILE = home;
+    process.env.TEMP = temp;
+    process.env.TMP = temp;
+  }
   process.env.XDG_CACHE_HOME = cacheRoot;
   process.env.PI_CONVERSATION_COST_SCRIPT = join(fixtureRoot, "scripts/session_cost.py");
   process.env.PI_GENAI_PRICES_CLI = join(fixtureRoot, "genai-prices/cli.cjs");
@@ -63,6 +90,13 @@ export async function createSealedPublicInputEnvironment(label = "test") {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
       await rm(root, { recursive: true, force: true });
+      try {
+        await lstat(root);
+        throw new Error("Sealed public fixture still exists after cleanup");
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      console.log(`[sealed-public-fixture-cleaned] ${root}`);
     },
   };
 }

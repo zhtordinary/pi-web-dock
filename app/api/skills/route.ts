@@ -287,10 +287,11 @@ async function patchSkillInvocationMode(body: {
   }
   if (!target.policyKey) return NextResponse.json({ error: "Skill policy key unavailable" }, { status: 409 });
   const mode = body.action === "clear_skill_invocation_mode" ? null : body.mode!;
+  const sourcePath = target.sourceInfo.origin === "package" ? target.sourceInfo.baseDir : undefined;
   if (targetScope === "project") {
-    await setProjectSkillInvocationMode(cwd, agentDir, target.policyKey, mode);
+    await setProjectSkillInvocationMode(cwd, agentDir, target.policyKey, mode, sourcePath);
   } else {
-    await setGlobalSkillInvocationMode(agentDir, target.policyKey, mode);
+    await setGlobalSkillInvocationMode(agentDir, target.policyKey, mode, sourcePath);
   }
   return NextResponse.json(await loadSkillsWithInstallInfo(cwd, viewScope));
 }

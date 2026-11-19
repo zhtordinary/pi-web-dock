@@ -126,7 +126,7 @@ export async function writeSkillStateSettings(cwd: string, agentDir: string, sco
         else setGlobalPluginSkillFilter(manager, source, key, resource);
       } else if (resource === "inherit") clearGlobalTopLevelSkillOverride(manager, skill.filePath);
       else setGlobalTopLevelSkillOverride(manager, skill.filePath, resource);
-      updateSkillInvocationModeSettings(settings, scope, skill.policyKey, mode ?? null, cwd);
+      updateSkillInvocationModeSettings(settings, scope, skill.policyKey, mode ?? null, cwd, plugin ? skill.sourceInfo.baseDir : undefined);
     }
     return snapshots;
   });

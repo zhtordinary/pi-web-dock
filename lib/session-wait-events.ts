@@ -2,6 +2,7 @@ import { watch, existsSync, statSync, type FSWatcher } from "node:fs";
 import { dirname, basename, relative, sep } from "node:path";
 import { emitActivityEvent } from "./activity-events";
 import { getSessionWaitStateRoot, getSessionWaitChannel } from "./session-waits";
+import { watchDirectory } from "./watch-directory";
 
 type StateWatcher = { refs: number; close: () => void };
 const key = Symbol.for("pi-web.session-wait-watchers");
@@ -30,7 +31,7 @@ export function subscribeSessionWaitChanges(root = getSessionWaitStateRoot(), ch
       let directory = root;
       while (!existsSync(directory) && dirname(directory) !== directory) directory = dirname(directory);
       try {
-        watcher = watch(directory, { persistent: false }, (_event, filename) => {
+        watcher = watch(watchDirectory(directory), { persistent: false }, (_event, filename) => {
           if (filename && existsSync(root) && directory === root && !names.has(basename(filename.toString()))) return;
           if (filename && directory !== root && filename.toString() !== relative(directory, root).split(sep)[0]) return;
           if (pending) return;

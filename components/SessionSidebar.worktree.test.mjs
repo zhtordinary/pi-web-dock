@@ -12,3 +12,9 @@ test("uses the server-resolved current worktree identity", () => {
   );
   assert.doesNotMatch(source, /const isCurrent = wt\.path === selectedCwd/);
 });
+
+test("offers deletion for linked worktrees from the switcher", () => {
+  assert.match(source, /method: "DELETE"/);
+  assert.match(source, /!wt\.isMain/);
+  assert.match(source, /worktreeBuckets\.deleteWorktree/);
+});

@@ -37,6 +37,17 @@ async function assertPhysicalDirectory(path: string): Promise<void> {
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Reader identity root is not a physical directory");
 }
 
+async function samePhysicalPath(left: string, right: string): Promise<boolean> {
+  if (left === right) return true;
+  if (process.platform === "win32" && left.replaceAll("/", "\\").toLowerCase() === right.replaceAll("/", "\\").toLowerCase()) return true;
+  try {
+    const [a, b] = await Promise.all([stat(left), stat(right)]);
+    return a.dev === b.dev && a.ino > 0 && b.ino > 0 && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
 function isHex(value: unknown, length: number): value is string {
   return typeof value === "string" && new RegExp(`^[0-9a-f]{${length}}$`, "i").test(value);
 }
@@ -57,7 +68,7 @@ async function readReaderBuildIdentity(channel: ReaderRuntimeChannel): Promise<R
     throw new Error("Reader selector is outside the production releases root");
   }
   await assertPhysicalDirectory(target);
-  if (await realpath(process.cwd()) !== target) throw new Error("Reader process cwd does not match its channel selector");
+  if (!(await samePhysicalPath(process.cwd(), target))) throw new Error("Reader process cwd does not match its channel selector");
 
   const metadataPath = join(target, ".pi-web-reader-release.json");
   const buildPath = join(target, ".next", "BUILD_ID");
@@ -79,7 +90,8 @@ async function readReaderBuildIdentity(channel: ReaderRuntimeChannel): Promise<R
     || packageJson.name !== APP_PACKAGE_NAME || packageJson.version !== metadata.version
     || metadata.managedBy !== "pi-web-reader-release"
     || metadata.installationMode !== "production"
-    || metadata.installationPath !== target
+    || typeof metadata.installationPath !== "string"
+    || !(await samePhysicalPath(metadata.installationPath, target))
     || (metadata.health !== "healthy" && metadata.health !== "pending")
     || (metadata.sourceDirty !== undefined && metadata.sourceDirty !== false)
     || !isHex(metadata.artifactSha256, 64)

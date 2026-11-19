@@ -325,7 +325,7 @@ async function readPlugins(cwd: string, viewScope: PluginScope): Promise<Plugins
   });
   let reconciliation;
   if (projectTrust.trusted) {
-    const legacyMigrated = migrateLegacyProjectOverrides(baseSettingsManager);
+    const legacyMigrated = migrateLegacyProjectOverrides(baseSettingsManager, cwd);
     const webStateMigrated = migrateProjectWebStateKeys(baseSettingsManager, cwd);
     if (legacyMigrated || webStateMigrated) {
       await baseSettingsManager.flush();
@@ -505,7 +505,12 @@ function readScope(scope: unknown): PluginScope {
 }
 
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
+  let searchParams: URLSearchParams;
+  try {
+    ({ searchParams } = new URL(req.url));
+  } catch {
+    return NextResponse.json({ error: "Invalid request URL" }, { status: 400 });
+  }
   const cwd = searchParams.get("cwd");
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
@@ -576,7 +581,7 @@ export async function POST(req: Request) {
       );
     }
     if (projectTrust.trusted) {
-      const legacyMigrated = migrateLegacyProjectOverrides(settingsManager);
+      const legacyMigrated = migrateLegacyProjectOverrides(settingsManager, body.cwd);
       const webStateMigrated = migrateProjectWebStateKeys(settingsManager, body.cwd);
       if (legacyMigrated || webStateMigrated) {
         await settingsManager.flush();

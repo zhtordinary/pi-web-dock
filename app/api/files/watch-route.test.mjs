@@ -12,7 +12,7 @@ assert.notEqual(start, -1, "watch route not found");
 assert.notEqual(end, -1, "watch route end not found");
 const watchBlock = source.slice(start, end);
 
-function watchFixture({ aborted = false, abortDuringWatch = false, failWatch = false, failEnqueue = false } = {}) {
+function watchFixture({ aborted = false, abortDuringWatch = false, failWatch = false, failEnqueue = false, physicalDirectory } = {}) {
   const abort = new AbortController();
   if (aborted) abort.abort();
   const state = { watches: 0, closes: 0, controllerCloses: 0, events: [], statCalls: 0 };
@@ -41,9 +41,11 @@ function watchFixture({ aborted = false, abortDuringWatch = false, failWatch = f
     type: "watch", filePath: "/workspace/file.txt", path, TextEncoder,
     request: { signal: abort.signal },
     stat: { isFile: () => true, mtimeMs: 1, ctimeMs: 1, ino: 1, size: 1 },
-    samePath: (a, b) => a === b,
+    samePath: (a, b) => path.resolve(a) === path.resolve(b),
+    watchDirectory: (directory) => physicalDirectory ?? directory,
     fs: {
-      watch(_directory, callback) {
+      watch(directory, callback) {
+        state.watchedDirectory = directory;
         state.watches += 1;
         state.change = callback;
         if (abortDuringWatch) abort.abort();
@@ -123,7 +125,12 @@ test("watch cleanup handles watcher errors, enqueue failures and startup races",
 });
 
 test("file watching survives same-path replacement", () => {
-  assert.match(watchBlock, /watcher = fs\.watch\(watchedDirectory/);
+  const active = watchFixture({ physicalDirectory: "/physical" });
+  assert.equal(active.state.watchedDirectory, "/physical");
+  active.state.change("change", "file.txt");
+  assert.equal(active.state.statCalls, 1);
+  active.abort.abort();
+  assert.match(watchBlock, /watcher = fs\.watch\(watchDirectory\(watchedDirectory\)/);
   assert.match(watchBlock, /samePath\(path\.join\(watchedDirectory, changedName\.toString\(\)\), filePath\)/);
   assert.match(watchBlock, /s\.ctimeMs === lastCtimeMs/);
   assert.match(watchBlock, /s\.ino === lastIno/);

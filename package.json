@@ -1,6 +1,6 @@
 {
   "name": "@zhtordinary/pi-web-dock",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "description": "Web workbench for the pi coding agent: sessions, files, worktrees and multi-device activity in one browser UI",
   "homepage": "https://github.com/zhtordinary/pi-web-dock#readme",
   "repository": {
@@ -30,6 +30,9 @@
     "next.config.ts",
     "package.json",
     "packages/reader-mcp",
+    "!packages/reader-mcp/CONTRACT-MATRIX.md",
+    "!packages/reader-mcp/test",
+    "!packages/reader-mcp/acceptance",
     "packages/reader-openai-subscription"
   ],
   "scripts": {

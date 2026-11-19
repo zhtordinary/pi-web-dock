@@ -1,5 +1,6 @@
 import { existsSync, statSync, watch, type FSWatcher } from "node:fs";
 import { basename, dirname, relative, resolve, sep } from "node:path";
+import { watchDirectory } from "./watch-directory";
 
 type Listener = { changed(): void; failed(error: Error): void };
 type FileWatch = { listeners: Set<Listener>; close(): void };
@@ -46,7 +47,7 @@ export function subscribeSessionFileChanges(filePath: string, changed: () => voi
       if (watcher && next === directory) return;
       watcher?.close();
       directory = next;
-      watcher = watch(directory, { persistent: false }, (_event, filename) => {
+      watcher = watch(watchDirectory(directory), { persistent: false }, (_event, filename) => {
         if (closed) return;
         const expected = directory === targetDirectory ? basename(identity) : relative(directory, targetDirectory).split(sep)[0];
         if (filename && filename.toString() !== expected) return;

@@ -9,7 +9,7 @@ import * as React from "react";
 import { createRoot } from "react-dom/client";
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 
-const { builtinRuntimeExtensionKey, comparePluginPackages, filterBuiltinRuntimeExtensions, filterPackagesForProjectStatusCounts, filterTopLevelExtensions, firstRenderedPluginKey, isPackageVisible, isPluginOwnerCurrent, isPluginSearchMatch, isProjectPackageVisible, isProjectTopLevelExtensionVisible, isTopLevelExtensionVisible, pluginDisplayName, projectPackageFilterCounts, projectTopLevelExtensionFilterCounts, topLevelExtensionKey, usePluginLoadEffect } = await jiti.import("./PluginsConfig.tsx");
+const { builtinRuntimeExtensionKey, comparePluginPackages, filterBuiltinRuntimeExtensions, filterPackagesForProjectStatusCounts, filterTopLevelExtensions, firstRenderedPluginKey, isDependencyPackage, isPackageVisible, isPluginOwnerCurrent, isPluginSearchMatch, isProjectPackageVisible, isProjectTopLevelExtensionVisible, isTopLevelExtensionVisible, pluginDisplayName, projectPackageFilterCounts, projectTopLevelExtensionFilterCounts, topLevelExtensionKey, usePluginLoadEffect } = await jiti.import("./PluginsConfig.tsx");
 const { filterSkillsForProjectStatusCounts, isPluginDisabledForSkill, isProjectSkillVisible, isSkillSearchMatch, isSkillVisible, pluginEnableAction, pluginSkillGroupLabel, sortSkillsByName, projectSkillFilterCounts, selectVisibleSkillPath, skillProjectStatus } = await jiti.import("./SkillsConfig.tsx");
 test("scope badges localize global and use the shared neutral background", async () => {
   const source = await readFile(new URL("./PluginsConfig.tsx", import.meta.url), "utf8");
@@ -89,6 +89,16 @@ function pkg(source, packageName) {
     status: "installed",
   };
 }
+test("classifies packages by resolved resources, including disabled resources", () => {
+  const dependency = pkg("npm:dependency", "dependency");
+  const disabledPlugin = {
+    ...dependency,
+    resources: [{ kind: "extension", name: "disabled", path: "/tmp/disabled.ts", relativePath: "extensions/disabled.ts", resourceState: "disabled" }],
+  };
+
+  assert.equal(isDependencyPackage(dependency), true);
+  assert.equal(isDependencyPackage(disabledPlugin), false);
+});
 test("shows a compact package name for each source group", () => {
   assert.equal(
     pluginDisplayName(pkg("npm:@hypabolic/pi-hypa@0.1.0", "@hypabolic/pi-hypa")),
@@ -228,15 +238,15 @@ test("finds a local package by its description as well as its name", () => {
   assert.equal(isPluginSearchMatch(local, "不存在"), false);
 });
 
-test("default selection follows the first rendered package after API-order and filters", () => {
+test("default selection follows the first rendered plugin before dependency packages", () => {
   const apiOrder = [
-    pkg("npm:second", "second"),
-    pkg("~/.pi/agent/packages/first", "first"),
+    pkg("npm:dependency", "dependency"),
+    { ...pkg("npm:plugin", "plugin"), resources: [{ kind: "extension", name: "plugin", path: "/tmp/plugin.ts", relativePath: "extensions/plugin.ts" }] },
   ];
-  assert.equal(firstRenderedPluginKey(apiOrder, [], []), "global\0~/.pi/agent/packages/first");
+  assert.equal(firstRenderedPluginKey(apiOrder, [], []), "global\0npm:plugin");
 
-  const filtered = apiOrder.filter((item) => item.packageName !== "first");
-  assert.equal(firstRenderedPluginKey(filtered, [], []), "global\0npm:second");
+  const filtered = apiOrder.filter((item) => item.packageName !== "plugin");
+  assert.equal(firstRenderedPluginKey(filtered, [], []), "global\0npm:dependency");
 });
 
 test("renders package groups before standalone and built-in runtime groups", async () => {
@@ -245,6 +255,13 @@ test("renders package groups before standalone and built-in runtime groups", asy
   const builtInRuntimeGroup = source.indexOf("<BuiltinRuntimeExtensionGroup");
   const standaloneGroup = source.indexOf("<TopLevelExtensionGroup");
   assert.ok(packageGroups >= 0 && builtInRuntimeGroup > packageGroups && standaloneGroup > builtInRuntimeGroup);
+});
+
+test("renders resource-less packages as dependencies instead of loaded plugins", async () => {
+  const source = await readFile(new URL("./PluginsConfig.tsx", import.meta.url), "utf8");
+  assert.match(source, /sourceKind: "dependencies"/);
+  assert.match(source, /i18n\.pluginDependencies/);
+  assert.match(source, /Package: dependency · 0 resources/);
 });
 
 test("project package status counts follow active visibility filters", () => {
@@ -543,8 +560,9 @@ test("preserves package filters when toggling package disabled state", () => {
   assert.deepEqual(setPackageEntryDisabled(disabledForceIncluded, false), forceIncluded);
 });
 
-test("disabled package patterns remain invisible to the SDK and restore cleanly", async () => {
+test("disabled package patterns remain invisible to the SDK and restore cleanly", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-reader-package-state-"));
+  t.diagnostic(`resource-policy fixture: ${root}`);
   try {
     await mkdir(join(root, "extensions"), { recursive: true });
     await mkdir(join(root, "skills", "example"), { recursive: true });
@@ -563,12 +581,12 @@ test("disabled package patterns remain invisible to the SDK and restore cleanly"
 
     const disabled = setPackageEntryDisabled(configured, true);
     const disabledPaths = await resolve(disabled);
-    assert.equal(disabledPaths.extensions.find((resource) => resource.path.endsWith("extensions/index.js"))?.enabled, false);
-    assert.equal(disabledPaths.skills.find((resource) => resource.path.endsWith("skills/example/SKILL.md"))?.enabled, false);
+    assert.equal(disabledPaths.extensions.find((resource) => resource.path === join(root, "extensions", "index.js"))?.enabled, false);
+    assert.equal(disabledPaths.skills.find((resource) => resource.path === join(root, "skills", "example", "SKILL.md"))?.enabled, false);
 
     const restoredPaths = await resolve(setPackageEntryDisabled(disabled, false));
-    assert.equal(restoredPaths.extensions.find((resource) => resource.path.endsWith("extensions/index.js"))?.enabled, true);
-    assert.equal(restoredPaths.skills.find((resource) => resource.path.endsWith("skills/example/SKILL.md"))?.enabled, true);
+    assert.equal(restoredPaths.extensions.find((resource) => resource.path === join(root, "extensions", "index.js"))?.enabled, true);
+    assert.equal(restoredPaths.skills.find((resource) => resource.path === join(root, "skills", "example", "SKILL.md"))?.enabled, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

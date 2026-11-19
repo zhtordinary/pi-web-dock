@@ -45,10 +45,11 @@ async function findRepositoryRoot(cwd: string): Promise<string | null> {
  * caller may retain the /var alias returned by os.tmpdir(). Use the physical
  * cwd for containment and diff pathspec checks so aliases do not hide valid
  * changes or make a real repository look outside the selected directory.
+ * Windows needs the native resolver to expand 8.3 short paths.
  */
 function physicalPath(filePath: string): string | null {
   try {
-    return fs.realpathSync(filePath);
+    return fs.realpathSync.native(filePath);
   } catch {
     return null;
   }

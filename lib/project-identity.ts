@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import path, { basename, relative, resolve } from "node:path";
 
 const MAX_PROJECT_IDENTITY_CACHE_ENTRIES = 512;
@@ -46,16 +46,23 @@ export function getProjectIdentity(root: string): { key: string; label: string }
  * the current key, while accepting tagged paths and the legacy Git identity
  * when the project is available for resolution.
  */
-export function projectIdentityKeys(input: string): string[] {
+export function projectIdentityKeys(input: string, platform: NodeJS.Platform = process.platform): string[] {
   const value = input.trim();
   if (!value) return [];
   const rootInput = value.startsWith("path:") ? value.slice("path:".length) : value;
-  const root = value.startsWith("path:") && !path.isAbsolute(rootInput)
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const root = value.startsWith("path:") && !pathApi.isAbsolute(rootInput)
     ? resolve(process.env.PI_WEB_WORKSPACE_ROOT ?? process.env.HOME ?? ".", rootInput)
     : resolve(rootInput);
   const keys = new Set([value]);
+  if (platform === "win32" && pathApi.isAbsolute(rootInput)) {
+    // Root-relative paths must resolve to the current drive before comparison.
+    const normalized = projectIdentityKey(pathApi.resolve(rootInput), platform);
+    keys.add(value.startsWith("path:") ? `path:${normalized}` : normalized);
+  }
   if (!existsSync(root)) return [...keys];
-  const pathKey = projectIdentityKey(root);
+  keys.add(root);
+  const pathKey = projectIdentityKey(root, platform);
   keys.add(pathKey);
   keys.add(`path:${pathKey}`);
   keys.add(getProjectIdentity(root).key);
@@ -93,7 +100,12 @@ export function projectIdentityKey(
 ): string {
   if (!projectRoot) return projectRoot;
   const pathApi = platform === "win32" ? path.win32 : path.posix;
-  const normalized = pathApi.normalize(projectRoot);
+  const filesystemRoot = platform === "darwin"
+    ? (() => {
+        try { return realpathSync.native(projectRoot); } catch { return projectRoot; }
+      })()
+    : projectRoot;
+  const normalized = pathApi.normalize(filesystemRoot);
   const rootLength = pathApi.parse(normalized).root.length;
   let end = normalized.length;
   while (end > rootLength && normalized[end - 1] === pathApi.sep) end--;

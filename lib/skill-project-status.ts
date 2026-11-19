@@ -6,7 +6,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
-import { relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { getPluginPackageIdentity } from "./plugin-project-status";
 import { applyPackageParentCaps } from "./plugin-package-state";
 import { getGlobalPluginSkillFilterState } from "./plugin-overrides";
@@ -240,19 +240,24 @@ export function getProjectSkillStates(
 function portableTopLevelKey(key: string): string {
   const match = /^top-level:(.+)$/.exec(key);
   if (!match) return key;
-  const home = homedir();
   const pathPart = match[1];
-  if (pathPart === home) return "top-level:~";
-  if (pathPart.startsWith(home + "/")) return `top-level:~${pathPart.slice(home.length)}`;
-  return key;
+  if (!isAbsolute(pathPart)) return key;
+  const fromHome = relative(homedir(), pathPart);
+  if (!fromHome) return "top-level:~";
+  if (fromHome === ".." || fromHome.startsWith(`..${sep}`) || isAbsolute(fromHome)) return key;
+  return `top-level:~/${fromHome.split(sep).join("/")}`;
 }
 
 /** Expand a portable `top-level:~<rel>` key to this machine's absolute form. */
 function expandTopLevelKey(key: string): string {
   const match = /^top-level:~(?:\/(.*))?$/.exec(key);
   if (!match) return key;
-  const home = homedir();
-  return `top-level:${home}${match[1] ? "/" + match[1] : ""}`;
+  return `top-level:${match[1] ? resolve(homedir(), match[1]) : homedir()}`;
+}
+
+function comparisonStateKey(key: string): string {
+  const expanded = expandTopLevelKey(key);
+  return process.platform === "win32" && expanded.startsWith("top-level:") ? expanded.toLowerCase() : expanded;
 }
 
 /** Look up a state by canonical key, tolerating portable `~` keys from sync. */
@@ -262,7 +267,7 @@ function lookupState(
 ): SkillOverrideState | undefined {
   if (states[key] !== undefined) return states[key];
   for (const [stateKey, state] of Object.entries(states)) {
-    if (expandTopLevelKey(stateKey) === key) return state;
+    if (comparisonStateKey(stateKey) === comparisonStateKey(key)) return state;
   }
   return undefined;
 }
@@ -271,6 +276,7 @@ function updateProjectSettings(
   settingsManager: SettingsManager,
   update: (settings: SettingsWithProjectSkills) => void,
 ): void {
+  // SAFETY: Pi's SettingsManager implements this private project-update callback.
   const manager = settingsManager as unknown as {
     updateProjectSettings: (field: string, callback: (settings: SettingsWithProjectSkills) => void) => void;
   };
@@ -293,13 +299,13 @@ export function reconcileProjectSkillStates(
 ): ProjectSkillReconciliation {
   const current = readStates(projectSettings);
   const next: Record<string, SkillOverrideState> = {};
-  const validKeys = new Set(entries.map((entry) => entry.key));
+  const validKeys = new Set(entries.map((entry) => comparisonStateKey(entry.key)));
   for (const entry of entries) {
     const existing = lookupState(current, entry.key)
       ?? (entry.projectEnabled ? "enabled" : "disabled");
     next[portableTopLevelKey(entry.key)] = existing;
   }
-  const removedKeys = Object.keys(current).filter((key) => !validKeys.has(expandTopLevelKey(key)));
+  const removedKeys = Object.keys(current).filter((key) => !validKeys.has(comparisonStateKey(key)));
   return {
     states: next,
     changed: !mapsEqual(current, next),
@@ -311,6 +317,7 @@ export async function reconcileProjectSkillSettings(
   settingsManager: SettingsManager,
   entries: GlobalSkillStateEntry[],
 ): Promise<ProjectSkillReconciliation> {
+  // SAFETY: File storage may expose this private path; in-memory storage need not.
   const storage = (settingsManager as unknown as { storage?: { projectSettingsPath?: string } }).storage;
   const lockKey = storage?.projectSettingsPath ?? "default";
   const previous = stateLocks.get(lockKey) ?? Promise.resolve();
@@ -342,6 +349,9 @@ export function setProjectSkillState(
 ): void {
   updateProjectSettings(settingsManager, (settings) => {
     const current = readStates(settings as SettingsWithProjectSkills);
+    for (const existing of Object.keys(current)) {
+      if (comparisonStateKey(existing) === comparisonStateKey(key)) delete current[existing];
+    }
     current[portableTopLevelKey(key)] = state;
     settings[PROJECT_SKILL_STATES_SETTING] = current;
   });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -8,7 +9,7 @@ const require = createRequire(import.meta.url);
 const { PATCHES, SUPPORTED_VERSIONS, patchPiFileTools, piPackageRoot } = require("../bin/patch-pi-volume-access.cjs");
 
 test("patches Pi 1.5 file preflights without widening real filesystem operations", () => {
-  const root = mkdtempSync(join("/tmp", "reader-pi-volume-patch-"));
+  const root = mkdtempSync(join(tmpdir(), "reader-pi-volume-patch-"));
   try {
     mkdirSync(join(root, "dist/core/tools"), { recursive: true });
     writeFileSync(join(root, "package.json"), JSON.stringify({ version: "1.5.0" }));
@@ -41,7 +42,7 @@ test("the installed pinned Pi version has every file preflight patched", () => {
 });
 
 test("refuses an unreviewed Pi coding-agent version", () => {
-  const root = mkdtempSync(join("/tmp", "reader-pi-volume-patch-version-"));
+  const root = mkdtempSync(join(tmpdir(), "reader-pi-volume-patch-version-"));
   try {
     mkdirSync(join(root, "dist/core/tools"), { recursive: true });
     writeFileSync(join(root, "package.json"), JSON.stringify({ version: "2.0.0" }));

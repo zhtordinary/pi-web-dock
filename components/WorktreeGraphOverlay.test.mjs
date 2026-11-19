@@ -30,7 +30,8 @@ test("worktree rows use the graph batch dirty projection and refresh inspection 
   assert.match(source, /worktreeGraph\.subtitle/);
   assert.doesNotMatch(source, /wip: graph\.counts\.wip/);
   assert.match(source, /inspection\?\.path === selectedWorktree\.path/);
-  assert.match(source, /\[selectedPath, projectRoot, remotePeer, open, graph\]/);
+  assert.match(source, /if \(!selectedPath \|\| !projectRoot \|\| !open \|\| !graphFresh\)/);
+  assert.match(source, /\[selectedPath, projectRoot, remotePeer, open, graph, graphFresh\]/);
 });
 
 test("delta counts use explicit topology copy", () => {

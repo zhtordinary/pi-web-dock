@@ -1,6 +1,6 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, type Dirent } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { asyncMetadataKey, asyncStatusChildId } from "./async-metadata-key";
 
 export interface AsyncModelMetadata {
@@ -79,7 +79,7 @@ function readJson(path: string): JsonRecord | undefined {
 }
 
 function isWithin(root: string, target: string): boolean {
-  return target === root || target.startsWith(`${root}/`);
+  return target === root || target.startsWith(`${root}${sep}`);
 }
 
 function statusPathFor(root: string, entry: Dirent): string | undefined {

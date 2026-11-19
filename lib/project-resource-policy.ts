@@ -1,6 +1,9 @@
+import { createRequire, findPackageJSON } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve as resolvePath, sep } from "node:path";
-import type { PackageSource, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { DefaultPackageManager, type PackageSource, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { isWindowsAbsolutePath } from "./paths";
 import { isDisabledPackage } from "./plugin-package-state";
 import {
   clearProjectPluginExplicitState,
@@ -31,6 +34,7 @@ function packageSource(entry: PackageSource): string {
 }
 
 function packageIdentityOptions(settingsManager: SettingsManager): { cwd?: string; agentDir?: string } {
+  // SAFETY: FileSettingsStorage exposes these optional paths; in-memory storage does not.
   const storage = (settingsManager as unknown as {
     storage?: { projectSettingsPath?: string; globalSettingsPath?: string };
   }).storage;
@@ -65,22 +69,40 @@ function stripPattern(entry: string): string {
 function resolveConfiguredPath(entry: string, baseDir: string): string {
   const expanded = entry === "~"
     ? homedir()
-    : entry.startsWith("~/")
-      ? `${homedir()}/${entry.slice(2)}`
-      : entry;
+    : entry.startsWith("~/") || (process.platform === "win32" && entry.startsWith("~\\"))
+      ? join(homedir(), entry.slice(2))
+      : entry.startsWith("file://")
+        ? fileURLToPath(entry)
+        : entry;
   return resolvePath(baseDir, expanded);
 }
 
-/** Glob pattern form (pi-core minimatch, machine-independent). The pi core
- * matches SKILL.md resources against their parent directory name, so a bare
- * globstar pattern on the skill dir name matches on any machine regardless
- * of mount prefix. */
-function portableGlobPattern(path: string): string {
-  // Prefer the home-relative tail so the rule stays valid on every device while
-  // still naming the exact skill. A bare `**/<dirname>` matched any same-named
-  // skill in the project and disabled unrelated resources.
-  const portable = homeRelativePath(path);
-  return portable ? `**/${portable}` : `**${path}`;
+function hasSdkGlobWildcard(path: string): boolean {
+  return path.includes("*") || path.includes("?");
+}
+
+function assertTopLevelOverridePathSupported(path: string): void {
+  if (path.includes("\0")) throw new Error("Pi cannot safely override a resource path containing NUL");
+  let target = path;
+  if (path.startsWith("file:")) {
+    try {
+      if (!path.startsWith("file://")) throw new Error("invalid file URL");
+      target = fileURLToPath(path);
+      if (target.includes("\0")) throw new Error("invalid file URL");
+    } catch {
+      throw new Error("Pi cannot safely override an invalid resource file URL");
+    }
+  }
+  if ((process.platform === "win32" || target.startsWith("\\\\")) && /^[\\/]{2}[?.][\\/]/.test(target)) {
+    throw new Error("Pi cannot safely override a Windows device namespace resource path");
+  }
+  if (!path.startsWith("file:") && hasSdkGlobWildcard(path) && !isAbsolute(path)) {
+    throw new Error("Pi cannot safely override a relative resource path containing * or ?");
+  }
+}
+
+function exactExcludeRequired(path: string): boolean {
+  return /[*?()[\]{}]/.test(path) || (sep === "/" && path.includes("\\"));
 }
 
 function isSkillFilePath(path: string): boolean {
@@ -88,10 +110,10 @@ function isSkillFilePath(path: string): boolean {
 }
 
 function homeRelativePath(path: string): string | undefined {
-  const home = homedir();
-  if (path === home) return undefined;
-  if (path.startsWith(home + "/")) return path.slice(home.length + 1);
-  return undefined;
+  if (!isAbsolute(path)) return undefined;
+  const fromHome = relative(homedir(), path);
+  if (!fromHome || fromHome === ".." || fromHome.startsWith(`..${sep}`) || isAbsolute(fromHome)) return undefined;
+  return toPosixPath(fromHome);
 }
 
 /**
@@ -104,9 +126,60 @@ function homeRelativePath(path: string): string | undefined {
  */
 function matchesPortableSkillPattern(pattern: string, path: string): boolean {
   const tail = pattern.replace(/^\*\*\//, "");
-  if (!tail || tail === pattern) return false;
-  const candidates = [path, homeRelativePath(path) ?? ""];
-  return candidates.some((candidate) => candidate.endsWith(`/${tail}`));
+  if (!tail || tail === pattern || /[*?()[\]{}\\]/.test(tail)) return false;
+  const candidates = [toPosixPath(path), homeRelativePath(path) ?? ""];
+  return candidates.some((candidate) => candidate === tail || candidate.endsWith(`/${tail}`));
+}
+
+let sdkGlobTools: { minimatch: (path: string, pattern: string) => boolean; normalizePath: (path: string) => string } | undefined;
+
+function assertNoAmbiguousLegacyGlob(entries: readonly string[], path: string, targetBaseDir: string, ruleBaseDir: string | null = targetBaseDir): void {
+  const exclusions = entries.filter((entry) => entry.startsWith("!"));
+  if (!exclusions.length) return;
+  if (!sdkGlobTools) {
+    try {
+      // Bind to the SDK instance already in use, not a separately resolved version.
+      const manifest = findPackageJSON("@earendil-works/pi-coding-agent", join(process.cwd(), "package.json"));
+      if (!manifest) throw new Error("missing SDK package");
+      const sdkRequire = createRequire(join(dirname(manifest), "dist", "core", "package-manager.js"));
+      const manager = sdkRequire("./package-manager.js") as { DefaultPackageManager: typeof DefaultPackageManager };
+      if (manager.DefaultPackageManager !== DefaultPackageManager) throw new Error("SDK identity mismatch");
+      const { minimatch } = sdkRequire("minimatch") as Pick<NonNullable<typeof sdkGlobTools>, "minimatch">;
+      const { normalizePath } = sdkRequire("../utils/paths.js") as Pick<NonNullable<typeof sdkGlobTools>, "normalizePath">;
+      if (typeof minimatch !== "function" || typeof normalizePath !== "function") throw new Error("missing matcher");
+      sdkGlobTools = { minimatch, normalizePath };
+    } catch {
+      throw new Error("Pi cannot safely check an ambiguous legacy resource glob; SDK matcher unavailable");
+    }
+  }
+  let globs: string[];
+  try {
+    globs = exclusions.map((entry) => toPosixPath(sdkGlobTools!.normalizePath(entry.slice(1))))
+      .filter((pattern) => /[*?()[\]{}]/.test(pattern));
+  } catch {
+    throw new Error("Pi cannot safely check an invalid legacy resource exclusion");
+  }
+  if (!globs.length) return;
+  if (ruleBaseDir === null && (globs.some((pattern) => pattern.includes(".."))
+    || (!isAbsolute(path) && path !== "~" && !path.startsWith("~/") && !path.startsWith("file://")))) {
+    throw new Error("Pi cannot safely check an ambiguous legacy resource glob without a rule root");
+  }
+  let target: string;
+  try {
+    target = resolveConfiguredPath(path, targetBaseDir);
+  } catch {
+    return;
+  }
+  const name = basename(target);
+  const baseDir = ruleBaseDir ?? targetBaseDir;
+  const candidates = [toPosixPath(relative(baseDir, target)), name, toPosixPath(target)];
+  if (name === "SKILL.md") {
+    const parent = dirname(target);
+    candidates.push(toPosixPath(relative(baseDir, parent)), basename(parent), toPosixPath(parent));
+  }
+  if (globs.some((pattern) => candidates.some((candidate) => sdkGlobTools!.minimatch(candidate, pattern)))) {
+    throw new Error("Pi cannot safely change an ambiguous legacy resource glob; review the existing rule first");
+  }
 }
 
 function sameResourcePath(
@@ -116,21 +189,29 @@ function sameResourcePath(
   resourceType: ResourceSettingKey,
 ): boolean {
   const stripped = stripPattern(entry);
-  if (stripped.includes("**")) {
-    return matchesPortableSkillPattern(stripped, path);
+  // Preserve user glob rules; only recognize Reader's legacy suffix form.
+  if (entry.startsWith("!") && /[*?()[\]{}\\]/.test(toPosixPath(stripped))) {
+    return stripped.startsWith("**/") && matchesPortableSkillPattern(stripped, path);
   }
-  const targetPath = resolveConfiguredPath(path, baseDir);
-  const isSkillTarget = resourceType === "skills" && isSkillFilePath(path);
-  if (!isSkillTarget || isSkillFilePath(stripped)) {
-    if (resolveConfiguredPath(stripped, baseDir) === targetPath) return true;
-  }
-  if (isSkillTarget && !isSkillFilePath(stripped)) {
-    const normalizedPattern = normalizeSdkParentPattern(entry);
-    if (!normalizedPattern) return false;
-    const parentDir = dirname(targetPath);
-    const parentRel = toPosixPath(relative(baseDir, parentDir));
-    const parentDirPosix = toPosixPath(parentDir);
-    return normalizedPattern === parentRel || normalizedPattern === parentDirPosix;
+  if (!entry.startsWith("+") && !entry.startsWith("-") && hasSdkGlobWildcard(entry)) return false;
+  try {
+    const targetPath = resolveConfiguredPath(path, baseDir);
+    const configuredPath = stripped.startsWith("file://") ? fileURLToPath(stripped) : stripped;
+    if (entry.startsWith("!") && /[*?()[\]{}\\]/.test(toPosixPath(configuredPath))) return false;
+    const isSkillTarget = resourceType === "skills" && isSkillFilePath(targetPath);
+    if (!isSkillTarget || isSkillFilePath(configuredPath)) {
+      if (resolveConfiguredPath(stripped, baseDir) === targetPath) return true;
+    }
+    if (isSkillTarget && !isSkillFilePath(configuredPath)) {
+      const normalizedPattern = normalizeSdkParentPattern(entry);
+      if (!normalizedPattern) return false;
+      const parentDir = dirname(targetPath);
+      const parentRel = toPosixPath(relative(baseDir, parentDir));
+      const parentDirPosix = toPosixPath(parentDir);
+      return normalizedPattern === parentRel || normalizedPattern === parentDirPosix;
+    }
+  } catch {
+    // Invalid existing entries are not ours to remove.
   }
   return false;
 }
@@ -140,6 +221,7 @@ function updateProjectObject(
   field: string,
   update: (value: Record<string, unknown>) => void,
 ): void {
+  // SAFETY: Managers without the project update method are rejected below.
   const manager = settingsManager as unknown as {
     updateProjectSettings?: (field: string, callback: (settings: SettingsWithUnknown) => void) => void;
   };
@@ -415,8 +497,22 @@ export function clearProjectPackageResourceOverride(
 function portablePath(input: string): string {
   const home = homedir();
   if (input === home) return "~";
-  if (input.startsWith(home + "/")) return `~${input.slice(home.length)}`;
-  return input;
+  const homeRelative = homeRelativePath(input);
+  return homeRelative ? `~/${homeRelative}` : input;
+}
+
+function topLevelOverrideEntries(path: string, state: Exclude<ProjectResourcePolicy, "inherit">): string[] {
+  assertTopLevelOverridePathSupported(path);
+  const localPath = path.startsWith("file://") ? fileURLToPath(path) : path;
+  // Pi otherwise interprets an unsigned * or ? as an include glob.
+  if (hasSdkGlobWildcard(localPath)) {
+    const literal = pathToFileURL(localPath).href.replaceAll("*", "%2A");
+    return state === "enabled" ? [literal] : [literal, `-${literal}`];
+  }
+  const portable = portablePath(localPath);
+  if (state === "enabled") return [portable];
+  // A home-relative exact exclusion stays portable without matching other roots.
+  return [portable, exactExcludeRequired(localPath) ? `-${portable}` : `!${portable}`];
 }
 
 export function setProjectTopLevelOverride(
@@ -428,15 +524,10 @@ export function setProjectTopLevelOverride(
 ): void {
   const projectBaseDir = resolvePath(cwd, ".pi");
   const current = settingsManager.getProjectSettings()[resourceType] ?? [];
+  assertNoAmbiguousLegacyGlob(settingsManager.getGlobalSettings()[resourceType] ?? [], path, projectBaseDir, packageIdentityOptions(settingsManager).agentDir ?? null);
+  assertNoAmbiguousLegacyGlob(current, path, projectBaseDir);
   const updated = current.filter((entry) => !sameResourcePath(entry, path, projectBaseDir, resourceType));
-  const portable = portablePath(path);
-  if (state === "disabled") {
-    // `!` patterns are glob-matched by the pi core (minimatch); `-`/`+` are
-    // exact-string matches, so a machine-independent exclude must use `!`.
-    updated.push(portable, `!${portableGlobPattern(path)}`);
-  } else {
-    updated.push(portable);
-  }
+  updated.push(...topLevelOverrideEntries(path, state));
   if (resourceType === "skills") settingsManager.setProjectSkillPaths(updated);
   else if (resourceType === "extensions") settingsManager.setProjectExtensionPaths(updated);
   else if (resourceType === "prompts") settingsManager.setProjectPromptTemplatePaths(updated);
@@ -451,6 +542,8 @@ export function clearProjectTopLevelOverride(
 ): void {
   const projectBaseDir = resolvePath(cwd, ".pi");
   const current = settingsManager.getProjectSettings()[resourceType] ?? [];
+  assertNoAmbiguousLegacyGlob(settingsManager.getGlobalSettings()[resourceType] ?? [], path, projectBaseDir, packageIdentityOptions(settingsManager).agentDir ?? null);
+  assertNoAmbiguousLegacyGlob(current, path, projectBaseDir);
   const updated = current.filter((entry) => !sameResourcePath(entry, path, projectBaseDir, resourceType));
   if (resourceType === "skills") settingsManager.setProjectSkillPaths(updated);
   else if (resourceType === "extensions") settingsManager.setProjectExtensionPaths(updated);
@@ -468,12 +561,11 @@ export function setGlobalTopLevelSkillOverride(
   path: string,
   state: Exclude<ProjectResourcePolicy, "inherit">,
 ): void {
-  const agentDir = packageIdentityOptions(settingsManager).agentDir ?? homedir();
+  const agentDir = packageIdentityOptions(settingsManager).agentDir;
   const current = settingsManager.getGlobalSettings().skills ?? [];
-  const updated = current.filter((entry) => !sameResourcePath(entry, path, agentDir, "skills"));
-  const portable = portablePath(path);
-  if (state === "disabled") updated.push(portable, `!${portableGlobPattern(path)}`);
-  else updated.push(portable);
+  assertNoAmbiguousLegacyGlob(current, path, agentDir ?? homedir(), agentDir ?? null);
+  const updated = current.filter((entry) => !sameResourcePath(entry, path, agentDir ?? homedir(), "skills"));
+  updated.push(...topLevelOverrideEntries(path, state));
   settingsManager.setSkillPaths(updated);
 }
 
@@ -481,14 +573,18 @@ export function clearGlobalTopLevelSkillOverride(
   settingsManager: SettingsManager,
   path: string,
 ): void {
-  const agentDir = packageIdentityOptions(settingsManager).agentDir ?? homedir();
+  const agentDir = packageIdentityOptions(settingsManager).agentDir;
   const current = settingsManager.getGlobalSettings().skills ?? [];
-  const updated = current.filter((entry) => !sameResourcePath(entry, path, agentDir, "skills"));
+  assertNoAmbiguousLegacyGlob(current, path, agentDir ?? homedir(), agentDir ?? null);
+  const updated = current.filter((entry) => !sameResourcePath(entry, path, agentDir ?? homedir(), "skills"));
   settingsManager.setSkillPaths(updated);
 }
 
-export function migrateLegacyProjectOverrides(settingsManager: SettingsManager): boolean {
+export function migrateLegacyProjectOverrides(settingsManager: SettingsManager, cwd?: string): boolean {
   const project = settingsManager.getProjectSettings() as SettingsWithUnknown;
+  // Validate the later migration before this one schedules any SDK writes.
+  const options = packageIdentityOptions(settingsManager);
+  validateProjectWebStatePaths(project, cwd ?? options.cwd, settingsManager.getGlobalSettings().skills, options.agentDir ?? null);
   const legacySkills = readLegacySkillOverrides(project);
   let changed = false;
   for (const [source, entries] of Object.entries(legacySkills)) {
@@ -505,6 +601,51 @@ export function migrateLegacyProjectOverrides(settingsManager: SettingsManager):
 const PROJECT_PLUGIN_STATES = "piWebProjectPluginStates";
 const PROJECT_SKILL_STATES = "piWebProjectSkillStates";
 
+function assertLegacyPathPlatformCompatible(path: string): void {
+  let target = path;
+  if (path.startsWith("file:")) {
+    try {
+      if (!path.startsWith("file://")) throw new Error("invalid file URL");
+      target = fileURLToPath(path);
+    } catch {
+      throw new Error("Pi cannot safely migrate an invalid resource file URL");
+    }
+  }
+  const foreignWindows = process.platform !== "win32" && !isAbsolute(target) && isWindowsAbsolutePath(target);
+  const foreignWindowsUrl = process.platform !== "win32" && path.startsWith("file:") && /^\/[a-z]:\//i.test(target);
+  const foreignPosix = process.platform === "win32" && target.startsWith("/") && !target.startsWith("//");
+  if (foreignWindows || foreignWindowsUrl || foreignPosix) {
+    throw new Error("Pi cannot safely migrate a resource path from another platform; review the existing rule first");
+  }
+}
+
+function validateProjectWebStatePaths(project: SettingsWithUnknown, cwd?: string, globalSkills?: string[], agentDir: string | null = null): void {
+  for (const source of Object.keys(readLegacySkillOverrides(project))) {
+    assertLegacyPathPlatformCompatible(source.startsWith("local:") ? source.slice("local:".length) : source);
+  }
+  const skillStates = project[PROJECT_SKILL_STATES];
+  if (!skillStates || typeof skillStates !== "object" || Array.isArray(skillStates)) return;
+  const projectExclusions = (Array.isArray(project.skills) ? project.skills : []).filter((entry) => typeof entry === "string" && entry.startsWith("!"));
+  const globalExclusions = (Array.isArray(globalSkills) ? globalSkills : []).filter((entry) => typeof entry === "string" && entry.startsWith("!"));
+  for (const [key, state] of Object.entries(skillStates as Record<string, unknown>)) {
+    if (state !== "enabled" && state !== "disabled") continue;
+    if (key.startsWith("package:local:")) {
+      const rest = key.slice("package:local:".length);
+      const delimiter = rest.lastIndexOf(":");
+      if (delimiter > 0) assertLegacyPathPlatformCompatible(rest.slice(0, delimiter));
+      continue;
+    }
+    if (!key.startsWith("top-level:")) continue;
+    const path = key.slice("top-level:".length);
+    if (!path.trim()) continue;
+    assertTopLevelOverridePathSupported(path);
+    assertLegacyPathPlatformCompatible(path);
+    const projectBaseDir = cwd ? resolvePath(cwd, ".pi") : ".";
+    assertNoAmbiguousLegacyGlob(projectExclusions, path, projectBaseDir, cwd ? projectBaseDir : null);
+    assertNoAmbiguousLegacyGlob(globalExclusions, path, projectBaseDir, agentDir);
+  }
+}
+
 function sourceFromIdentity(identity: string): string {
   if (!identity.startsWith("local:")) return identity;
   return portablePath(identity.slice("local:".length));
@@ -518,6 +659,7 @@ function sourceFromIdentity(identity: string): string {
  */
 export function migrateProjectWebStateKeys(settingsManager: SettingsManager, cwd: string): boolean {
   const project = settingsManager.getProjectSettings() as SettingsWithUnknown;
+  validateProjectWebStatePaths(project, cwd, settingsManager.getGlobalSettings().skills, packageIdentityOptions(settingsManager).agentDir ?? null);
   let changed = false;
 
   // Old parent snapshots cannot distinguish automatic state from user intent.
@@ -585,7 +727,7 @@ function normalizeSdkExactPattern(pattern: string): string {
 function normalizeSdkParentPattern(entry: string): string | undefined {
   if (entry.startsWith("!")) return undefined;
   const pattern = entry.startsWith("+") || entry.startsWith("-") ? entry.slice(1) : entry;
-  const normalized = normalizeSdkExactPattern(pattern);
+  const normalized = normalizeSdkExactPattern(pattern.startsWith("file://") ? fileURLToPath(pattern) : pattern);
   // The SDK exact override matcher expands "~" through normalizePath;
   // mirror its join() semantics so a home-relative trailing slash remains
   // literal, while ordinary absolute/relative literals stay exact as well.

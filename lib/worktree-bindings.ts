@@ -100,38 +100,46 @@ export function appendWorktreeBinding(
   return true;
 }
 
-/**
- * Read the latest binding state for a session. Unknown or malformed custom
- * entries are ignored; a binding is only projected when its path is a current
- * Git worktree of the requested project.
- */
+/** A null path set retains bounded candidates for projection against later worktree lists. */
+export function createWorktreeBindingCollector(
+  session: Pick<SessionInfo, "id" | "name">,
+  projectRoot: string,
+  worktreePaths: readonly string[] | null,
+) {
+  const normalizedProjectRoot = normalizeAbsolutePath(projectRoot);
+  const registeredPaths = worktreePaths && new Set(
+    worktreePaths.map(normalizeAbsolutePath).filter((path): path is string => Boolean(path)),
+  );
+  const active = new Map<string, { binding: WorktreeBindingData; createdAt: string }>();
+  return {
+    add(entry: SessionEntry) {
+      if (entry.type !== "custom" || entry.customType !== WORKTREE_BINDING_CUSTOM_TYPE) return;
+      const binding = parseBinding(entry.data);
+      if (!binding || binding.projectRoot !== normalizedProjectRoot || (registeredPaths && !registeredPaths.has(binding.worktreePath))) return;
+      const key = bindingKey(binding.relation, binding.worktreePath);
+      if (binding.action === "release") active.delete(key);
+      else {
+        if (!registeredPaths && !active.has(key) && active.size >= 4096) throw new Error("Too many worktree binding candidates");
+        active.set(key, { binding, createdAt: entry.timestamp });
+      }
+    },
+    records: (): WorktreeBindingRecord[] => [...active.values()].map(({ binding, createdAt }) => ({
+      worktreePath: binding.worktreePath,
+      sessionId: session.id,
+      relation: binding.relation,
+      createdAt,
+      ...(session.name ? { sessionName: session.name } : {}),
+    })),
+  };
+}
+
 export function findWorktreeBindingRecords(
   entries: readonly SessionEntry[],
   session: Pick<SessionInfo, "id" | "name">,
   projectRoot: string,
   worktreePaths: readonly string[],
 ): WorktreeBindingRecord[] {
-  const normalizedProjectRoot = normalizeAbsolutePath(projectRoot);
-  if (!normalizedProjectRoot) return [];
-  const registeredPaths = new Set(
-    worktreePaths.map(normalizeAbsolutePath).filter((path): path is string => Boolean(path)),
-  );
-  const active = new Map<string, { binding: WorktreeBindingData; createdAt: string }>();
-
-  for (const entry of entries) {
-    if (entry.type !== "custom" || entry.customType !== WORKTREE_BINDING_CUSTOM_TYPE) continue;
-    const binding = parseBinding(entry.data);
-    if (!binding || binding.projectRoot !== normalizedProjectRoot || !registeredPaths.has(binding.worktreePath)) continue;
-    const key = bindingKey(binding.relation, binding.worktreePath);
-    if (binding.action === "release") active.delete(key);
-    else active.set(key, { binding, createdAt: entry.timestamp });
-  }
-
-  return [...active.values()].map(({ binding, createdAt }) => ({
-    worktreePath: binding.worktreePath,
-    sessionId: session.id,
-    relation: binding.relation,
-    createdAt,
-    ...(session.name ? { sessionName: session.name } : {}),
-  }));
+  const collector = createWorktreeBindingCollector(session, projectRoot, worktreePaths);
+  for (const entry of entries) collector.add(entry);
+  return collector.records();
 }

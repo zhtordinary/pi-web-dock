@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { localDeviceId } from "./activity-peers.ts";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { writePrivateFileAtomicSync } from "./atomic-file.ts";
 import {
@@ -128,7 +128,9 @@ function normalizeFrame(value: unknown): TalkMapFrame | null {
 export function normalizeTalkMapProjectRoot(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) throw new Error("projectRoot is required");
   const root = value.trim();
-  if (!root.startsWith("/")) throw new Error("projectRoot must be absolute");
+  if (!isAbsolute(root) || (process.platform === "win32" && (parse(root).root.length <= 1 || /^[/\\]{2}[.?][/\\]/.test(root)))) {
+    throw new Error("projectRoot must be absolute");
+  }
   return resolve(root);
 }
 

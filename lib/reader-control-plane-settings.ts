@@ -335,7 +335,7 @@ async function editSkill(target: Required<ReaderSettingsTarget>, document: JsonO
     const mode = operation.startsWith("clear_") ? null : changes.mode;
     if (mode !== null && mode !== "automatic" && mode !== "explicit-only") fail("invalid_changes", "mode must be automatic or explicit-only");
     if (!skill.policyKey) fail("skill_identity_conflict", "Skill has no stable policyKey", 409);
-    updateModeMap(document, target.scope === "global" ? GLOBAL_SKILL_INVOCATION_MODES_SETTING : PROJECT_SKILL_INVOCATION_MODES_SETTING, skill.policyKey, mode, target.cwd);
+    updateModeMap(document, target.scope === "global" ? GLOBAL_SKILL_INVOCATION_MODES_SETTING : PROJECT_SKILL_INVOCATION_MODES_SETTING, skill.policyKey, mode, target.cwd, skill.sourceInfo.origin === "package" ? skill.sourceInfo.baseDir : undefined);
     return;
   }
   const clearing = operation.startsWith("clear_");

@@ -34,6 +34,16 @@ test.after(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+test("rejects an invalid request URL without entering plugin resolution", async (t) => {
+  t.diagnostic(`resource-policy fixture: ${root}`);
+  const invalid = await GET({ url: "not a URL" });
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(await invalid.json(), { error: "Invalid request URL" });
+  const missing = await GET(new Request("http://localhost/api/plugins"));
+  assert.equal(missing.status, 400);
+  assert.deepEqual(await missing.json(), { error: "cwd required" });
+});
+
 test("flushes project plugin override before the caller reads it again", async () => {
   const settings = SettingsManager.inMemory(
     { packages: ["npm:tool@1.0.0"] },

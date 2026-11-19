@@ -28,7 +28,7 @@ test("AppShell delegates Sidekick state, lifecycle, embedded dismissal, and righ
 
 test("AppShell delegates Worktree graph, Git qualification, Talk Map, and branches", () => {
   assert.match(appShell, /useAppShellWorktree\(/);
-  assert.match(appShell, /useAppShellWorktreeCapability\(capabilityPath\)/);
+  assert.match(appShell, /useAppShellWorktreeCapability\(capabilityPath, topBarSessionId\)/);
   assert.match(appShell, /<AppShellWorktreeOverlays/);
   assert.match(worktree, /useState\(false\)/);
   assert.match(worktree, /useAppShellWorktreeCapability/);

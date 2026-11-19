@@ -20,6 +20,7 @@ import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import { listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
 import { isPiSubagentSessionPath, findPiSubagentSessionPaths } from "./session-child-tree";
 import { listWorktrees, resolveProject, type ProjectInfo } from "./worktree";
+import { samePath } from "./paths";
 import { draftViewByTarget, latestQuestionAnalysisJobs, toQuestionAnalysisJobView, type QuestionAnalysisJobView, type QuestionDraftView } from "./question-analysis-jobs";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { getSessionReadSnapshot, invalidateSessionReadCache } from "./session-read-cache";
@@ -159,6 +160,7 @@ export async function attachSessionProjectInfo(sessions: SessionInfo[], projectS
       projectKey: projectIdentityKey(projectRoot),
       ...(project ? { isGit: project.isGit } : {}),
       ...(project?.branch ? { branch: project.branch } : {}),
+      ...(project?.worktreePath ? { worktreePath: project.worktreePath } : {}),
       ...(project?.isWorktree
         ? {
             isWorktree: true,
@@ -381,11 +383,16 @@ export async function listProjectSessions(
   if (!requestedRoot || !isAbsolute(requestedRoot)) throw new Error("projectRoot must be an absolute path");
 
   const project = await resolveProject(requestedRoot);
-  const projectCwds = new Set([requestedRoot, project.projectRoot]);
+  const projectCwds: string[] = [];
+  const addProjectCwd = (cwd: string) => {
+    if (!projectCwds.some((existing) => samePath(existing, cwd))) projectCwds.push(cwd);
+  };
+  addProjectCwd(requestedRoot);
+  addProjectCwd(project.projectRoot);
   if (project.isTopLevel) {
     try {
       for (const worktree of await listWorktrees(project.projectRoot)) {
-        projectCwds.add(worktree.path);
+        addProjectCwd(worktree.path);
       }
     } catch {
       // Non-Git workspaces (or unavailable Git) still use the primary session directory.
@@ -393,7 +400,7 @@ export async function listProjectSessions(
   }
 
   const piSessions = (await Promise.all(
-    [...projectCwds].map((cwd) => SessionManager.list(cwd, sessionDirectoryForCwd(cwd))),
+    projectCwds.map((cwd) => SessionManager.list(cwd, sessionDirectoryForCwd(cwd))),
   )).flat();
   const pathToId = new Map(piSessions.map((session) => [sessionPathKey(session.path), session.id]));
   const sessions = piSessions
@@ -418,7 +425,7 @@ export async function listProjectSessions(
   const persistedSessions = filterCurrentPersistedSessions(attachedSessions, false)
     .filter((session) => session.projectRoot === project.projectRoot);
   const runtimeSessions = await attachSessionProjectInfo(
-    supplementalSessions.filter((session) => session.cwd && projectCwds.has(session.cwd)),
+    supplementalSessions.filter((session) => session.cwd && projectCwds.some((cwd) => samePath(cwd, session.cwd))),
   );
   return mergeSessionLists(persistedSessions, runtimeSessions);
 }
@@ -505,8 +512,8 @@ async function loadAllSessions(projectSessionIds?: ReadonlySet<string>): Promise
   }
 }
 
-export async function listSessionSummaries(): Promise<SessionInfo[]> {
-  return filterCurrentPersistedSessions(await buildScannedSessionList(await listSessionsIncremental({ deferDetails: true })), false);
+export async function listSessionSummaries(options: { readOnly?: boolean; requireComplete?: boolean } = {}): Promise<SessionInfo[]> {
+  return filterCurrentPersistedSessions(await buildScannedSessionList(await listSessionsIncremental({ deferDetails: true, ...options })), false);
 }
 
 interface ArchivedDirCacheEntry {

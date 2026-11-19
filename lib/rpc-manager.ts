@@ -6671,7 +6671,7 @@ export class AgentSessionWrapper {
     const settingsManager = unwrapProjectPluginSettingsManager(skillSettingsManager);
     await reloadProjectPluginSettings(settingsManager);
     if (settingsManager.isProjectTrusted()) {
-      const legacyMigrated = migrateLegacyProjectOverrides(settingsManager);
+      const legacyMigrated = migrateLegacyProjectOverrides(settingsManager, this.cwd);
       const webStateMigrated = migrateProjectWebStateKeys(settingsManager, this.cwd);
       if (legacyMigrated || webStateMigrated) {
         await settingsManager.flush();
@@ -8194,7 +8194,7 @@ export async function startRpcSession(
       projectTrusted: projectTrust.trusted,
     });
     if (projectTrust.trusted) {
-      const legacyMigrated = migrateLegacyProjectOverrides(baseSettingsManager);
+      const legacyMigrated = migrateLegacyProjectOverrides(baseSettingsManager, sessionCwd);
       const webStateMigrated = migrateProjectWebStateKeys(baseSettingsManager, sessionCwd);
       if (legacyMigrated || webStateMigrated) {
         await baseSettingsManager.flush();

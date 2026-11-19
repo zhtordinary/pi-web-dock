@@ -142,7 +142,7 @@ export async function loadSkillsWithInstallInfo(
   if (projectTrust.trusted && !options.readOnly) {
     // Both migrations must run in one pass: the first one returning true must
     // not skip the second, and a single flush keeps the result idempotent.
-    const legacyMigrated = migrateLegacyProjectOverrides(baseSettingsManager);
+    const legacyMigrated = migrateLegacyProjectOverrides(baseSettingsManager, cwd);
     const webStateMigrated = migrateProjectWebStateKeys(baseSettingsManager, cwd);
     if (legacyMigrated || webStateMigrated) {
       await baseSettingsManager.flush();

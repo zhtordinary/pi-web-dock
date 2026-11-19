@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import test from "node:test";
 import { createJiti } from "jiti";
 import { createSealedPublicInputEnvironment } from "../../../../../test-support/sealed-public-inputs.mjs";
@@ -21,7 +21,7 @@ test("summary: eight rotating sessions avoid transcript reads even with the read
   let metrics;
   fs.openSync = function (path, ...args) {
     const fd = original.openSync.call(this, path, ...args);
-    if (String(path).startsWith(directory + "/")) tracked.add(fd);
+    if (String(path).startsWith(directory + sep)) tracked.add(fd);
     return fd;
   };
   fs.closeSync = function (fd, ...args) {
@@ -35,7 +35,7 @@ test("summary: eight rotating sessions avoid transcript reads even with the read
   };
   fs.createReadStream = function (path, ...args) {
     const stream = original.createReadStream.call(this, path, ...args);
-    if (String(path).startsWith(directory + "/")) stream.on("data", (chunk) => {
+    if (String(path).startsWith(directory + sep)) stream.on("data", (chunk) => {
       if (metrics) metrics.historyBytes += Buffer.byteLength(chunk);
     });
     return stream;

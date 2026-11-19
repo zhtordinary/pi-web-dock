@@ -114,7 +114,7 @@ test("restoring one project retains device hiding and other projects", async () 
   hidden.setHidden("project", "/other", true);
   await POST(request("project", "/project"));
   assert.equal((await restore("/project")).status, 200);
-  assert.deepEqual(hidden.readHiddenState().projects, ["/other"]);
+  assert.deepEqual(hidden.readHiddenState().projects, process.platform === "win32" ? ["/other", path.resolve("/other").toLowerCase()] : ["/other"]);
   assert.equal(hidden.isHidden("local", "new", "/project"), true);
 });
 
@@ -127,7 +127,7 @@ test("restore clears active, archived and live-only child hides but retains unre
   for (const id of ["active", "archived", "live", "unrelated"]) hidden.setHidden("session", id, true);
   assert.equal((await restore("/project")).status, 200);
   assert.deepEqual(hidden.readHiddenState().sessions, ["unrelated"]);
-  assert.deepEqual(hidden.readHiddenState().projects, ["/other"]);
+  assert.deepEqual(hidden.readHiddenState().projects, process.platform === "win32" ? ["/other", path.resolve("/other").toLowerCase()] : ["/other"]);
   assert.equal(archivedSessions[0].archived, true);
   assert.equal(runtimeSessions[0].transient, true);
   assert.deepEqual(filters.selectHiddenSessions([...activeSessions, ...archivedSessions, ...runtimeSessions]), []);

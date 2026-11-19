@@ -442,6 +442,8 @@ export interface SessionInfo {
   isGit?: boolean;
   /** Current git branch for any git repo (undefined for non-git or detached HEAD) */
   branch?: string;
+  /** Canonical top-level checkout path for worktree grouping; cwd remains the session execution path. */
+  worktreePath?: string;
   /** True when cwd is a linked git worktree (not the main checkout) */
   isWorktree?: boolean;
   /** Backward-compatible branch label for existing Reader sidebar/Talk Map consumers. */

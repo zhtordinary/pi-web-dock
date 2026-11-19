@@ -238,7 +238,7 @@ test("real composer isolates same-id peers and copies ambiguous legacy drafts on
   const oldFetch = globalThis.fetch;
   Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: window.localStorage });
   globalThis.fetch = async () => response({});
-  const store = await jiti.import("../lib/draft-store.ts");
+  const store = await jiti.import("@/lib/draft-store");
   const { ChatInput } = await jiti.import("./ChatInput.tsx");
   const { I18nProvider } = await jiti.import("@/hooks/useI18n");
   const id = "legacy-draft-ownership-test";
@@ -666,7 +666,7 @@ test("a manually recovered legacy historical edit still submits as edit_history"
   Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: window.localStorage });
   globalThis.EventSource = ControlledEventSource;
   window.EventSource = ControlledEventSource;
-  const store = await jiti.import("../lib/draft-store.ts");
+  const store = await jiti.import("@/lib/draft-store");
   const { ChatInput } = await jiti.import("./ChatInput.tsx");
   const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
   const { I18nProvider } = await jiti.import("@/hooks/useI18n");

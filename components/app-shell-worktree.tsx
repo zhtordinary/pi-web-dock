@@ -58,7 +58,7 @@ export function AppShellWorktreeBranchPanel({
   return <BranchNavigatorPanel tree={tree} activeLeafId={activeLeafId} onLeafChange={onLeafChange} onToggle={onToggle} locked={locked} hasSession={hasSession} />;
 }
 
-export function useAppShellWorktreeCapability(capabilityPath: string | null) {
+export function useAppShellWorktreeCapability(capabilityPath: string | null, sessionId: string | null) {
   const [worktreeCapability, setWorktreeCapability] = useState<{ path: string; isGit: boolean | null; failed?: boolean } | null>(null);
   const [worktreeCapabilityRevision, setWorktreeCapabilityRevision] = useState(0);
   useEffect(() => {
@@ -75,6 +75,19 @@ export function useAppShellWorktreeCapability(capabilityPath: string | null) {
       });
     return () => controller.abort();
   }, [capabilityPath, worktreeCapabilityRevision]);
+  const isCurrentGitProject = worktreeCapability?.path === capabilityPath && worktreeCapability?.isGit === true;
+  useEffect(() => {
+    if (!capabilityPath || !sessionId || !isCurrentGitProject) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      const options = { cache: "no-store" as const, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]) };
+      const separator = capabilityPath.includes("?") ? "&" : "?";
+      for (const query of [new URLSearchParams({ graph: "1" }), new URLSearchParams({ creationHistory: "1", sessionId })]) {
+        void fetch(`${capabilityPath}${separator}${query}`, options).then((response) => response.body?.cancel()).catch(() => {});
+      }
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [capabilityPath, isCurrentGitProject, sessionId]);
   return {
     activeWorktreeCapability: worktreeCapability?.path === capabilityPath ? worktreeCapability : null,
     setWorktreeCapabilityRevision,

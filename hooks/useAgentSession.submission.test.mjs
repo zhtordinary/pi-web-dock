@@ -114,6 +114,30 @@ test("idle connected, restore and reconciliation cannot settle an unaccepted loc
   assert.equal(h.completions.length, 1);
 });
 
+for (const peer of [undefined, null, "debian"]) {
+  test(`retry dispatches once for peer ${String(peer)}`, async () => {
+    const h = harness(), c = h.context, started = [];
+    c.remotePeerRef.current = peer;
+    c.onRetryContinueStartedRef.current = event => started.push([event.sessionId, event.peer, event.entryId]);
+    const pending = actual("handleRetryContinue", c)();
+    h.ready.resolve(); h.accepted.resolve(); await pending;
+    assert.deepEqual(h.commands.map(command => command.type), ["retry_continue"]);
+    assert.deepEqual(started, [["session", peer ?? null, "failed-entry"]]);
+    assert.equal(c.rpcPromptPendingRef.current, true);
+  });
+}
+
+test("local retry releases its pending UI if initialization fails", async () => {
+  const h = harness(), c = h.context;
+  c.remotePeerRef.current = undefined;
+  c.ensureEventsConnected = async () => { throw new Error("connection failed"); };
+  await actual("handleRetryContinue", c)();
+  assert.deepEqual(h.commands, []);
+  assert.equal(c.rpcPromptPendingRef.current, false);
+  assert.equal(c.agentRunningRef.current, false);
+  assert.deepEqual(h.actions, ["start", "end"]);
+});
+
 for (const retry of [false, true]) {
   test(`${retry ? "retry" : "send"} cannot dispatch after Stop releases a pending initialization`, async () => {
     const h = harness(), c = h.context;

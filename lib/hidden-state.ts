@@ -1,9 +1,9 @@
 import { withStateFileTransaction } from "./state-file-transaction.ts";
 import { mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { writePrivateFileAtomicSync } from "./atomic-file.ts";
 import { emitActivityEvent } from "./activity-events.ts";
-import { projectIdentityKeys } from "./project-identity.ts";
+import { projectIdentityKey, projectIdentityKeys } from "./project-identity.ts";
 
 /**
  * 隐藏收纳状态（数据所属设备模型）：每台设备在自己的 hidden.json 里记录
@@ -83,6 +83,17 @@ export function readHiddenState(): HiddenState {
   return load();
 }
 
+function matchesProjectKeys(keys: Set<string>, candidate: string): boolean {
+  if (keys.has(candidate)) return true;
+  if (process.platform !== "win32") return false;
+  const tagged = candidate.startsWith("path:");
+  const path = tagged ? candidate.slice("path:".length) : candidate;
+  const root = win32.parse(path).root;
+  if (!root || /^[a-z]:$/i.test(root)) return false;
+  const normalized = projectIdentityKey(win32.resolve(path), "win32");
+  return keys.has(normalized) || keys.has(`path:${normalized}`);
+}
+
 /**
  * 添加/移除一条隐藏记录；取消 session 隐藏时记录显式可见例外，
  * 这样项目级继承隐藏不会锁死子会话操作。
@@ -94,9 +105,13 @@ export function setHidden(kind: HiddenKind, id: string, hidden: boolean): Hidden
   const state = load();
   const list = state[STATE_KEYS[kind]];
   const keys = kind === "project" ? projectIdentityKeys(key) : [key];
+  const keySet = new Set(keys);
   const nextList = hidden
     ? [...list, ...keys.filter((value) => !list.includes(value))]
-    : list.filter((value) => !keys.includes(value));
+    : list.filter((value) => {
+      if (kind === "project") return !matchesProjectKeys(keySet, value);
+      return !keySet.has(value);
+    });
   const nextVisibleSessions = kind === "session"
     ? hidden
       ? state.visibleSessions.filter((value) => value !== key)
@@ -123,7 +138,7 @@ export function restoreSessionForStorage(sessionId: string, projectKey?: string)
     const sessions = state.sessions.filter((value) => value !== key);
     const projectKeys = projectKey ? new Set(projectIdentityKeys(projectKey)) : undefined;
     const inheritsProjectHidden = Boolean(
-      projectKeys && state.projects.some((value) => projectKeys.has(value)),
+      projectKeys && state.projects.some((value) => matchesProjectKeys(projectKeys, value)),
     );
     const visibleSessions = inheritsProjectHidden
       ? state.visibleSessions.includes(key)
@@ -164,12 +179,15 @@ export function clearProjectHidden(projectKey: string, sessions: Iterable<{ id: 
     const projectKeys = new Set(projectIdentityKeys(key));
     const sessionIds = new Set<string>();
     for (const session of sessions) {
-      if (session.projectKey && projectIdentityKeys(session.projectKey).some((candidate) => projectKeys.has(candidate))) {
+      if (session.projectKey && (
+        matchesProjectKeys(projectKeys, session.projectKey)
+        || projectIdentityKeys(session.projectKey).some((candidate) => projectKeys.has(candidate))
+      )) {
         sessionIds.add(session.id);
       }
     }
     const state = load();
-    const projects = state.projects.filter((value) => !projectKeys.has(value));
+    const projects = state.projects.filter((value) => !matchesProjectKeys(projectKeys, value));
     const hiddenSessions = state.sessions.filter((sessionId) => !sessionIds.has(sessionId));
     const visibleSessions = state.visibleSessions.filter((sessionId) => !sessionIds.has(sessionId));
     if (projects.length === state.projects.length && hiddenSessions.length === state.sessions.length && visibleSessions.length === state.visibleSessions.length) return state;
@@ -195,8 +213,11 @@ export function isHidden(deviceId: string, sessionId: string | undefined, projec
 export function isHiddenInState(state: HiddenState, deviceId: string, sessionId: string | undefined, projectKey: string | undefined): boolean {
   if (state.devices.includes(deviceId)) return true;
   if (sessionId && state.sessions.includes(sessionId)) return true;
-  if (projectKey && projectIdentityKeys(projectKey).some((key) => state.projects.includes(key))) {
-    return !(sessionId && state.visibleSessions.includes(sessionId));
+  if (projectKey) {
+    const projectKeys = new Set(projectIdentityKeys(projectKey));
+    if (state.projects.some((value) => matchesProjectKeys(projectKeys, value))) {
+      return !(sessionId && state.visibleSessions.includes(sessionId));
+    }
   }
   return false;
 }

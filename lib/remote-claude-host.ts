@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { getAgentDir, type InlineExtension, type ModelRuntime, type SessionManager } from "@earendil-works/pi-coding-agent";
-import { join, sep } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /**
@@ -440,7 +440,7 @@ function trustedPolicy(options: InstallRemoteClaudeHostOptions, activeTools: rea
     },
     ordinary: {
       allowedTools: ordinary,
-      readOnlyRoots: [...new Set((options.readOnlyRoots ?? []).filter((root) => typeof root === "string" && root.startsWith("/")))],
+      readOnlyRoots: [...new Set((options.readOnlyRoots ?? []).filter((root) => typeof root === "string" && isAbsolute(root)))],
       bash: "disabled",
       policyDigest: "",
     },
@@ -472,7 +472,7 @@ function installInRegistry(binding: RemoteClaudeHostBinding): RemoteClaudeHostBi
 export async function installRemoteClaudeHost(options: InstallRemoteClaudeHostOptions): Promise<RemoteClaudeHostBinding | null> {
   if (!options.hostIdentity || typeof options.hostIdentity !== "object") return null;
   if (!options.sessionManager || typeof options.sessionManager !== "object") return null;
-  if (!options.sessionId || !options.cwd.startsWith("/")) return null;
+  if (!options.sessionId || !isAbsolute(options.cwd)) return null;
   const agentDir = options.agentDir ?? getAgentDir();
   let contract: RemoteHostContract;
   try {

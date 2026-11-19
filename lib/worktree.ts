@@ -41,6 +41,8 @@ export interface ProjectInfo {
    *  False for repo subdirectories and non-git dirs — the worktree switcher
    *  is only meaningful at the top level. */
   isTopLevel: boolean;
+  /** Canonical Git-reported checkout path when cwd is a checkout top level. */
+  worktreePath?: string;
 }
 
 export interface WorktreeInfo {
@@ -219,7 +221,7 @@ export async function collectWorktreeDirtySummaries(
 
 function realPathOrSelf(filePath: string): string {
   try {
-    return realpathSync(filePath);
+    return process.platform === "win32" ? realpathSync.native(filePath) : realpathSync(filePath);
   } catch {
     return filePath;
   }
@@ -349,25 +351,27 @@ async function resolveProjectUncached(cwd: string): Promise<ProjectInfo> {
         ?? { projectRoot: cwd, isGit: false, branch: null, isWorktree: false, isTopLevel: false };
     }
     if (!hasGitAncestor(cwd)) return { projectRoot: cwd, isGit: false, branch: null, isWorktree: false, isTopLevel: false };
-    const out = await git(cwd, [
+    const out = await gitRaw(cwd, [
       "rev-parse", "--path-format=absolute",
       "--git-common-dir", "--git-dir", "--show-toplevel",
-      "--abbrev-ref", "HEAD",
+      "--abbrev-ref", "HEAD", "--show-prefix", "--is-inside-work-tree",
     ]);
-    const [commonDirRaw, gitDirRaw, toplevelRaw, ref] = out.split("\n").map((l) => l.trim());
+    const lines = out.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    const [commonDirRaw, gitDirRaw, toplevelRaw, ref, cwdPrefix = "", insideWorkTree = "false"] = lines.map((l, index) => index === 3 ? l : l.trim());
+    // Git's --show-prefix is empty at a checkout top level. It avoids
+    // comparing a user-entered path spelling with Git's canonical spelling.
+    // --is-inside-work-tree rejects an explicit GIT_DIR/GIT_WORK_TREE that
+    // points at another checkout while cwd is outside that work tree.
     // Only the first three lines are paths — `ref` is a branch name and must
     // keep its forward slashes (`feature/foo`).
     const [commonDir, gitDir, toplevel] = [commonDirRaw, gitDirRaw, toplevelRaw].map(toNativePath);
-    // git prints resolved (symlink-free) paths; normalize cwd the same way
-    const realCwd = realPathOrSelf(cwd);
     // For a linked worktree, --git-dir differs from --git-common-dir.
     // Only collapse *worktree toplevels* into the main repo. A session whose
     // cwd is a subdirectory of a repo keeps its own project identity —
     // grouping subdirs under the repo root would change where new sessions
-    // are created for existing users. samePath, never `===`: git prints POSIX
-    // paths on Windows, where raw equality is always false and hides the
-    // worktree switcher.
-    const isTopLevel = samePath(toplevel, realCwd);
+    // are created for existing users.
+    const isTopLevel = insideWorkTree === "true" && cwdPrefix === "";
     const isWorktreeTopLevel = !samePath(gitDir, commonDir) && isTopLevel;
     const topLevelProjectRoot = isWorktreeTopLevel ? dirname(commonDir) : toplevel;
     info = {
@@ -376,6 +380,7 @@ async function resolveProjectUncached(cwd: string): Promise<ProjectInfo> {
       branch: ref && ref !== "HEAD" ? ref : null,
       isWorktree: isWorktreeTopLevel,
       isTopLevel,
+      ...(isTopLevel ? { worktreePath: realPathOrSelf(toplevel) } : {}),
     };
   } catch (error) {
     if (isTransientGitError(error)) throw error;

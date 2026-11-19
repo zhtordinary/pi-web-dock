@@ -49,6 +49,10 @@ const globalPath = join(agentDir, "mcp.json");
 const projectPath = join(cwd, ".pi", "mcp.json");
 const authPath = join(agentDir, "mcp-auth.json");
 const marker = join(root, "command-ran");
+const windowsProbePath = marker.replaceAll("\\", "/").replaceAll("'", "\\'");
+const probeCommand = process.platform === "win32"
+  ? `!node -e "require('node:fs').writeFileSync('${windowsProbePath}', 'probe')"`
+  : `!touch ${marker} && echo probe`;
 const store = new ProjectTrustStore(agentDir);
 
 beforeEach(async () => {
@@ -70,7 +74,7 @@ beforeEach(async () => {
     },
   }, null, 2)}\n`);
   await writeFile(projectPath, `${JSON.stringify({
-    mcpServers: { repo: { url: fake.url, headers: { "X-Probe": `!touch ${marker} && echo probe` } } },
+    mcpServers: { repo: { url: fake.url, headers: { "X-Probe": probeCommand } } },
   }, null, 2)}\n`);
   store.set(cwd, null);
 });

@@ -56,8 +56,36 @@ function projectRelativePath(cwd: string, path: string): string | undefined {
     : undefined;
 }
 
+function windowsHomePackageModeKey(key: string): { localKey: string; portableKey: string; home: string; source: string; resource: string } | undefined {
+  const prefix = "package:local:";
+  if (process.platform !== "win32" || !key.startsWith(prefix)) return undefined;
+  const rest = key.slice(prefix.length);
+  const delimiter = rest.indexOf(":", /^[a-z]:[\\/]/i.test(rest) ? 2 : 0);
+  if (delimiter < 0) return undefined;
+  const source = rest.slice(0, delimiter);
+  const resource = rest.slice(delimiter + 1);
+  if (!resource || source.includes("\0") || /^[\\/]{2}[?.][\\/]/.test(source)) return undefined;
+  if (source !== "~" && !/^~[\\/]/.test(source)
+    && !/^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))/i.test(source)) return undefined;
+  try {
+    const identity = getPluginPackageIdentity(source, { scope: "user" });
+    const homeIdentity = getPluginPackageIdentity("~", { scope: "user" });
+    if (!identity.startsWith("local:") || !homeIdentity.startsWith("local:")) return undefined;
+    const sourcePath = identity.slice("local:".length);
+    const home = homeIdentity.slice("local:".length);
+    const rel = relative(home, sourcePath);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
+    const portablePath = rel ? `/${rel.split(sep).join("/")}` : "";
+    return { localKey: `package:${identity}:${resource}`, portableKey: `${prefix}~${portablePath}:${resource}`, home, source, resource };
+  } catch {
+    return undefined;
+  }
+}
+
 // Persist project-local and home-local identities portably; resolve them for the SDK in memory.
 function portableModeKey(key: string, cwd?: string): string {
+  const windowsHome = windowsHomePackageModeKey(key);
+  if (windowsHome) return windowsHome.portableKey;
   const topLevel = "top-level:";
   if (cwd && key.startsWith(topLevel)) {
     const path = key.slice(topLevel.length);
@@ -84,6 +112,8 @@ function localModeKey(key: string, cwd?: string): string {
     }
     return key;
   }
+  const windowsHome = windowsHomePackageModeKey(key);
+  if (windowsHome) return windowsHome.localKey;
   const prefix = "package:local:~";
   return key.startsWith(`${prefix}/`) || key.startsWith(`${prefix}:`)
     ? `package:local:${homedir()}${key.slice(prefix.length)}`
@@ -95,10 +125,18 @@ function readModeMap(settings: unknown, setting: string, cwd?: string): Record<s
   const raw = settings[setting];
   if (!isRecord(raw)) return {};
   const result: Record<string, SkillInvocationMode> = {};
+  const windowsPortable = new Map<string, SkillInvocationMode>();
+  if (process.platform === "win32") {
+    for (const [key, value] of Object.entries(raw)) {
+      if (!/^package:local:~(?:[\\/]|:)/.test(key) || (value !== "automatic" && value !== "explicit-only")) continue;
+      const identity = windowsHomePackageModeKey(key);
+      if (identity) windowsPortable.set(identity.localKey, value);
+    }
+  }
   for (const [key, value] of Object.entries(raw)) {
     if (key.trim() && (value === "automatic" || value === "explicit-only")) {
       const localKey = localModeKey(key, cwd);
-      const portableValue = raw[portableModeKey(localKey, cwd)];
+      const portableValue = windowsPortable.get(localKey) ?? raw[portableModeKey(localKey, cwd)];
       result[localKey] = portableValue === "automatic" || portableValue === "explicit-only"
         ? portableValue
         : value;
@@ -230,39 +268,58 @@ export function updateModeMap(
   policyKey: string,
   mode: SkillInvocationMode | null,
   cwd?: string,
+  sourcePath?: string,
 ): boolean {
   const raw = settings[setting];
   const current = isRecord(raw) ? structuredClone(raw) as SettingsRecord : {};
   const projectCwd = setting === PROJECT_SKILL_INVOCATION_MODES_SETTING ? cwd : undefined;
   const localKey = localModeKey(policyKey, projectCwd);
-  const portableKey = portableModeKey(localKey, projectCwd);
-  const hasLegacyKey = localKey !== portableKey && Object.hasOwn(current, localKey);
+  const windowsHome = windowsHomePackageModeKey(localKey);
+  const matching = windowsHome
+    ? Object.keys(current).filter((key) => windowsHomePackageModeKey(key)?.localKey === localKey)
+    : [];
+  const inputPortable = windowsHome && /^package:local:~(?:[\\/]|:)/.test(policyKey) ? policyKey : undefined;
+  let portableKey = matching.find((key) => /^package:local:~(?:[\\/]|:)/.test(key))
+    ?? inputPortable ?? portableModeKey(localKey, projectCwd);
+  if (windowsHome && mode !== null && !matching.includes(portableKey) && !inputPortable) {
+    const original = sourcePath ?? (policyKey !== localKey ? windowsHomePackageModeKey(policyKey)?.source : undefined);
+    const hinted = original && isAbsolute(original)
+      ? windowsHomePackageModeKey(`package:local:${original}:${windowsHome.resource}`)
+      : undefined;
+    if (!hinted || hinted.localKey !== localKey || !original) throw new Error("Cannot safely save a portable Windows package mode without its original source path");
+    const rel = relative(windowsHome.home, original);
+    portableKey = `package:local:~${rel ? `/${rel.split(sep).join("/")}` : ""}:${windowsHome.resource}`;
+  }
+  const aliases = windowsHome
+    ? matching.filter((key) => key !== portableKey)
+    : localKey !== portableKey && Object.hasOwn(current, localKey) ? [localKey] : [];
   if (mode === null) {
-    if (!Object.hasOwn(current, portableKey) && !hasLegacyKey) return false;
+    if (!Object.hasOwn(current, portableKey) && aliases.length === 0) return false;
     delete current[portableKey];
   } else {
-    if (current[portableKey] === mode && !hasLegacyKey) return false;
+    if (current[portableKey] === mode && aliases.length === 0) return false;
     current[portableKey] = mode;
   }
-  if (hasLegacyKey) delete current[localKey];
+  for (const key of aliases) delete current[key];
   if (Object.keys(current).length > 0) settings[setting] = current;
   else delete settings[setting];
   return true;
 }
 
-export function updateSkillInvocationModeSettings(settings: SettingsRecord, scope: SkillPolicyScope, policyKey: string, mode: SkillInvocationMode | null, cwd?: string): void {
+export function updateSkillInvocationModeSettings(settings: SettingsRecord, scope: SkillPolicyScope, policyKey: string, mode: SkillInvocationMode | null, cwd?: string, sourcePath?: string): void {
   if (!policyKey.trim()) throw new Error("A stable Skill policy key is required");
-  updateModeMap(settings, scope === "global" ? GLOBAL_SKILL_INVOCATION_MODES_SETTING : PROJECT_SKILL_INVOCATION_MODES_SETTING, policyKey, mode, cwd);
+  updateModeMap(settings, scope === "global" ? GLOBAL_SKILL_INVOCATION_MODES_SETTING : PROJECT_SKILL_INVOCATION_MODES_SETTING, policyKey, mode, cwd, sourcePath);
 }
 
 export async function setGlobalSkillInvocationMode(
   agentDir: string,
   policyKey: string,
   mode: SkillInvocationMode | null,
+  sourcePath?: string,
 ): Promise<void> {
   if (!policyKey.trim()) throw new Error("A stable Skill policy key is required");
   await updateGlobalSettings(getGlobalSettingsPath(agentDir), (settings) => {
-    updateSkillInvocationModeSettings(settings, "global", policyKey, mode);
+    updateSkillInvocationModeSettings(settings, "global", policyKey, mode, undefined, sourcePath);
   });
 }
 
@@ -271,6 +328,7 @@ export async function setProjectSkillInvocationMode(
   agentDir: string,
   policyKey: string,
   mode: SkillInvocationMode | null,
+  sourcePath?: string,
 ): Promise<void> {
   if (!policyKey.trim()) throw new Error("A stable Skill policy key is required");
   if (!cwd.trim()) throw new Error("A project cwd is required");
@@ -283,6 +341,6 @@ export async function setProjectSkillInvocationMode(
   // the project's .pi settings file so independent SDK managers cannot lose
   // each other's nested mode keys or unrelated fields.
   await updateGlobalSettings(join(cwd, ".pi", "settings.json"), (settings) => {
-    updateSkillInvocationModeSettings(settings, "project", policyKey, mode, cwd);
+    updateSkillInvocationModeSettings(settings, "project", policyKey, mode, cwd, sourcePath);
   });
 }

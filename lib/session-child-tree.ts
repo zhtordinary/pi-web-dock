@@ -104,8 +104,11 @@ export function resolvePiSubagentBundleRoot(filePath: string, roots: PiSessionRo
   return current;
 }
 
-async function isCanonicalSessionFile(filePath: string): Promise<boolean> {
-  const file = await open(filePath, "r").catch(() => null);
+async function isCanonicalSessionFile(filePath: string, requireComplete = false): Promise<boolean> {
+  const file = await open(filePath, "r").catch((error) => {
+    if (requireComplete) throw error;
+    return null;
+  });
   if (!file) return false;
   try {
     const buffer = Buffer.alloc(16 * 1024);
@@ -118,7 +121,8 @@ async function isCanonicalSessionFile(filePath: string): Promise<boolean> {
       && (header as { type?: unknown }).type === "session"
       && typeof (header as { id?: unknown }).id === "string"
       && Boolean((header as { id: string }).id.trim()));
-  } catch {
+  } catch (error) {
+    if (requireComplete) throw error;
     return false;
   } finally {
     await file.close().catch(() => undefined);
@@ -126,23 +130,26 @@ async function isCanonicalSessionFile(filePath: string): Promise<boolean> {
 }
 
 /** Discover only pi-subagents child transcripts owned by one parent transcript. */
-export async function findPiSubagentSessionPaths(parentPath: string): Promise<string[]> {
+export async function findPiSubagentSessionPaths(parentPath: string, options: { requireComplete?: boolean } = {}): Promise<string[]> {
   if (!parentPath.endsWith(".jsonl")) return [];
   const root = parentPath.slice(0, -".jsonl".length);
   const result: string[] = [];
   const walk = async (directory: string): Promise<void> => {
     let entries: Dirent[];
     try { entries = await readdir(directory, { withFileTypes: true }); }
-    catch { return; }
+    catch (error) {
+      if (options.requireComplete) throw error;
+      return;
+    }
     for (const entry of entries) {
       if (entry.isSymbolicLink() || entry.name === "subagent-artifacts") continue;
       const entryPath = join(directory, entry.name);
       if (entry.isDirectory()) {
         await walk(entryPath);
-      } else if (entry.isFile() && entry.name === "session.jsonl"
-        && isPiSubagentSessionPath(parentPath, entryPath)
-        && await isCanonicalSessionFile(entryPath)) {
-        result.push(entryPath);
+      } else if (entry.isFile() && entry.name === "session.jsonl" && isPiSubagentSessionPath(parentPath, entryPath)) {
+        const canonical = await isCanonicalSessionFile(entryPath, options.requireComplete);
+        if (!canonical && options.requireComplete) throw new Error("Child session inventory is incomplete");
+        if (canonical) result.push(entryPath);
       }
     }
   };

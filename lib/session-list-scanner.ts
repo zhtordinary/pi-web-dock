@@ -484,14 +484,15 @@ export async function scanSessionFileInfo(
 	return (await scanSessionFile(filePath))?.info ?? null;
 }
 
-async function enumerateSessionFiles(sessionsDir: string): Promise<string[]> {
+async function enumerateSessionFiles(sessionsDir: string, requireComplete = false): Promise<string[]> {
 	let dirs: Dirent[];
 	try {
 		const entries = await readdir(sessionsDir, { withFileTypes: true });
 		dirs = entries.filter(
 			(entry) => entry.isDirectory() || entry.isSymbolicLink(),
 		);
-	} catch {
+	} catch (error) {
+		if (requireComplete && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		return [];
 	}
 
@@ -502,14 +503,18 @@ async function enumerateSessionFiles(sessionsDir: string): Promise<string[]> {
 			for (const f of await readdir(dirPath)) {
 				if (f.endsWith(".jsonl")) files.push(join(dirPath, f));
 			}
-		} catch {
+		} catch (error) {
+			if (requireComplete) throw error;
 			// unreadable project dir: same skip-as-absent semantics as the SDK
 		}
 	}
 	const parentsWithChildRoots = files.filter((parentPath) => existsSync(parentPath.slice(0, -".jsonl".length)));
 	const children = await Promise.all(parentsWithChildRoots.map(async (parentPath) => {
-		try { return await findPiSubagentSessionPaths(parentPath); }
-		catch { return []; }
+		try { return await findPiSubagentSessionPaths(parentPath, { requireComplete }); }
+		catch (error) {
+			if (requireComplete) throw error;
+			return [];
+		}
 	}));
 	return [...new Set([...files, ...children.flat()])];
 }
@@ -669,14 +674,14 @@ function queueIndexPersist(path: string): void {
  * catalogue (modified descending).
  */
 export async function listSessionsIncremental(
-	options: { deferDetails?: boolean; sessionsDir?: string; readOnly?: boolean } = {},
+	options: { deferDetails?: boolean; sessionsDir?: string; readOnly?: boolean; requireComplete?: boolean } = {},
 ): Promise<ScannedSessionInfo[]> {
 	loadPersistedIndex();
 	const deferDetails = options.deferDetails ?? false;
 
 	const agentDir = getAgentDir();
 	const sessionsDir = options.sessionsDir ?? join(agentDir, "sessions");
-	const files = await enumerateSessionFiles(sessionsDir);
+	const files = await enumerateSessionFiles(sessionsDir, options.requireComplete);
 	globalThis.__piSessionMembership = { files: new Set(files) };
 
 	// Observe-only callers may reuse fingerprints but must not mutate the map
@@ -757,6 +762,7 @@ export async function listSessionsIncremental(
 		}
 	});
 
+	if (options.requireComplete && results.some((result) => result === null)) throw new Error("Session inventory is incomplete");
 	if (!options.readOnly && (changed.length > 0 || stale.length > 0)) queueIndexPersist(indexFilePath(agentDir));
 
 	// Preserve catalogue order for timestamp ties, independently of cache hits

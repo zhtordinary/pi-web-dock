@@ -5813,7 +5813,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
     handleOpenTalkMapForSession(topBarProjectPath, device, topBarSessionId);
   }, [handleOpenTalkMapForSession, localDeviceId, remoteSession?.device, topBarDeviceName, topBarProjectPath, topBarSessionId]);
   const capabilityPath = topBarProjectPath ? apiPathForPeer(topBarSessionPeer ?? undefined, `worktrees?cwd=${encodeURIComponent(topBarProjectPath)}`) : null;
-  const { activeWorktreeCapability, setWorktreeCapabilityRevision } = useAppShellWorktreeCapability(capabilityPath);
+  const { activeWorktreeCapability, setWorktreeCapabilityRevision } = useAppShellWorktreeCapability(capabilityPath, topBarSessionId);
   const topBarIsGit = activeWorktreeCapability?.isGit === true;
   const handleTopBarWorktreeGraph = useCallback(() => {
     if (!topBarProjectPath) return;

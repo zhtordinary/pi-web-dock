@@ -37,6 +37,7 @@ type TopLevelExtensionAction = "set_top_level_extension" | "clear_top_level_exte
 type ProjectOverrideAction = "set_project_override" | "clear_project_override";
 
 const PLUGIN_SOURCE_KINDS: PluginSourceKind[] = ["local", "npm", "git"];
+type PackageSidebarGroupKind = PluginSourceKind | "dependencies";
 
 function pluginSourceRank(source: string): number {
   return { local: 0, npm: 1, git: 2 }[pluginSourceKind(source)];
@@ -44,6 +45,11 @@ function pluginSourceRank(source: string): number {
 
 export function pluginDisplayName(pkg: PluginPackageInfo): string {
   return pluginNameFromSource(pkg.source, pkg.packageName);
+}
+
+/** Packages without resolved Pi resources are dependencies, not plugins. */
+export function isDependencyPackage(pkg: PluginPackageInfo): boolean {
+  return pkg.resources.length === 0;
 }
 
 export function isPackageVisible(
@@ -291,7 +297,8 @@ export function firstRenderedPluginKey(
   builtinRuntimeExtensions: readonly BuiltinRuntimeExtensionInfo[],
   topLevelExtensions: readonly PluginTopLevelExtensionInfo[],
 ): string | null {
-  const firstPackage = [...packages].sort(comparePluginPackages)[0];
+  const sortedPackages = [...packages].sort(comparePluginPackages);
+  const firstPackage = sortedPackages.find((pkg) => !isDependencyPackage(pkg)) ?? sortedPackages[0];
   return firstPackage
     ? packageKey(firstPackage)
     : builtinRuntimeExtensions[0]
@@ -342,6 +349,11 @@ function statusColor(status: PluginPackageInfo["status"]): string {
   if (status === "installed") return "#f59e0b";
   if (status === "disabled") return "var(--text-dim)";
   return "#ef4444";
+}
+
+function packageStatusColor(pkg: PluginPackageInfo): string {
+  if (!isDependencyPackage(pkg) || pkg.status === "missing") return statusColor(pkg.status);
+  return "var(--text-dim)";
 }
 
 function ResourceList({ pkg }: { pkg: PluginPackageInfo }) {
@@ -762,6 +774,7 @@ function PackageDetail({
   const isGlobalProjectPackage = viewScope === "project" && pkg.scope === "global";
   const projectStatus = projectPackageStatus(pkg);
   const enabled = packageEnabledForView(pkg, viewScope);
+  const dependency = isDependencyPackage(pkg);
   const [copiedInstallPath, setCopiedInstallPath] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
 
@@ -890,7 +903,7 @@ function PackageDetail({
       >
         {pkg.description && <div style={{ gridColumn: "1 / -1", color: "var(--text-muted)" }}>{pkg.description}</div>}
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.status")}</div>
-        <div style={{ color: statusColor(pkg.status), textTransform: "capitalize" }}>{pkg.status}</div>
+        <div style={{ color: packageStatusColor(pkg), textTransform: "capitalize" }}>{pkg.status}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.version")}</div>
          <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionSummary(pkg, t)}</div>
         {(pkg.packageName || pluginSourceKind(pkg.source) !== "git") && (
@@ -999,31 +1012,39 @@ function PackageDetail({
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
-              {t("i18n.pluginRuntimeStatusTitle")}
+              {dependency ? t("i18n.pluginDependencies") : t("i18n.pluginRuntimeStatusTitle")}
             </span>
             <span
               style={{
                 fontSize: 10,
                 padding: "1px 6px",
                 borderRadius: 4,
-                background: enabled ? "rgba(34,197,94,0.12)" : "rgba(120,120,120,0.12)",
-                color: enabled ? "#15803d" : "var(--text-dim)",
+                background: dependency
+                  ? "rgba(120,120,120,0.12)"
+                  : enabled ? "rgba(34,197,94,0.12)" : "rgba(120,120,120,0.12)",
+                color: dependency ? "var(--text-dim)" : enabled ? "#15803d" : "var(--text-dim)",
                 fontWeight: 600,
               }}
             >
-              {enabled ? t("i18n.pluginRuntimeLoaded") : t("i18n.pluginRuntimeDisabled")}
+              {dependency
+                ? t("i18n.pluginDependencies")
+                : enabled ? t("i18n.pluginRuntimeLoaded") : t("i18n.pluginRuntimeDisabled")}
             </span>
           </div>
           <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
-            {enabled
-              ? `Package: loaded · ${pkg.resources.length} resources`
-              : "Package: disabled · all resources unloaded"}
+            {dependency
+              ? "Package: dependency · 0 resources"
+              : enabled
+                ? `Package: loaded · ${pkg.resources.length} resources`
+                : "Package: disabled · all resources unloaded"}
           </span>
         </div>
         <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
-          {enabled
-            ? t("i18n.pluginRuntimeLoadedReason")
-            : t("i18n.pluginRuntimeDisabledReason")}
+          {dependency
+            ? t("i18n.pluginDependencyReason")
+            : enabled
+              ? t("i18n.pluginRuntimeLoadedReason")
+              : t("i18n.pluginRuntimeDisabledReason")}
         </div>
         <div
           style={{
@@ -1670,10 +1691,11 @@ export function PluginsConfig({
   const [showNotEnabled, setShowNotEnabled] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [projectFilter, setProjectFilter] = useState<ProjectPackageFilter>("different");
-  const [collapsedSources, setCollapsedSources] = useState<Record<PluginSourceKind, boolean>>({
+  const [collapsedSources, setCollapsedSources] = useState<Record<PackageSidebarGroupKind, boolean>>({
     local: false,
     npm: false,
     git: false,
+    dependencies: false,
   });
   const [topLevelExtensionsCollapsed, setTopLevelExtensionsCollapsed] = useState(false);
   const [builtinRuntimeExtensionsCollapsed, setBuiltinRuntimeExtensionsCollapsed] = useState(false);
@@ -1739,12 +1761,15 @@ export function PluginsConfig({
   }, [filterablePackages, filterableTopLevelExtensions]);
 
   const groupedPackages = useMemo(() => {
-    return PLUGIN_SOURCE_KINDS
-      .map((sourceKind) => ({
+    const pluginPackages = visiblePackages.filter((pkg) => !isDependencyPackage(pkg));
+    const dependencyPackages = visiblePackages.filter(isDependencyPackage);
+    return [
+      ...PLUGIN_SOURCE_KINDS.map((sourceKind) => ({
         sourceKind,
-        packages: visiblePackages.filter((pkg) => pluginSourceKind(pkg.source) === sourceKind),
-      }))
-      .filter((group) => group.packages.length > 0);
+        packages: pluginPackages.filter((pkg) => pluginSourceKind(pkg.source) === sourceKind),
+      })),
+      ...(dependencyPackages.length > 0 ? [{ sourceKind: "dependencies" as const, packages: dependencyPackages }] : []),
+    ].filter((group) => group.packages.length > 0);
   }, [visiblePackages]);
 
   useEffect(() => {
@@ -2262,6 +2287,9 @@ export function PluginsConfig({
                 <>
                   {groupedPackages.map((group) => {
                   const collapsed = collapsedSources[group.sourceKind];
+                  const groupLabel = group.sourceKind === "dependencies"
+                    ? t("i18n.pluginDependencies")
+                    : pluginSourceLabel(group.sourceKind, t);
                   return (
                     <div key={group.sourceKind} className="config-sidebar-group config-resource-group" style={{ marginBottom: 10 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -2295,7 +2323,7 @@ export function PluginsConfig({
                           style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
                           aria-hidden="true"
                         />
-                        <span>{pluginSourceLabel(group.sourceKind, t)}</span>
+                        <span>{groupLabel}</span>
                         <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>{group.packages.length}</span>
                       </button>
                       </div>
@@ -2336,7 +2364,7 @@ export function PluginsConfig({
                                 width: 7,
                                 height: 7,
                                 borderRadius: "50%",
-                                background: statusColor(pkg.status),
+                                background: packageStatusColor(pkg),
                               }}
                             />
                             <div style={{ minWidth: 0, flex: 1 }}>

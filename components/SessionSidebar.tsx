@@ -3,7 +3,7 @@ import { WorktreeSessionBuckets, type WorktreeVirtualTreeNode } from "./Worktree
 import { flattenBucketedSessionRows, flattenSessionTreeRows, getPinnedInteractionIds, getVirtualRowWindow, SESSION_ROW_HEIGHT, type SessionSidebarRow } from "./session-sidebar-virtual";
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
-import { Check, ChevronRight, Eye, MessageSquarePlus, X } from "lucide-react";
+import { Check, ChevronRight, Eye, MessageSquarePlus, Trash2, X } from "lucide-react";
 import { sessionSearchResultMatchesFilter, sessionSearchResultSources, type SessionInfo, type SessionSearchMatchFilter, type SessionSearchResult } from "@/lib/types";
 import type { SubprojectDefinition, SubprojectSortSetting } from "@/lib/subproject-state";
 import { filterSubprojectItems, groupBySubproject, orderedSubprojectIds, projectKeysMatch, reorderSubprojectIds } from "@/lib/subproject-groups";
@@ -521,6 +521,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
   const [wtNewName, setWtNewName] = useState("");
   const [wtError, setWtError] = useState<string | null>(null);
   const [wtBusy, setWtBusy] = useState(false);
+  const [wtDeletePath, setWtDeletePath] = useState<string | null>(null);
   const [worktreeLoadingCwd, setWorktreeLoadingCwd] = useState<string | null>(null);
   const wtDropdownRef = useRef<HTMLDivElement>(null);
   const wtNewInputRef = useRef<HTMLInputElement>(null);
@@ -1104,6 +1105,33 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
     }
   }, [wtNewName, wtBusy, worktreeState]);
 
+  const handleDeleteWorktree = useCallback(async (path: string) => {
+    if (wtBusy || !worktreeState) return;
+    setWtBusy(true);
+    setWtError(null);
+    try {
+      const res = await fetch("/api/worktrees", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: worktreeState.projectRoot, path }),
+      });
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      if (!res.ok) {
+        setWtError(data.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      if (path === worktreeState.currentWorktreePath) setSelectedCwd(worktreeState.projectRoot);
+      setWtDeletePath(null);
+      setWtDropdownOpen(false);
+      setWtRefreshKey((key) => key + 1);
+      window.dispatchEvent(new CustomEvent("pi-web:worktree-management-changed"));
+    } catch (error) {
+      setWtError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWtBusy(false);
+    }
+  }, [wtBusy, worktreeState]);
+
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -1115,6 +1143,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
         setWtDropdownOpen(false);
         setWtNewOpen(false);
         setWtNewName("");
+        setWtDeletePath(null);
         setWtError(null);
         setWtFilter("");
       }
@@ -2086,6 +2115,14 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
                             <PathLabel text={wt.branch ?? displayCwd(wt.path, homeDir)} style={{ flex: 1 }} />
                             {wt.isMain && <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{t("sidebar.main")}</span>}
                           </button>
+                          {!wt.isMain && (wtDeletePath === wt.path ? (
+                            <div style={{ display: "flex", gap: 3, padding: "0 5px" }}>
+                              <button type="button" disabled={wtBusy} onClick={() => void handleDeleteWorktree(wt.path)} title={t("chat.confirm")} aria-label={t("chat.confirm")} style={{ border: 0, background: "transparent", color: "#dc2626", cursor: wtBusy ? "not-allowed" : "pointer", padding: 3, fontSize: 10 }}>✓</button>
+                              <button type="button" disabled={wtBusy} onClick={() => setWtDeletePath(null)} title={t("i18n.cancel")} aria-label={t("i18n.cancel")} style={{ border: 0, background: "transparent", color: "var(--text-dim)", cursor: wtBusy ? "not-allowed" : "pointer", padding: 3, fontSize: 10 }}>×</button>
+                            </div>
+                          ) : (
+                            <button type="button" disabled={wtBusy} onClick={(event) => { event.stopPropagation(); setWtDeletePath(wt.path); setWtError(null); }} title={t("worktreeBuckets.deleteWorktree")} aria-label={t("worktreeBuckets.deleteWorktree")} style={{ border: 0, background: "transparent", color: "#dc2626", cursor: wtBusy ? "not-allowed" : "pointer", padding: "6px 7px", opacity: wtBusy ? 0.55 : 1 }}><Trash2 size={13} strokeWidth={1.8} aria-hidden="true" /></button>
+                          ))}
                         </div>
                       );
                     })}

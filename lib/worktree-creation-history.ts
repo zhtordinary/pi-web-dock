@@ -73,14 +73,18 @@ function resolveCreationPath(rawPath: string, baseDir: string): string | undefin
   return normalize(isAbsolute(rawPath) ? rawPath : resolve(baseDir, rawPath));
 }
 
+const READ_ONLY_REVISION_GUARD = /^test\s+"\$\(git\s+-C\s+"\$[A-Za-z_][A-Za-z0-9_]*"\s+rev-parse\s+[A-Za-z0-9._/-]+\)"\s*=\s*(?:"\$\(git\s+-C\s+"\$[A-Za-z_][A-Za-z0-9_]*"\s+rev-parse\s+[A-Za-z0-9._/-]+\)"|[A-Fa-f0-9]{40,64})\s*$/;
+
 // shortcut: recognize a limited shell form, extend it only with equally verifiable execution evidence.
-function creationCommand(command: string, worktrees: ReadonlyMap<string, string>, home: string, sessionCwd: string): CreationCommand | undefined {
+function creationCommand(command: string, worktrees: ReadonlyMap<string, string> | null, home: string, sessionCwd: string): CreationCommand | undefined {
   // Multiple add commands cannot be paired unambiguously with one tool result.
   if ((command.match(/\bworktree\s+add\b/g) ?? []).length !== 1) return undefined;
   const variables = new Map<string, string>([["HOME", home]]);
   for (const fragment of commandFragments(command)) {
     const parsed = splitShellWords(fragment.trim());
     if (!parsed.ok) {
+      // A read-only revision guard runs in a subshell and cannot change these variables.
+      if (parsed.error.code === "command-substitution" && READ_ONLY_REVISION_GUARD.test(fragment.trim())) continue;
       const homeValue = variables.get("HOME");
       variables.clear();
       if (homeValue !== undefined) variables.set("HOME", homeValue);
@@ -126,10 +130,10 @@ function creationCommand(command: string, worktrees: ReadonlyMap<string, string>
     if (!rawPath) return undefined;
     const path = resolveCreationPath(rawPath, pathBase);
     if (!path) return undefined;
-    const registeredPath = worktrees.get(path);
-    if (!registeredPath) return undefined;
+    const registeredPath = worktrees?.get(path);
+    if (worktrees && !registeredPath) return undefined;
     return {
-      path: registeredPath,
+      path: registeredPath ?? path,
       ...(branch ? { branch } : {}),
     };
   }
@@ -149,38 +153,55 @@ function confirmsCreation(output: string, command: CreationCommand): boolean {
 }
 
 /** Project evidence from successful bash tool calls, not a current worktree owner. */
+export function createWorktreeCreationCollector(
+  session: Pick<SessionInfo, "id" | "created" | "cwd">,
+  worktreePaths: readonly string[] | null,
+  home: string,
+) {
+  const created = Date.parse(session.created);
+  const worktrees = worktreePaths && new Map(worktreePaths.filter(isAbsolute).map((path) => [normalize(path), path]));
+  const pending = new Map<string, CreationCommand & { createdAt: string }>();
+  const found = new Map<string, WorktreeCreationRecord>();
+  return {
+    add(entry: SessionEntry) {
+      if (!Number.isFinite(created) || entry.type !== "message") return;
+      if (entry.message.role === "assistant") {
+        const timestamp = Date.parse(entry.timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < created) return;
+        const message = normalizeToolCalls(entry.message);
+        if (message.role !== "assistant") return;
+        for (const block of message.content) {
+          if (block.type !== "toolCall" || block.toolName !== "bash" || !block.toolCallId || typeof block.input.command !== "string") continue;
+          const command = creationCommand(block.input.command, worktrees, home, session.cwd);
+          if (command) {
+            if (!worktrees && pending.has(block.toolCallId)) throw new Error("Ambiguous worktree creation call");
+            if (!pending.has(block.toolCallId) && pending.size >= 4096) throw new Error("Too many pending worktree creation calls");
+            pending.set(block.toolCallId, { ...command, createdAt: entry.timestamp });
+          }
+        }
+      } else if (entry.message.role === "toolResult") {
+        const command = pending.get(entry.message.toolCallId);
+        pending.delete(entry.message.toolCallId);
+        const resultTime = Date.parse(entry.timestamp);
+        if (!command || entry.message.isError !== false || !Number.isFinite(resultTime) || resultTime < Date.parse(command.createdAt) || (entry.message.toolName && entry.message.toolName !== "bash")) return;
+        const output = entry.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+        if (confirmsCreation(output, command)) {
+          if (!worktrees && !found.has(command.path) && found.size >= 4096) throw new Error("Too many worktree creation candidates");
+          found.set(command.path, { worktreePath: command.path, sessionId: session.id, createdAt: command.createdAt });
+        }
+      }
+    },
+    records: () => [...found.values()],
+  };
+}
+
 export function findWorktreeCreationRecords(
   entries: readonly SessionEntry[],
   session: Pick<SessionInfo, "id" | "created" | "cwd">,
   worktreePaths: readonly string[],
   home: string,
 ): WorktreeCreationRecord[] {
-  const created = Date.parse(session.created);
-  if (!Number.isFinite(created)) return [];
-  const worktrees = new Map(worktreePaths.filter(isAbsolute).map((path) => [normalize(path), path]));
-  const pending = new Map<string, CreationCommand & { createdAt: string }>();
-  const found = new Map<string, WorktreeCreationRecord>();
-  for (const entry of entries) {
-    if (entry.type !== "message") continue;
-    if (entry.message.role === "assistant") {
-      const timestamp = Date.parse(entry.timestamp);
-      if (!Number.isFinite(timestamp) || timestamp < created) continue;
-      const message = normalizeToolCalls(entry.message);
-      if (message.role !== "assistant") continue;
-      for (const block of message.content) {
-        if (block.type !== "toolCall" || block.toolName !== "bash" || !block.toolCallId || typeof block.input.command !== "string") continue;
-        const command = creationCommand(block.input.command, worktrees, home, session.cwd);
-        if (command) pending.set(block.toolCallId, { ...command, createdAt: entry.timestamp });
-      }
-    } else if (entry.message.role === "toolResult") {
-      const command = pending.get(entry.message.toolCallId);
-      pending.delete(entry.message.toolCallId);
-      const resultTime = Date.parse(entry.timestamp);
-      if (!command || entry.message.isError !== false || !Number.isFinite(resultTime) || resultTime < Date.parse(command.createdAt) || (entry.message.toolName && entry.message.toolName !== "bash")) continue;
-      const output = entry.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-      if (!confirmsCreation(output, command)) continue;
-      found.set(command.path, { worktreePath: command.path, sessionId: session.id, createdAt: command.createdAt });
-    }
-  }
-  return [...found.values()];
+  const collector = createWorktreeCreationCollector(session, worktreePaths, home);
+  for (const entry of entries) collector.add(entry);
+  return collector.records();
 }

@@ -46,6 +46,7 @@ import {
 } from "@/lib/reader-event-stream";
 
 import { hasParentDirectorySegment } from "@/lib/path-security";
+import { watchDirectory } from "@/lib/watch-directory";
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
@@ -955,7 +956,7 @@ export async function GET(
           };
           try {
             const watchedDirectory = path.dirname(filePath);
-            watcher = fs.watch(watchedDirectory, (_eventType, changedName) => {
+            watcher = fs.watch(watchDirectory(watchedDirectory), (_eventType, changedName) => {
               if (closed) return;
               if (
                 changedName != null

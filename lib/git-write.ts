@@ -69,7 +69,7 @@ function isWithin(parent: string, target: string): boolean {
 
 function physicalPath(filePath: string): string {
   try {
-    return realpathSync(filePath);
+    return realpathSync.native(filePath);
   } catch {
     return path.resolve(filePath);
   }

@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { existsSync, statSync } from "fs";
-import { homedir } from "os";
+import { existsSync } from "fs";
 import {
   addWorktree,
   buildWorktreeGraph,
@@ -15,10 +14,10 @@ import {
 import { isExistingDirectory } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { filterHiddenSessions } from "@/lib/hidden-filter";
-import { getSessionEntries, listAllSessions } from "@/lib/session-reader";
+import { listSessionSummaries } from "@/lib/session-reader";
 import { assertWorktreeRemovalSafe } from "@/lib/worktree-removal-safety";
-import { findWorktreeCreationRecords } from "@/lib/worktree-creation-history";
-import { findWorktreeBindingRecords } from "@/lib/worktree-bindings";
+import { scanWorktreeAssociations } from "@/lib/worktree-association-scan";
+import { readWorktreeAssociationHints, saveWorktreeAssociationHints } from "@/lib/worktree-association-index";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 function validateCwd(cwd: string): NextResponse | null {
@@ -90,29 +89,37 @@ export async function GET(req: Request) {
     const projectKey = projectIdentityKey(project.projectRoot);
     if (searchParams.get("creationHistory") === "1") {
       if (!isGit) return NextResponse.json({ error: "Not a Git repository" }, { status: 400 });
-      const sessions = filterHiddenSessions(await listAllSessions({ readOnly: true }))
+      let inventoryIncomplete = false;
+      let summaries: Awaited<ReturnType<typeof listSessionSummaries>>;
+      try {
+        summaries = await listSessionSummaries({ readOnly: true, requireComplete: true });
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "Session inventory is incomplete") throw error;
+        inventoryIncomplete = true;
+        summaries = await listSessionSummaries({ readOnly: true });
+      }
+      const sessions = filterHiddenSessions(summaries)
         .filter((session) => (session.projectKey ?? projectIdentityKey(session.projectRoot ?? session.cwd)) === projectKey);
       const paths = worktrees.map((worktree) => worktree.path);
-      const records: Array<{ worktreePath: string; sessionId: string; createdAt: string; sessionName?: string }> = [];
-      const bindings: Array<{ worktreePath: string; sessionId: string; relation: "creator" | "task-root"; createdAt: string; sessionName?: string }> = [];
-      let remainingBytes = 256 * 1024 * 1024;
-      let partial = false;
-      for (const session of sessions) {
-        try {
-          const size = statSync(session.path).size;
-          // Bound one inspection to the existing session-read cache's 64 MiB file limit.
-          if (size > 64 * 1024 * 1024 || size > remainingBytes) { partial = true; continue; }
-          remainingBytes -= size;
-          const entries = getSessionEntries(session.path);
-          for (const record of findWorktreeCreationRecords(entries, session, paths, homedir())) {
-            records.push({ ...record, ...(session.name ? { sessionName: session.name } : {}) });
-          }
-          bindings.push(...findWorktreeBindingRecords(entries, session, project.projectRoot, paths));
-        } catch {
-          partial = true;
-        }
+      const prioritySessionId = searchParams.get("sessionId") || undefined;
+      const deadline = performance.now() + 80;
+      let history = scanWorktreeAssociations(sessions, project.projectRoot, paths, {
+        retry: searchParams.get("retry") === "1", prioritySessionId,
+      });
+      // Yield between bounded slices and stop promptly for other requests.
+      for (let slice = 1; slice < 16 && history.progress.running && performance.now() < deadline; slice++) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        history = scanWorktreeAssociations(sessions, project.projectRoot, paths, { prioritySessionId });
       }
-      return NextResponse.json({ records, bindings, partial }, { headers: { "Cache-Control": "no-store" } });
+      const partial = history.partial || inventoryIncomplete;
+      const provisionalRecords = partial
+        ? readWorktreeAssociationHints(project.projectRoot, sessions, paths)
+          .filter((record) => record.sessionId !== prioritySessionId || history.priorityPending)
+        : [];
+      if (!partial || history.records.length) {
+        saveWorktreeAssociationHints(project.projectRoot, sessions, paths, history.records, !partial);
+      }
+      return NextResponse.json({ ...history, partial, ...(inventoryIncomplete && !history.failure ? { failure: "unavailable" } : {}), provisionalRecords }, { headers: { "Cache-Control": "no-store" } });
     }
     const graph = searchParams.get("graph") === "1" && isGit
       ? await buildWorktreeGraph(existsSync(cwd) ? cwd : project.projectRoot, { forceRefresh: searchParams.get("refresh") === "1" })

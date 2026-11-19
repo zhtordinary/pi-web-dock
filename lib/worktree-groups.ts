@@ -32,6 +32,10 @@ function sessionProjectIdentity(session: SessionInfo): string {
   return session.projectKey ?? clientPathIdentity(session.projectRoot ?? session.cwd);
 }
 
+function sessionCheckoutPath(session: SessionInfo): string {
+  return session.worktreePath ?? session.cwd;
+}
+
 function scopePrefix(projectKey: string, deviceId?: string): string {
   return `${deviceId ? `${deviceId}:` : ""}worktree:${projectKey}:`;
 }
@@ -42,7 +46,7 @@ export function worktreeGroupKey(projectKey: string, path: string, deviceId?: st
 
 function identityFor(session: SessionInfo, kind: WorktreeSessionGroupKind, deviceId?: string): string {
   const project = sessionProjectIdentity(session);
-  if (kind === "worktree") return worktreeGroupKey(project, session.cwd, deviceId);
+  if (kind === "worktree") return worktreeGroupKey(project, sessionCheckoutPath(session), deviceId);
   const prefix = deviceId ? `${deviceId}:` : "";
   if (kind === "main") return `${prefix}main:${project}`;
   return `${prefix}project:${project}:${clientPathIdentity(session.cwd)}`;
@@ -100,8 +104,8 @@ export function groupSessionsByWorktree<T>(
       group = {
         key,
         kind,
-        label: kind === "main" ? (branch ?? "main") : kind === "worktree" ? (branch ?? session.cwd) : session.cwd,
-        path: session.cwd,
+        label: kind === "main" ? (branch ?? "main") : kind === "worktree" ? (branch ?? sessionCheckoutPath(session)) : session.cwd,
+        path: kind === "project" ? session.cwd : sessionCheckoutPath(session),
         ...(branch ? { branch } : {}),
         items: [],
       };

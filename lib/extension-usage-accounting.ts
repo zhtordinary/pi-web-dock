@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DefaultPackageManager, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { BillingUsageInput, ReaderUsageRecord } from "./billing";
+import { samePath } from "./paths";
 
 export const EXTENSION_USAGE_ENTRY = "pi-extension-usage";
 
@@ -73,13 +74,15 @@ function legacyPath(agent: string, descriptor: LegacyDescriptor, sessionId: stri
 }
 
 async function physicalParents(root: string, file: string): Promise<"ok" | "missing" | "unsafe"> {
-  const relative = file.slice(root.length + 1).split("/");
+  const path = relative(root, file);
+  if (!path || path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) return "unsafe";
+  // shortcut: path checks cannot prevent replacement races, use handle-bound access before Windows acceptance.
   let current = root;
-  for (const part of relative.slice(0, -1)) {
+  for (const part of path.split(sep).slice(0, -1)) {
     current = join(current, part);
     try {
       const info = await lstat(current);
-      if (!info.isDirectory() || info.isSymbolicLink() || await realpath(current) !== current) return "unsafe";
+      if (!info.isDirectory() || info.isSymbolicLink() || !samePath(await realpath(current), current)) return "unsafe";
     } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unsafe"; }
   }
   return "ok";

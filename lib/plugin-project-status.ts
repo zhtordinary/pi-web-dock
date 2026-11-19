@@ -4,13 +4,13 @@ import {
   SettingsManager,
   type PackageSource,
 } from "@earendil-works/pi-coding-agent";
-import { resolve as resolvePath } from "node:path";
-import { homedir } from "node:os";
+import { isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import type {
   PluginDiagnostic,
   PluginOverrideState,
   PluginProjectStatus,
 } from "./api-types";
+import { isWindowsAbsolutePath } from "./paths";
 import { applyPackageParentCaps, isDisabledPackage, setPackageEntryDisabled } from "./plugin-package-state";
 
 export const PROJECT_PLUGIN_STATES_SETTING = "piWebProjectPluginStates";
@@ -88,6 +88,7 @@ export function getPluginPackageIdentity(
   options: PluginPackageIdentityOptions = {},
 ): string {
   const manager = getIdentityManager(options);
+  // SAFETY: Pi's package manager implements this private identity method.
   return (manager as unknown as {
     getPackageIdentity: (value: string, scope?: PluginPackageScope) => string;
   }).getPackageIdentity(source.trim(), options.scope);
@@ -95,6 +96,11 @@ export function getPluginPackageIdentity(
 
 function canonicalStateKey(key: string, options: PluginPackageIdentityOptions): string {
   const trimmed = key.trim();
+  const path = trimmed.startsWith("local:") ? trimmed.slice("local:".length) : trimmed;
+  if ((process.platform !== "win32" && ((!isAbsolute(path) && isWindowsAbsolutePath(path)) || /^file:\/\/\/[a-z]:[\\/]/i.test(path)))
+    || (process.platform === "win32" && path.startsWith("/") && !path.startsWith("//"))) {
+    throw new Error("Pi cannot safely use a plugin state path from another platform; review the existing rule first");
+  }
   if (trimmed.startsWith("local:")) return trimmed;
   return getPluginPackageIdentity(trimmed, { ...options, scope: "user" });
 }
@@ -103,26 +109,45 @@ function canonicalStateKey(key: string, options: PluginPackageIdentityOptions): 
  * Serialize a `local:<abs>` state key to a portable form (`local:~<rel>`) so
  * project plugin overrides survive cross-device sync. Non-home paths stay as-is.
  */
-function portableLocalKey(key: string): string {
+function portableLocalKey(key: string, options: PluginPackageIdentityOptions): string {
   const match = /^local:(.+)$/.exec(key);
-  if (!match) return key;
-  const home = homedir();
-  const pathPart = match[1];
-  if (pathPart === home) return "local:~";
-  if (pathPart.startsWith(home + "/")) return `local:~${pathPart.slice(home.length)}`;
+  if (!match || !isAbsolute(match[1])) return key;
+  const home = getPluginPackageIdentity("~", { ...options, scope: "user" }).slice("local:".length);
+  const fromHome = relative(home, match[1]);
+  if (!fromHome) return "local:~";
+  if (fromHome === ".." || fromHome.startsWith(`..${sep}`) || isAbsolute(fromHome)) return key;
+  return `local:~/${fromHome.split(sep).join("/")}`;
+}
+
+function portablePackageStateKey(source: string, options: PluginPackageIdentityOptions): string {
+  const identity = getPluginPackageIdentity(source, { ...options, scope: "user" });
+  if (!identity.startsWith("local:")) return identity;
+  // SAFETY: The current SDK implements these private methods; the resolved identity is checked below.
+  const manager = getIdentityManager(options) as unknown as {
+    parseSource: (value: string) => { type: string; path?: string };
+    resolvePathFromBase: (path: string, base: string) => string;
+  };
+  const parsed = manager.parseSource(source.trim());
+  if (parsed.type !== "local" || !parsed.path) throw new Error("Cannot safely preserve the local plugin source path");
+  const path = manager.resolvePathFromBase(parsed.path, resolvePath(options.agentDir ?? getAgentDir()));
+  if (getPluginPackageIdentity(path, { ...options, scope: "user" }) !== identity) {
+    throw new Error("Cannot safely preserve the local plugin source path");
+  }
+  return portableLocalKey(`local:${path}`, options);
+}
+
+/** Expand a portable `local:~<rel>` key to the SDK's comparison identity. */
+function expandLocalKey(key: string, options: PluginPackageIdentityOptions): string {
+  const match = /^local:(~(?:\/.*)?)$/.exec(key);
+  if (match) return getPluginPackageIdentity(match[1], { ...options, scope: "user" });
+  if (process.platform === "win32" && key.startsWith("local:") && isAbsolute(key.slice("local:".length))) {
+    return getPluginPackageIdentity(key.slice("local:".length), { ...options, scope: "user" });
+  }
   return key;
 }
 
-/** Expand a portable `local:~<rel>` key to this machine's absolute path form. */
-function expandLocalKey(key: string): string {
-  const match = /^local:~(?:\/(.*))?$/.exec(key);
-  if (!match) return key;
-  const home = homedir();
-  return `local:${home}${match[1] ? "/" + match[1] : ""}`;
-}
-
 function projectStateIdentity(key: string, options: PluginPackageIdentityOptions): string {
-  return expandLocalKey(canonicalStateKey(key, options));
+  return expandLocalKey(canonicalStateKey(key, options), options);
 }
 
 /** Return only project package states explicitly written by the Reader UI. */
@@ -152,7 +177,7 @@ function readExplicitStateMap(
   const states: Record<string, PluginOverrideState> = {};
   for (const [key, value] of Object.entries(raw)) {
     if ((value === "enabled" || value === "disabled") && key.trim()) {
-      states[portableLocalKey(projectStateIdentity(key, options))] = value;
+      states[portableLocalKey(canonicalStateKey(key, options), options)] = value;
     }
   }
   return states;
@@ -186,7 +211,7 @@ function findStateForSource(
   const identity = getPluginPackageIdentity(source, { ...options, scope: "user" });
   if (states[identity]) return states[identity];
   for (const [key, state] of Object.entries(states)) {
-    if (expandLocalKey(canonicalStateKey(key, options)) === identity) return state;
+    if (projectStateIdentity(key, options) === identity) return state;
   }
   return undefined;
 }
@@ -363,13 +388,13 @@ export function reconcileProjectPluginStates(
     const existing = findStateForSource(current, packageSource(entry), identityOptions)
       ?? getGlobalPluginState(entry);
     if (existing) {
-      next[portableLocalKey(identity)] = existing;
+      next[portablePackageStateKey(packageSource(entry), identityOptions)] = existing;
       continue;
     }
-    next[portableLocalKey(identity)] = getGlobalPluginState(entry);
+    next[portablePackageStateKey(packageSource(entry), identityOptions)] = getGlobalPluginState(entry);
   }
 
-  const removedIdentities = Object.keys(current).filter((key) => !globalEntries.has(expandLocalKey(key)));
+  const removedIdentities = Object.keys(current).filter((key) => !globalEntries.has(expandLocalKey(key, identityOptions)));
   const projectOnly = projectOnlyPackages(globalPackages, projectPackages, identityOptions);
   const legacyPresent = Object.prototype.hasOwnProperty.call(projectSettings, LEGACY_PLUGIN_OVERRIDES_SETTING)
     || Object.prototype.hasOwnProperty.call(projectSettings, PROJECT_PLUGIN_STATES_SETTING);
@@ -401,12 +426,18 @@ export function setProjectPluginExplicitState(
   options: PluginPackageIdentityOptions = {},
 ): void {
   const rawManager = unwrapProjectPluginSettingsManager(settingsManager);
-  const key = portableLocalKey(getPluginPackageIdentity(source, { ...options, scope: "user" }));
+  const identity = getPluginPackageIdentity(source, { ...options, scope: "user" });
+  const key = portablePackageStateKey(source, options);
+  // SAFETY: The unwrapped SDK manager implements the project settings contract.
   updateProjectField(rawManager as unknown as ProjectPluginSettingsManager, PROJECT_PLUGIN_EXPLICIT_STATES_SETTING, (settings) => {
     const raw = settings[PROJECT_PLUGIN_EXPLICIT_STATES_SETTING];
     const states = raw && typeof raw === "object" && !Array.isArray(raw)
       ? structuredClone(raw) as Record<string, unknown>
       : {};
+    for (const existing of Object.keys(states)) {
+      if ((states[existing] === "enabled" || states[existing] === "disabled")
+        && projectStateIdentity(existing, options) === identity) delete states[existing];
+    }
     states[key] = state;
     settings[PROJECT_PLUGIN_EXPLICIT_STATES_SETTING] = states;
   });
@@ -421,6 +452,7 @@ export function clearProjectPluginExplicitState(
   const projectSettings = rawManager.getProjectSettings() as SettingsWithPackages;
   if (!Object.prototype.hasOwnProperty.call(projectSettings, PROJECT_PLUGIN_EXPLICIT_STATES_SETTING)) return;
   const identity = getPluginPackageIdentity(source, { ...options, scope: "user" });
+  // SAFETY: The unwrapped SDK manager implements the project settings contract.
   updateProjectField(rawManager as unknown as ProjectPluginSettingsManager, PROJECT_PLUGIN_EXPLICIT_STATES_SETTING, (settings) => {
     const raw = settings[PROJECT_PLUGIN_EXPLICIT_STATES_SETTING];
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
@@ -512,6 +544,7 @@ export async function setProjectPluginState(
     if (!entry) throw new Error("Global plugin package not found");
     const projectSettings = rawManager.getProjectSettings() as SettingsWithPackages;
     setProjectPluginExplicitState(rawManager, packageSource(entry), state, options);
+    // SAFETY: The unwrapped SDK manager implements the project settings contract.
     removeLegacyOverrides(rawManager as unknown as ProjectPluginSettingsManager, projectSettings);
     await rawManager.flush();
   });

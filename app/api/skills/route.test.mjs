@@ -56,6 +56,88 @@ test("top-level local Skill invocation mode set and clear bind to the exact file
   }
 });
 
+test("package invocation API writes a case-preserving portable mode", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "reader-skill-package-mode-"));
+  t.diagnostic(`resource-policy fixture: ${root}`);
+  const agentDir = join(root, "agent"), cwd = join(root, "project");
+  const packageDir = join(root, "MixedPackage");
+  const skillPath = join(packageDir, "skills", "fixture", "SKILL.md");
+  const previousAgent = process.env.PI_CODING_AGENT_DIR;
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  try {
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.HOME = root;
+    if (process.platform === "win32") process.env.USERPROFILE = root;
+    await mkdir(cwd, { recursive: true });
+    await mkdir(agentDir, { recursive: true });
+    await mkdir(join(packageDir, "skills", "fixture"), { recursive: true });
+    await writeFile(skillPath, "---\nname: fixture\ndescription: package fixture\n---\nfixture\n");
+    const settingsPath = join(agentDir, "settings.json");
+    await writeFile(settingsPath, JSON.stringify({ packages: ["~/MixedPackage"] }));
+    const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, moduleCache: false });
+    const { PATCH } = await jiti.import("./route.ts");
+    const request = (action, extra = {}) => new Request("http://localhost/api/skills", {
+      method: "PATCH",
+      headers: { host: "localhost", "content-type": "application/json" },
+      body: JSON.stringify({ action, cwd, filePath: skillPath, source: "~/MixedPackage", resourceKey: "skills/fixture/SKILL.md", scope: "global", viewScope: "global", ...extra }),
+    });
+    const set = await PATCH(request("set_skill_invocation_mode", { mode: "explicit-only" }));
+    assert.equal(set.status, 200);
+    const portable = "package:local:~/MixedPackage:skills/fixture/SKILL.md";
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")).piWebGlobalSkillInvocationModes, { [portable]: "explicit-only" });
+    const cleared = await PATCH(request("clear_skill_invocation_mode"));
+    assert.equal(cleared.status, 200);
+    assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).piWebGlobalSkillInvocationModes, undefined);
+  } finally {
+    if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgent;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Skill API reports an ambiguous legacy glob without changing settings", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "reader-skill-ambiguous-glob-"));
+  t.diagnostic(`resource-policy fixture: ${root}`);
+  const agentDir = join(root, "agent"), cwd = join(root, "project");
+  const skillPath = join(agentDir, "skills", "fixture", "SKILL.md");
+  const settingsPath = join(agentDir, "settings.json");
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(join(agentDir, "skills", "fixture"), { recursive: true });
+    await writeFile(skillPath, "---\nname: fixture\ndescription: fixture\n---\n");
+    const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, moduleCache: false });
+    const { PATCH } = await jiti.import("./route.ts");
+    const request = (body) => new Request("http://localhost/api/skills", {
+      method: "PATCH", headers: { host: "localhost", "content-type": "application/json" },
+      body: JSON.stringify({ cwd, viewScope: "global", ...body }),
+    });
+    for (const legacy of ["!**/skills/fixture/SKILL.md", "!**/skills/fixtur[e]/SKILL.md"]) {
+      const original = JSON.stringify({ skills: [skillPath, legacy], untouched: true });
+      await writeFile(settingsPath, original);
+      for (const body of [
+        { action: "set_global_skill_resource", filePath: skillPath, enabled: true },
+        { action: "set_skill_group", state: "explicit-only", items: [{ filePath: skillPath }] },
+      ]) {
+        const response = await PATCH(request(body));
+        assert.equal(response.status, 500);
+        assert.match((await response.json()).error, /ambiguous legacy resource glob/i);
+        assert.equal(await readFile(settingsPath, "utf8"), original);
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("invocation mode rejects conflicting filePath and package identity before writing", async () => {
   const root = await mkdtemp(join(tmpdir(), "reader-skill-conflicting-identity-"));
   const agentDir = join(root, "agent");

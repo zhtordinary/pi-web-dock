@@ -62,8 +62,12 @@ type WorktreeAssociationRelation = "cwd" | "creator" | "task-root" | "child-cwd"
 
 interface WorktreeCreationHistory {
   records: Array<{ worktreePath: string; sessionId: string; createdAt: string; sessionName?: string }>;
+  provisionalRecords?: Array<{ worktreePath: string; sessionId: string; createdAt: string }>;
   bindings?: Array<{ worktreePath: string; sessionId: string; relation: "creator" | "task-root"; createdAt: string; sessionName?: string }>;
+  priorityPending?: boolean;
   partial: boolean;
+  failure?: "entry_too_large" | "unavailable";
+  progress?: { running: boolean; processedBytes: number; totalBytes: number };
 }
 
 interface WorktreeAssociatedSession {
@@ -71,6 +75,51 @@ interface WorktreeAssociatedSession {
   title: string;
   status?: SessionActivityItem["status"];
   relations: WorktreeAssociationRelation[];
+}
+
+interface GraphSnapshot {
+  updatedAt: number;
+  graph: WorktreeGraph | null;
+  sessionId: string | null;
+  records: WorktreeCreationHistory["records"];
+}
+
+// Snapshots only accelerate display; current graph and associations still gate actions.
+const graphSnapshots = new Map<string, GraphSnapshot>();
+const graphSnapshotKey = (projectRoot: string | null, remotePeer?: string) => JSON.stringify([remotePeer ?? null, projectRoot]);
+
+function readGraphSnapshot(key: string): GraphSnapshot | null {
+  const snapshot = graphSnapshots.get(key);
+  if (!snapshot) return null;
+  if (Date.now() - snapshot.updatedAt > 5 * 60_000) {
+    graphSnapshots.delete(key);
+    return null;
+  }
+  return snapshot;
+}
+
+function saveGraphSnapshot(key: string, update: Partial<GraphSnapshot>) {
+  const previous = readGraphSnapshot(key);
+  graphSnapshots.delete(key);
+  graphSnapshots.set(key, { graph: null, sessionId: null, records: [], ...previous, ...update, updatedAt: Date.now() });
+  if (graphSnapshots.size > 4) graphSnapshots.delete(graphSnapshots.keys().next().value!);
+}
+
+function snapshotGraph(graph: WorktreeGraph | null): WorktreeGraph | null {
+  if (!graph) return null;
+  return {
+    ...graph,
+    counts: { ...graph.counts, wip: undefined },
+    worktrees: graph.worktrees.map((worktree) => ({
+      ...worktree,
+      dirtySummary: { state: "unavailable", hasUncommitted: false, dirtyCount: 0, stagedCount: 0, unstagedCount: 0, untrackedCount: 0, ignoredCount: 0 },
+    })),
+  };
+}
+
+function snapshotHistory(snapshot: GraphSnapshot | null, sessionId?: string | null): WorktreeCreationHistory | null {
+  if (!sessionId || snapshot?.sessionId !== sessionId || snapshot.records.length === 0) return null;
+  return { records: [], provisionalRecords: snapshot.records, partial: true, priorityPending: true };
 }
 
 function GitHubIcon({ size = 14 }: { size?: number }) {
@@ -145,7 +194,7 @@ export function preferredWorktreePath(
   history: WorktreeCreationHistory | null,
   navigationPath?: string | null,
 ): string | null {
-  const historyMatches = (history?.records ?? [])
+  const historyMatches = [...(history?.records ?? []), ...(history?.provisionalRecords ?? [])]
     .filter((record) => record.sessionId === currentSessionId)
     .map((record) => worktrees.find((worktree) => sameWorktreePath(worktree.path, record.worktreePath)))
     .filter((worktree): worktree is WorktreeGraphItem => Boolean(worktree));
@@ -289,7 +338,9 @@ export function WorktreeGraphOverlay({
 }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
-  const [graph, setGraph] = useState<WorktreeGraph | null>(null);
+  const snapshotKey = graphSnapshotKey(projectRoot, remotePeer);
+  const [graph, setGraph] = useState<WorktreeGraph | null>(() => snapshotGraph(readGraphSnapshot(snapshotKey)?.graph ?? null));
+  const [graphFresh, setGraphFresh] = useState(false);
   const [resolvedSessionWorktree, setResolvedSessionWorktree] = useState<{ cwd: string; path: string | null } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -303,18 +354,23 @@ export function WorktreeGraphOverlay({
   const [associatedSessionsLoading, setAssociatedSessionsLoading] = useState(false);
   const [associatedSessionsError, setAssociatedSessionsError] = useState<string | null>(null);
   const [associatedSessionsRefreshKey, setAssociatedSessionsRefreshKey] = useState(0);
-  const [creationHistory, setCreationHistory] = useState<WorktreeCreationHistory | null>(null);
+  const [creationHistory, setCreationHistory] = useState<WorktreeCreationHistory | null>(() => snapshotHistory(readGraphSnapshot(snapshotKey), currentSessionId));
+  const [creationHistoryFresh, setCreationHistoryFresh] = useState(() => Boolean(snapshotHistory(readGraphSnapshot(snapshotKey), currentSessionId)));
   const [creationHistoryLoading, setCreationHistoryLoading] = useState(false);
   const [creationHistoryError, setCreationHistoryError] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const graphRequestRef = useRef(0);
+  const graphLoadRef = useRef<Promise<void> | null>(null);
   const sessionRequestRef = useRef(0);
   const creationHistoryRequestRef = useRef(0);
-  const selectionManuallySetRef = useRef(false);
+  const [selectionManuallySet, setSelectionManuallySet] = useState(false);
 
   useEffect(() => {
-    setGraph(null);
+    const snapshot = readGraphSnapshot(snapshotKey);
+    const hint = snapshotHistory(snapshot, currentSessionId);
+    setGraph(snapshotGraph(snapshot?.graph ?? null));
+    setGraphFresh(false);
     setResolvedSessionWorktree(null);
     setFilterTab("all");
     setSearch("");
@@ -323,11 +379,12 @@ export function WorktreeGraphOverlay({
     setAssociatedSessions([]);
     setAssociatedSessionsError(null);
     setAssociatedSessionsLoading(false);
-    setCreationHistory(null);
+    setCreationHistory(hint);
+    setCreationHistoryFresh(Boolean(hint));
     setCreationHistoryError(false);
     setCreationHistoryLoading(false);
     setError(null);
-    selectionManuallySetRef.current = false;
+    setSelectionManuallySet(false);
   }, [projectRoot, remotePeer]);
 
   useEffect(() => {
@@ -352,6 +409,8 @@ export function WorktreeGraphOverlay({
       const requestId = graphRequestRef.current + 1;
       graphRequestRef.current = requestId;
       setLoading(true);
+      setGraphFresh(false);
+      setGraph((previous) => snapshotGraph(previous));
       setError(null);
       try {
         const query = new URLSearchParams({
@@ -372,8 +431,11 @@ export function WorktreeGraphOverlay({
         setResolvedSessionWorktree(currentWorktreePath && (data.sessionWorktreePath === null || typeof data.sessionWorktreePath === "string")
           ? { cwd: currentWorktreePath, path: data.sessionWorktreePath } : null);
         if (data.graph) {
+          saveGraphSnapshot(snapshotKey, { graph: data.graph });
           setGraph(data.graph);
+          setGraphFresh(true);
         } else {
+          graphSnapshots.delete(snapshotKey);
           setGraph(null);
           setSelectedPath(null);
         }
@@ -385,13 +447,14 @@ export function WorktreeGraphOverlay({
         if (requestId === graphRequestRef.current) setLoading(false);
       }
     },
-    [currentWorktreePath, projectRoot, remotePeer],
+    [currentWorktreePath, projectRoot, remotePeer, snapshotKey],
   );
 
   useEffect(() => {
     if (open && projectRoot) {
-      void fetchGraph(false);
+      graphLoadRef.current = fetchGraph(false);
     }
+    return () => { graphRequestRef.current += 1; graphLoadRef.current = null; };
   }, [open, projectRoot, fetchGraph]);
 
   const fetchAssociatedSessions = useCallback(async () => {
@@ -429,15 +492,38 @@ export function WorktreeGraphOverlay({
   const fetchCreationHistory = useCallback(async () => {
     if (!open || !projectRoot) return;
     const requestId = ++creationHistoryRequestRef.current;
+    const hint = snapshotHistory(readGraphSnapshot(snapshotKey), currentSessionId);
+    setCreationHistory(hint);
+    setCreationHistoryFresh(Boolean(hint));
     setCreationHistoryLoading(true);
     setCreationHistoryError(false);
     try {
-      const query = new URLSearchParams({ cwd: projectRoot, creationHistory: "1" });
-      const response = await fetch(apiPathForPeer(remotePeer, `worktrees?${query}`), { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json() as WorktreeCreationHistory;
-      if (!Array.isArray(data.records) || typeof data.partial !== "boolean") throw new Error("Invalid creation history");
-      if (requestId === creationHistoryRequestRef.current) setCreationHistory(data);
+      let retry = true;
+      let previousProcessed = -1;
+      let waitedForGraph = false;
+      while (requestId === creationHistoryRequestRef.current) {
+        const query = new URLSearchParams({ cwd: projectRoot, creationHistory: "1", ...(currentSessionId ? { sessionId: currentSessionId } : {}), ...(retry ? { retry: "1" } : {}) });
+        const response = await fetch(apiPathForPeer(remotePeer, `worktrees?${query}`), { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json() as WorktreeCreationHistory;
+        if (!Array.isArray(data.records) || typeof data.partial !== "boolean") throw new Error("Invalid creation history");
+        if (requestId !== creationHistoryRequestRef.current) return;
+        if (currentSessionId && !data.priorityPending) {
+          saveGraphSnapshot(snapshotKey, { sessionId: currentSessionId, records: data.records.filter((record) => record.sessionId === currentSessionId) });
+        }
+        setCreationHistory(data);
+        setCreationHistoryFresh(true);
+        if (!data.progress?.running) break;
+        retry = false;
+        if (!waitedForGraph && graphLoadRef.current) {
+          waitedForGraph = true;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([graphLoadRef.current, new Promise<void>((resolve) => { timer = setTimeout(resolve, 400); })]);
+          if (timer !== undefined) clearTimeout(timer);
+        }
+        if (data.progress.processedBytes <= previousProcessed) await new Promise((resolve) => setTimeout(resolve, 100));
+        previousProcessed = data.progress.processedBytes;
+      }
     } catch {
       if (requestId === creationHistoryRequestRef.current) {
         setCreationHistory(null);
@@ -446,12 +532,13 @@ export function WorktreeGraphOverlay({
     } finally {
       if (requestId === creationHistoryRequestRef.current) setCreationHistoryLoading(false);
     }
-  }, [open, projectRoot, remotePeer]);
+  }, [currentSessionId, open, projectRoot, remotePeer, snapshotKey]);
 
   useEffect(() => {
     if (!open || !projectRoot) {
       creationHistoryRequestRef.current += 1;
       setCreationHistory(null);
+      setCreationHistoryFresh(false);
       setCreationHistoryError(false);
       setCreationHistoryLoading(false);
       return;
@@ -463,7 +550,7 @@ export function WorktreeGraphOverlay({
   useEffect(() => {
     if (!open) return;
     const refresh = () => {
-      void fetchGraph(true);
+      graphLoadRef.current = fetchGraph(true);
       setAssociatedSessionsRefreshKey((value) => value + 1);
     };
     window.addEventListener("pi-web:worktree-management-changed", refresh);
@@ -476,9 +563,15 @@ export function WorktreeGraphOverlay({
   }, [graph, selectedPath]);
 
   const selectedWorktreeSessions = useMemo(
-    () => mergeAssociatedWorktreeSessions(selectedPath, associatedSessions, creationHistory, graph?.worktrees),
-    [associatedSessions, creationHistory, selectedPath, graph],
+    () => mergeAssociatedWorktreeSessions(selectedPath, associatedSessions, creationHistoryFresh ? creationHistory : null, graph?.worktrees),
+    [associatedSessions, creationHistory, creationHistoryFresh, selectedPath, graph],
   );
+  const provisionalSelection = Boolean(!selectionManuallySet && creationHistoryFresh && selectedPath && currentSessionId
+    && creationHistory?.provisionalRecords?.some((record) => record.sessionId === currentSessionId && sameWorktreePath(record.worktreePath, selectedPath))
+    && !creationHistory.records.some((record) => record.sessionId === currentSessionId && sameWorktreePath(record.worktreePath, selectedPath)));
+  const unknownSelection = Boolean(!selectionManuallySet && currentSessionId && (creationHistoryError
+    || (creationHistory?.failure && !creationHistory.records.some((record) => record.sessionId === currentSessionId))));
+  const workspaceActionsDisabled = !graphFresh || provisionalSelection || unknownSelection;
   const associatedSessionsIncomplete = Boolean(associatedSessionsError || creationHistoryError || creationHistory?.partial);
 
   const githubUrl = graph?.githubUrl ?? null;
@@ -492,7 +585,7 @@ export function WorktreeGraphOverlay({
   }, [githubUrl, selectedWorktree]);
 
   useEffect(() => {
-    if (!selectedPath || !projectRoot || !open) {
+    if (!selectedPath || !projectRoot || !open || !graphFresh) {
       setInspection(null);
       setInspectLoading(false);
       return;
@@ -525,7 +618,7 @@ export function WorktreeGraphOverlay({
     return () => {
       cancelled = true;
     };
-  }, [selectedPath, projectRoot, remotePeer, open, graph]);
+  }, [selectedPath, projectRoot, remotePeer, open, graph, graphFresh]);
 
   const handleCopy = useCallback((key: string, text: string) => {
     void copyText(text);
@@ -578,6 +671,10 @@ export function WorktreeGraphOverlay({
     () => preferredWorktreePath(graph?.worktrees ?? [], currentGraphWorktreePath, currentSessionId, creationHistory, preferredPath),
     [creationHistory, currentSessionId, currentGraphWorktreePath, graph, preferredPath],
   );
+  const waitingForCurrentSession = Boolean(currentSessionId && !creationHistoryError
+    && (!creationHistoryFresh || (creationHistory?.priorityPending ?? creationHistory?.progress?.running ?? false)));
+  const hasCurrentEvidence = creationHistoryFresh && [...(creationHistory?.records ?? []), ...(creationHistory?.provisionalRecords ?? [])]
+    .some((record) => record.sessionId === currentSessionId && graph?.worktrees.some((worktree) => sameWorktreePath(worktree.path, record.worktreePath)));
 
   const filteredWorktrees = useMemo(() => {
     if (!graph) return [];
@@ -615,16 +712,18 @@ export function WorktreeGraphOverlay({
     if (!graph) return;
     setSelectedPath((currentPath) => {
       const currentPathIsVisible = Boolean(currentPath && filteredWorktrees.some((w) => w.path === currentPath));
-      if (selectionManuallySetRef.current && currentPathIsVisible) return currentPath;
-      const preferredPath = sessionPreferredPath && filteredWorktrees.some((w) => w.path === sessionPreferredPath)
+      if (selectionManuallySet && currentPathIsVisible) return currentPath;
+      const hasNavigationPath = Boolean(preferredPath && filteredWorktrees.some((w) => sameWorktreePath(w.path, preferredPath)));
+      if (waitingForCurrentSession && !hasCurrentEvidence && !hasNavigationPath) return null;
+      const selectedPreference = sessionPreferredPath && filteredWorktrees.some((w) => w.path === sessionPreferredPath)
         ? sessionPreferredPath
         : null;
-      if (preferredPath) return preferredPath;
+      if (selectedPreference) return selectedPreference;
       if (currentPathIsVisible) return currentPath;
       if (filteredWorktrees.length > 0) return filteredWorktrees[0]?.path ?? null;
       return hasWorktreeFilter ? null : currentPath;
     });
-  }, [filteredWorktrees, graph, hasWorktreeFilter, sessionPreferredPath]);
+  }, [filteredWorktrees, graph, hasCurrentEvidence, hasWorktreeFilter, preferredPath, selectionManuallySet, sessionPreferredPath, waitingForCurrentSession]);
 
   const searchControl = (
     <div
@@ -776,7 +875,7 @@ export function WorktreeGraphOverlay({
                 textOverflow: "ellipsis",
               }}
             >
-              {graph ? t("worktreeGraph.subtitle") : t("worktreeGraph.refreshing")}
+              {graphFresh ? t("worktreeGraph.subtitle") : graph && error ? t("worktreeGraph.snapshotUnavailable") : graph ? t("worktreeGraph.snapshotRefreshing") : t("worktreeGraph.refreshing")}
             </div>
           </div>
         </div>
@@ -851,7 +950,7 @@ export function WorktreeGraphOverlay({
           <button
             type="button"
             onClick={() => {
-              void fetchGraph(true);
+              graphLoadRef.current = fetchGraph(true);
               setAssociatedSessionsRefreshKey((value) => value + 1);
             }}
             disabled={loading || associatedSessionsLoading}
@@ -1432,7 +1531,7 @@ export function WorktreeGraphOverlay({
               overflowWrap: "anywhere",
             }}
           >
-            {t("worktreeGraph.nodeInspector")}{selectedWorktree ? ` · ${selectedWorktree.label}` : ""}
+            {t("worktreeGraph.nodeInspector")}{selectedWorktree ? ` · ${selectedWorktree.label}` : ""}{provisionalSelection ? ` · ${t("worktreeGraph.provisionalSelection")}` : ""}
           </summary>
           {selectedWorktree ? (
             <div style={{ padding: isMobile ? 12 : "16px 18px", display: "flex", flexDirection: "column", gap: 14 }}>
@@ -1474,6 +1573,7 @@ export function WorktreeGraphOverlay({
                     {worktreeSourceLabel(selectedWorktree.sourceKind, t)}
                   </span>
                 </div>
+                {provisionalSelection && <div role="status" style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>{t("worktreeGraph.provisionalSelection")}</div>}
 
                 <div
                   style={{
@@ -1530,14 +1630,7 @@ export function WorktreeGraphOverlay({
                   <span id="worktree-associated-sessions-title" style={{ fontSize: 12, fontWeight: 650, color: "var(--text)" }}>{t("worktreeGraph.associatedSessions")}</span>
                   {!associatedSessionsLoading && !creationHistoryLoading && !associatedSessionsIncomplete && <span style={{ fontSize: 10, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>({selectedWorktreeSessions.length})</span>}
                 </div>
-                {associatedSessionsLoading || creationHistoryLoading ? (
-                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("worktreeGraph.associatedSessionsLoading")}</div>
-                ) : selectedWorktreeSessions.length === 0 && associatedSessionsIncomplete ? (
-                  <div role="status" style={{ fontSize: 11, color: "#b45309", lineHeight: 1.4 }}>{t("worktreeGraph.associatedSessionsUnavailable")}</div>
-                ) : selectedWorktreeSessions.length === 0 ? (
-                  <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.4 }}>{t("worktreeGraph.noAssociatedSessions")}</div>
-                ) : (
-                  <>
+                {!associatedSessionsLoading && selectedWorktreeSessions.length > 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                       {selectedWorktreeSessions.map((item) => (
                         <button
@@ -1546,6 +1639,7 @@ export function WorktreeGraphOverlay({
                           data-worktree-associated-session={item.id}
                           title={item.title}
                           aria-label={item.title}
+                          disabled={!graphFresh}
                           onClick={() => {
                             onOpenSession(item.id, selectedWorktree.path);
                           }}
@@ -1561,9 +1655,20 @@ export function WorktreeGraphOverlay({
                         </button>
                       ))}
                     </div>
-                    {associatedSessionsIncomplete && <div role="status" style={{ fontSize: 10, color: "#b45309", lineHeight: 1.4, marginTop: 4 }}>{t("worktreeGraph.associatedSessionsPartial")}</div>}
-                  </>
                 )}
+                {associatedSessionsLoading || creationHistoryLoading ? (
+                  <div role="status" style={{ fontSize: 11, color: "var(--text-muted)", marginTop: selectedWorktreeSessions.length > 0 ? 4 : 0 }}>
+                    {creationHistoryFresh && creationHistory?.progress?.running && creationHistory.progress.totalBytes > 0
+                      ? t("worktreeGraph.associatedSessionsProgress", { percent: Math.min(99, Math.floor(100 * creationHistory.progress.processedBytes / creationHistory.progress.totalBytes)) })
+                      : t("worktreeGraph.associatedSessionsLoading")}
+                  </div>
+                ) : selectedWorktreeSessions.length === 0 && associatedSessionsIncomplete ? (
+                  <div role="status" style={{ fontSize: 11, color: "#b45309", lineHeight: 1.4 }}>{t(creationHistory?.failure === "entry_too_large" ? "worktreeGraph.associatedSessionsEntryTooLarge" : "worktreeGraph.associatedSessionsUnavailable")}</div>
+                ) : selectedWorktreeSessions.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.4 }}>{t("worktreeGraph.noAssociatedSessions")}</div>
+                ) : associatedSessionsIncomplete ? (
+                  <div role="status" style={{ fontSize: 10, color: "#b45309", lineHeight: 1.4, marginTop: 4 }}>{t(creationHistory?.failure === "entry_too_large" ? "worktreeGraph.associatedSessionsEntryTooLarge" : "worktreeGraph.associatedSessionsPartial")}</div>
+                ) : null}
               </section>
 
               {/* Primary Action Button: reuse the selected checkout for a new session */}
@@ -1580,6 +1685,7 @@ export function WorktreeGraphOverlay({
               >
                 <button
                   type="button"
+                  disabled={workspaceActionsDisabled}
                   onClick={() => {
                     const prompt = buildWorktreeNodePrompt(selectedWorktree);
                     onNewSessionFromNode(selectedWorktree, prompt);
@@ -1598,7 +1704,8 @@ export function WorktreeGraphOverlay({
                     alignItems: "center",
                     justifyContent: "center",
                     gap: 6,
-                    cursor: "pointer",
+                    cursor: workspaceActionsDisabled ? "not-allowed" : "pointer",
+                    opacity: workspaceActionsDisabled ? 0.6 : 1,
                     boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
                   }}
                 >
@@ -1612,6 +1719,7 @@ export function WorktreeGraphOverlay({
                 {onSwitchWorktree && (
                   <button
                     type="button"
+                    disabled={workspaceActionsDisabled}
                     onClick={() => {
                       onSwitchWorktree(selectedWorktree.path);
                       onClose();
@@ -1624,7 +1732,8 @@ export function WorktreeGraphOverlay({
                       border: "1px solid var(--border)",
                       color: "var(--text)",
                       fontSize: 11,
-                      cursor: "pointer",
+                      cursor: workspaceActionsDisabled ? "not-allowed" : "pointer",
+                      opacity: workspaceActionsDisabled ? 0.6 : 1,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
@@ -1668,7 +1777,7 @@ export function WorktreeGraphOverlay({
                   <button
                     type="button"
                     title={t("worktreeGraph.cleanupSafetyHint")}
-                    disabled={deletingPath === selectedWorktree.path || associatedSessionsLoading || creationHistoryLoading || associatedSessionsIncomplete || selectedWorktreeSessions.length > 0 || selectedWorktree.dirtySummary?.state !== "clean" || selectedWorktree.dirtySummary.ignoredCount > 0}
+                    disabled={!graphFresh || deletingPath === selectedWorktree.path || associatedSessionsLoading || creationHistoryLoading || associatedSessionsIncomplete || selectedWorktreeSessions.length > 0 || selectedWorktree.dirtySummary?.state !== "clean" || selectedWorktree.dirtySummary.ignoredCount > 0}
                     onClick={() => void handleDeleteWorktree(selectedWorktree.path)}
                     style={{
                       width: "100%",
@@ -1937,7 +2046,7 @@ export function WorktreeGraphOverlay({
                 fontSize: 12,
               }}
             >
-              {t("worktreeGraph.selectHint")}
+              {t(waitingForCurrentSession ? "worktreeGraph.associatedSessionsLoading" : "worktreeGraph.selectHint")}
             </div>
           )}
         </details>
@@ -1947,7 +2056,7 @@ export function WorktreeGraphOverlay({
 
   function renderWorktreeRow(wt: WorktreeGraphItem) {
     const isSelected = selectedPath === wt.path;
-    const isCurrent = currentGraphWorktreePath === wt.path;
+    const isCurrent = graphFresh && currentGraphWorktreePath === wt.path;
     const laneColor = worktreeLaneColor(wt.laneColorIndex);
 
     return (
@@ -1960,14 +2069,14 @@ export function WorktreeGraphOverlay({
         title={t("worktreeGraph.deltaBasisHint")}
         onClick={() => {
           onSelectWorktree?.();
-          selectionManuallySetRef.current = true;
+          setSelectionManuallySet(true);
           setSelectedPath(wt.path);
         }}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             onSelectWorktree?.();
-            selectionManuallySetRef.current = true;
+            setSelectionManuallySet(true);
             setSelectedPath(wt.path);
           }
         }}
@@ -2138,6 +2247,7 @@ export function WorktreeGraphOverlay({
         {/* Quick Action: start a session in this existing checkout */}
         <button
           type="button"
+          disabled={!graphFresh}
           onClick={(e) => {
             e.stopPropagation();
             const prompt = buildWorktreeNodePrompt(wt);
@@ -2157,7 +2267,8 @@ export function WorktreeGraphOverlay({
             color: "var(--accent)",
             fontSize: 10,
             fontWeight: 600,
-            cursor: "pointer",
+            cursor: graphFresh ? "pointer" : "not-allowed",
+            opacity: graphFresh ? 1 : 0.6,
             flexShrink: 0,
           }}
         >

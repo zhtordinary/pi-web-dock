@@ -59,7 +59,8 @@ function acquireStateWriteLock(file, waitMs = 0) {
   if (heldLockPaths.has(lockPath)) throw Object.assign(new Error("state lock conflict"), { code: "ELOCKED" });
   let db;
   try {
-    db = new DatabaseSync(lockPath);
+    // SQLite must also open its journal beside long Windows database paths.
+    db = new DatabaseSync(path.toNamespacedPath(lockPath));
     fs.chmodSync(lockPath, 0o600);
     db.exec("PRAGMA busy_timeout=0");
     // SQLite's busy handler backs off to 100 ms checks, so a long waiter keeps

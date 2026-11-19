@@ -3,7 +3,7 @@ import { latestRetryErrorEntry } from "@/lib/retry-display-state";
 
 import { useQueueRecovery, type QueueRecoveryView } from "@/hooks/useQueueRecovery";
 
-import { useI18n } from "./useI18n";
+import { useI18n } from "@/hooks/useI18n";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer, useSyncExternalStore } from "react";
 import {
@@ -3129,7 +3129,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     rpcPromptPendingRef.current = submission;
     promptRunIdRef.current = promptRunId;
     const ownsSubmission = () => sessionHookMountedRef.current && branchScopeRef.current === scope
-      && remotePeerRef.current === retryPeer && sessionIdRef.current === sid
+      && (remotePeerRef.current ?? null) === retryPeer && sessionIdRef.current === sid
       && promptRunIdRef.current === promptRunId && rpcPromptPendingRef.current === submission && !submission.stopping;
     agentRunningRef.current = true;
     setAgentRunning(true);
@@ -3147,7 +3147,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       onRetryContinueStartedRef.current?.({ sessionId: sid, peer: retryPeer, entryId: retryEntryId });
     } catch (e) {
-      if (!sessionHookMountedRef.current || branchScopeRef.current !== scope || remotePeerRef.current !== retryPeer
+      if (!sessionHookMountedRef.current || branchScopeRef.current !== scope || (remotePeerRef.current ?? null) !== retryPeer
         || sessionIdRef.current !== sid || promptRunIdRef.current !== promptRunId
         || (!submission.requestStarted && !ownsSubmission())) return;
       console.error("Failed to retry continue:", e);

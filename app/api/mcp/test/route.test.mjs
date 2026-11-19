@@ -43,6 +43,10 @@ const FIXTURE = fileURLToPath(new URL("../../../../lib/__fixtures__/mcp-env-serv
 const globalPath = join(agentDir, "mcp.json");
 const projectPath = join(cwd, ".pi", "mcp.json");
 const marker = join(root, "command-ran");
+const windowsProbePath = marker.replaceAll("\\", "/").replaceAll("'", "\\'");
+const probeCommand = process.platform === "win32"
+  ? `!node -e "require('node:fs').writeFileSync('${windowsProbePath}', 'probe')"`
+  : `!touch ${marker} && echo ok`;
 const envFile = join(root, "env-names.json");
 const store = new ProjectTrustStore(agentDir);
 const SECRET = "literal-header-secret-value";
@@ -60,7 +64,7 @@ beforeEach(async () => {
   delete process.env.PI_WEB_DISABLE_MCP;
   clearMcpStatuses();
   await writeFile(globalPath, `${JSON.stringify({ mcpServers: globalServers }, null, 2)}\n`);
-  await writeFile(projectPath, `${JSON.stringify({ mcpServers: { repo: fixture({ TOKEN: `!touch ${marker} && echo ok` }) } }, null, 2)}\n`);
+  await writeFile(projectPath, `${JSON.stringify({ mcpServers: { repo: fixture({ TOKEN: probeCommand }) } }, null, 2)}\n`);
   await rm(marker, { force: true });
   store.set(cwd, null);
 });

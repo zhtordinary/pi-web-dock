@@ -19,7 +19,7 @@ const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMess
 const { getMarkdownListContinuation: getMarkdownListEdit } = await jiti.import("../lib/markdown-list-continuation.ts");
 const { isBareMcpCommand } = await jiti.import("../lib/mcp-command.ts");
 const { buildAtInsertText, extractAtQuery } = await jiti.import("../lib/file-fuzzy.ts");
-const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
+const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 const draftPromptSource = await readFile(new URL("./chat-input-draft-prompts.ts", import.meta.url), "utf8");

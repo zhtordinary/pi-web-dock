@@ -98,8 +98,8 @@ test("rendered inspector uses native disclosure semantics only on mobile", () =>
   const summary = inspector.children.find(node => ts.isJsxElement(node) && node.openingElement.tagName.getText(tree) === "summary");
   assert.ok(summary);
   const compiled = { exports: {} };
-  const code = ts.transpileModule(`module.exports = ({isMobile, selectedWorktree, t}) => (${inspector.getText(tree)});
-    module.exports.summary = ({isMobile, selectedWorktree, t}) => (${summary.getText(tree)});`,
+  const code = ts.transpileModule(`module.exports = ({isMobile, selectedWorktree, provisionalSelection, waitingForCurrentSession, t}) => (${inspector.getText(tree)});
+    module.exports.summary = ({isMobile, selectedWorktree, provisionalSelection, t}) => (${summary.getText(tree)});`,
   { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 } }).outputText;
   runInNewContext(code, { module: compiled, React });
   for (const isMobile of [true, false]) {
@@ -110,6 +110,8 @@ test("rendered inspector uses native disclosure semantics only on mobile", () =>
     assert.match(html, /worktreeGraph.selectHint/);
     const selectedSummary = renderToStaticMarkup(compiled.exports.summary({ ...props, selectedWorktree: { label: "fix/mobile-layout" } }));
     assert.match(selectedSummary, /worktreeGraph.nodeInspector · fix\/mobile-layout/);
+    const provisionalSummary = renderToStaticMarkup(compiled.exports.summary({ ...props, selectedWorktree: { label: "fix/mobile-layout" }, provisionalSelection: true }));
+    assert.match(provisionalSummary, /worktreeGraph.provisionalSelection/);
   }
 });
 

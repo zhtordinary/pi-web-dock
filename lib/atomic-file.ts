@@ -47,16 +47,25 @@ export function writePrivateFileAtomicSync(path: string, contents: string, final
   const dir = dirname(targetPath);
   const tempPath = join(dir, `.${basename(targetPath)}-${randomUUID()}.tmp`);
   let operationFailed = false;
+  let tempCreated = false;
 
   try {
-    writeFileSync(tempPath, contents, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-      flush: true,
-    });
+    const fd = openSync(tempPath, "wx", 0o600);
+    tempCreated = true;
+    try {
+      writeFileSync(fd, contents, { encoding: "utf8" });
+      fsyncSync(fd);
+    } catch (error) {
+      try { closeSync(fd); }
+      catch (closeError) {
+        throw new AggregateError([error, closeError], "Atomic file write or sync and close failed", { cause: error });
+      }
+      throw error;
+    }
+    closeSync(fd);
     if (finalMode !== 0o600) chmodSync(tempPath, finalMode);
     renameSync(tempPath, targetPath);
+    tempCreated = false;
     const directoryFd = openSync(dir, directoryOpenMode());
     try { fsyncSync(directoryFd); }
     catch (error) { if (!["EINVAL", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error; }
@@ -65,11 +74,14 @@ export function writePrivateFileAtomicSync(path: string, contents: string, final
     operationFailed = true;
     throw error;
   } finally {
-    try {
-      unlinkSync(tempPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !operationFailed) {
-        throw error;
+    // shortcut: cleanup can race with path replacement, use handle-bound operations for untrusted directories.
+    if (tempCreated) {
+      try {
+        unlinkSync(tempPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !operationFailed) {
+          throw error;
+        }
       }
     }
   }
