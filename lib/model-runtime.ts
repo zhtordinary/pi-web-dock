@@ -9,23 +9,21 @@ import { installCpaTransport } from "./cpa-responses-transport";
 import { serializeByKey } from "./key-serializer";
 import { createOpenAIProviderChildExtension } from "./openai-provider-child-extension";
 import { installOpenAIProviderAliases } from "./openai-provider-aliases";
+import { createReaderChildExtensions } from "./reader-child-extensions";
 
 /** The common SDK boundary for Reader sessions, including Side Ask and children. */
 export async function createReaderAgentSessionServices(options: Parameters<typeof createAgentSessionServices>[0]) {
-  const resourceLoaderOptions = options.resourceLoaderOptions;
+  const resourceLoaderOptions = options.resourceLoaderOptions ?? {};
   const services = await createAgentSessionServices({
     ...options,
-    ...(resourceLoaderOptions && resourceLoaderOptions.noExtensions !== true
-      ? {
-          resourceLoaderOptions: {
-            ...resourceLoaderOptions,
-            extensionFactories: [
-              ...(resourceLoaderOptions.extensionFactories ?? []),
-              createOpenAIProviderChildExtension(options.agentDir ?? getAgentDir()),
-            ],
-          },
-        }
-      : {}),
+    resourceLoaderOptions: resourceLoaderOptions.noExtensions === true ? resourceLoaderOptions : {
+      ...resourceLoaderOptions,
+      extensionFactories: [
+        ...(resourceLoaderOptions.extensionFactories ?? []),
+        createOpenAIProviderChildExtension(),
+        createReaderChildExtensions(options.agentDir ?? getAgentDir()),
+      ],
+    },
   });
   const aliasesInstalled = installOpenAIProviderAliases(services.modelRuntime);
   installCpaTransport(services.modelRuntime);

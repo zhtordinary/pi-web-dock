@@ -51,7 +51,8 @@ export async function createSealedPublicInputEnvironment(label = "test") {
   const cacheDir = join(cacheRoot, "pi-sync-maintenance");
   await mkdir(cacheDir, { recursive: true });
   await mkdir(agentDir, { recursive: true });
-  await mkdir(home, { recursive: true });
+  await mkdir(join(home, ".agents", "skills"), { recursive: true });
+  await symlink(fixtureRoot, join(home, ".agents", "skills", "pi-sync-maintenance"), "dir");
   await mkdir(temp, { recursive: true });
   const cachePath = join(cacheDir, "genai-prices-v2.json");
   await copyFile(join(fixtureRoot, "data/genai-prices-v2.json"), cachePath);

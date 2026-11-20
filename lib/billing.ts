@@ -14,6 +14,8 @@ import { isSessionRecapUsageEntry } from "./session-recap";
 import { imageGenerationOutputFromTask, imageGenerationOutputFromTool, readImageGenerationBilling, readImageGenerationOutput, readProviderCharge, providerCharge, type ImageGenerationBilling, type ImageGenerationCost, type ImageGenerationOutput, type ProviderCharge } from "./image-generation-cost";
 import { officialImageOutputTokenEstimate, officialImageProviderForModel } from "./official-image-pricing";
 import { canonicalOpenAIProviderId } from "./openai-provider-aliases";
+import { billingScriptCandidates } from "../packages/reader-usage-pricing/index";
+import { observedResponseServiceTier } from "../packages/reader-usage-pricing/discovery";
 
 const PRICE_DATA_CACHE_TTL_MS = 60 * 60 * 1000;
 const PRICE_PROCESS_TIMEOUT_MS = 30_000;
@@ -539,13 +541,7 @@ export async function priceTokenUsage(
 }
 
 export function findBillingScript(): string | null {
-  const home = homedir();
-  const candidates = [
-    process.env.PI_CONVERSATION_COST_SCRIPT,
-    join(home, ".agents", "skills", "pi-sync-maintenance", "scripts", "session_cost.py"),
-    join(home, ".pi", "agent", "skills", "pi-sync-maintenance", "scripts", "session_cost.py"),
-  ].filter((candidate): candidate is string => Boolean(candidate));
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+  return billingScriptCandidates().find((candidate) => existsSync(candidate)) ?? null;
 }
 
 export function billingPriceDataCachePath(): string {
@@ -893,12 +889,7 @@ async function* readJsonlLines(filePath: string): AsyncGenerator<string> {
 }
 
 function billingServiceTier(...sources: unknown[]): string {
-  for (const source of sources) {
-    if (!isRecord(source)) continue;
-    const value = source.response_service_tier;
-    if (typeof value === "string" && value.trim()) return value.trim().toLowerCase();
-  }
-  return "";
+  return observedResponseServiceTier(...sources);
 }
 
 type AccountingEntry = { kind: "entry"; value: Record<string, unknown> } | { kind: "enter" } | { kind: "leave" };

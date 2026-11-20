@@ -1,4 +1,5 @@
 import type { ExtensionAPI, InlineExtension, SessionManager } from "@earendil-works/pi-coding-agent";
+import { observeResponseServiceTier } from "../packages/reader-usage-pricing/discovery";
 import { BUILTIN_RUNTIME_EXTENSION_NAMES } from "./builtin-runtime-extensions";
 
 export type FastModeSelection = "default" | "fast" | "standard";
@@ -105,28 +106,7 @@ export function createFastModeExtension(state: { mode: FastModeSelection }): Inl
     name: BUILTIN_RUNTIME_EXTENSION_NAMES.fastMode,
     hidden: true,
     factory: (pi: ExtensionAPI) => {
-      const responseTiers = new Map<string, string>();
-      const responseKey = (provider: string, api: string, id: string) => JSON.stringify([provider, api, id]);
-      pi.on("provider_stream_event", (event) => {
-        if (event.api !== "openai-responses" && event.api !== "openai-codex-responses") return;
-        const data = event.data as { type?: unknown; response?: { id?: unknown; service_tier?: unknown } } | null;
-        if (!data || !["response.done", "response.completed", "response.incomplete", "response.failed"].includes(String(data.type))) return;
-        const response = data.response;
-        if (typeof response?.id !== "string" || typeof response.service_tier !== "string" || !response.service_tier.trim()) return;
-        responseTiers.set(responseKey(event.provider, event.api, response.id), response.service_tier.trim().toLowerCase());
-      });
-      pi.on("message_end", (event) => {
-        if (event.message.role !== "assistant" || !event.message.responseId) return;
-        const key = responseKey(event.message.provider, event.message.api, event.message.responseId);
-        const tier = responseTiers.get(key);
-        responseTiers.delete(key);
-        if (!tier) return;
-        // Persist observed processing, not the UI selection: Fast requests can downgrade.
-        const message = { ...event.message, service_tier: tier, response_service_tier: tier };
-        return { message };
-      });
-      pi.on("agent_end", () => { responseTiers.clear(); });
-      pi.on("session_shutdown", () => { responseTiers.clear(); });
+      observeResponseServiceTier(pi);
       pi.on("before_provider_request", (event, context) =>
         applyFastModeToPayload(event.payload, state.mode, context.model)
       );
