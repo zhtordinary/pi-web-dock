@@ -136,7 +136,7 @@ export function useAppShellSidekickLifecycle({
 
 /** Top-bar label for the Sidekick control; the count is part of the accessible name. */
 export function buildSidekickButtonLabel(count: number, translate: (key: string) => string): string {
-  return `${translate("sidekick.title")}${count > 0 ? ` (${count})` : ""}`;
+  return `${translate("sideSession.title")}${count > 0 ? ` (${count})` : ""}`;
 }
 
 /** Top-bar icon whose fill reports whether the drawer holds anything. */

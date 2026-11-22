@@ -1,7 +1,7 @@
 import { apiPathForPeer } from "./file-api";
 import { fetchSessionActivity } from "./session-activity-fetch";
 import type { SessionActivityItem, SessionActivityResponse } from "./session-activity-types";
-import { getSessionFamily, type SessionFamily } from "./session-family";
+import { getSessionFamily, type SessionFamily } from "./session-family.ts";
 
 export interface AgentFamilySnapshot {
   family: SessionFamily;

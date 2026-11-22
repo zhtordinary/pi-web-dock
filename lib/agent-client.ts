@@ -8,6 +8,7 @@
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
 import { apiPathForPeer } from "./file-api.ts";
+import { missingCwdFromBody } from "./missing-cwd.ts";
 
 export const SESSION_RESOURCES_RELOADED_EVENT = "reader:session-resources-reloaded";
 
@@ -15,18 +16,21 @@ export class AgentCommandError extends Error {
   readonly status: number;
   readonly code?: string;
   readonly accepted?: boolean;
+  readonly missingCwd?: string;
 
   constructor(
     message: string,
     status: number,
     code?: string,
     accepted?: boolean,
+    missingCwd?: string,
   ) {
     super(message);
     this.name = "AgentCommandError";
     this.status = status;
     this.code = code;
     this.accepted = accepted;
+    this.missingCwd = missingCwd;
   }
 }
 
@@ -36,6 +40,7 @@ export function isPromptRejectedError(error: unknown): error is AgentCommandErro
     && error.accepted === false
     && (["prompt_rejected", "session_runtime_owned", "session_archived", "request_denied"].includes(error.code ?? "")
       || (error.code?.startsWith("history_edit_") && error.code !== "history_edit_unknown")
+      || Boolean(error.missingCwd)
       || isSessionMissingError(error));
 }
 
@@ -65,6 +70,8 @@ export async function sendAgentCommand<T = unknown>(
     error?: string;
     code?: string;
     accepted?: boolean;
+    reason?: string;
+    cwd?: string;
   };
   if (!res.ok || body.error) {
     throw new AgentCommandError(
@@ -72,6 +79,7 @@ export async function sendAgentCommand<T = unknown>(
       res.status,
       body.code,
       body.accepted,
+      missingCwdFromBody(body) ?? undefined,
     );
   }
   return body.data as T;

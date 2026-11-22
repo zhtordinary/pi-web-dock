@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
 import test from "node:test";
@@ -6,6 +7,13 @@ import * as React from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
+
+registerHooks({
+  load(url, context, nextLoad) {
+    if (!url.endsWith(".module.css")) return nextLoad(url, context);
+    return { format: "module", shortCircuit: true, source: "export default new Proxy({}, { get: (_, key) => String(key) });" };
+  },
+});
 
 const jiti = createJiti(import.meta.url, { fsCache: false, jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
@@ -361,7 +369,7 @@ test("shell lifecycle does not independently dismiss on parent messages", async 
 });
 
 test("Sidekick count drives the top-bar label and the icon fill", async () => {
-  const translate = (key) => (key === "sidekick.title" ? "Sidekick" : key);
+  const translate = (key) => (key === "sideSession.title" ? "Sidekick" : key);
   assert.equal(buildSidekickButtonLabel(0, translate), "Sidekick");
   assert.equal(buildSidekickButtonLabel(3, translate), "Sidekick (3)");
 

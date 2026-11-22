@@ -24,6 +24,7 @@ import { sessionRecapDisplay } from "@/lib/session-recap";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import type { SubprojectDefinition, SubprojectSortSetting } from "@/lib/subproject-state";
 import type { SessionInfo } from "@/lib/types";
+import { isHiddenRelation } from "@/lib/session-family";
 import {
   defaultTalkMapCamera,
   defaultTalkMapLayout,
@@ -705,6 +706,7 @@ export function TalkMapOverlay({ open, projectRoot, deviceName, focusSessionId, 
       const nextBoard = boardBody.board;
       const nextSessions = (sessionsBody.sessions ?? []).filter((session) => (
         (session.projectRoot ?? session.cwd) === nextBoard.projectRoot
+        && !isHiddenRelation(session.relation)
       ));
       // 旧项目请求晚到时不得覆盖当前项目的 board 或会话列表。
       if (requestId !== boardRequestRef.current) return;

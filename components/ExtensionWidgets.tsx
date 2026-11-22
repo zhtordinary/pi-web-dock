@@ -80,6 +80,8 @@ export type AsyncStatusModelMetadata = Record<string, {
   agent?: string;
 }>;
 
+export type AsyncStatusChildRootCoverage = Record<string, string>;
+
 export function mergeAsyncStatusModelMetadata(
   previous: AsyncStatusModelMetadata,
   next: AsyncStatusModelMetadata,
@@ -284,6 +286,21 @@ export function collectAsyncStatusIds(snapshot: AsyncStatusSnapshot): string[] {
   };
   for (const run of snapshot.runs) visit(run.id, run, []);
   return [...ids];
+}
+
+export function filterCoveredAsyncStatusRuns(
+  snapshot: AsyncStatusSnapshot,
+  childRootToWorkflow: AsyncStatusChildRootCoverage = {},
+): AsyncStatusNode[] {
+  const workflowIds = new Set(
+    snapshot.runs.filter((run) => run.kind === "workflow").map((run) => run.id),
+  );
+  const coveredChildIds = new Set(
+    Object.entries(childRootToWorkflow)
+      .filter(([, workflowId]) => workflowIds.has(workflowId))
+      .map(([childId]) => childId),
+  );
+  return snapshot.runs.filter((run) => !coveredChildIds.has(run.id));
 }
 
 function applyAsyncStatusModelMetadata(
@@ -555,12 +572,15 @@ function AsyncStatusNodeView({
 export function AsyncStatusSnapshotContent({
   snapshot,
   modelMetadata = {},
+  childRootToWorkflow = {},
 }: {
   snapshot: AsyncStatusSnapshot;
   modelMetadata?: AsyncStatusModelMetadata;
+  childRootToWorkflow?: AsyncStatusChildRootCoverage;
 }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const hasLiveDuration = snapshot.runs.some(hasLiveAsyncStatusDuration);
+  const runs = filterCoveredAsyncStatusRuns(snapshot, childRootToWorkflow);
+  const hasLiveDuration = runs.some(hasLiveAsyncStatusDuration);
 
   useEffect(() => {
     if (!hasLiveDuration) return;
@@ -571,14 +591,14 @@ export function AsyncStatusSnapshotContent({
 
   const omitted = snapshot.omitted.runs + snapshot.omitted.children;
   const allowWorkflowTotal = snapshot.omitted.children === 0 && !snapshot.omitted.byteLimitExceeded;
-  const runs = Object.keys(modelMetadata).length > 0
-    ? snapshot.runs.map((run) => applyAsyncStatusModelMetadata(run, modelMetadata, run.id, []))
-    : snapshot.runs;
+  const enrichedRuns = Object.keys(modelMetadata).length > 0
+    ? runs.map((run) => applyAsyncStatusModelMetadata(run, modelMetadata, run.id, []))
+    : runs;
   return (
     <div className="async-status-snapshot">
       {runs.length > 0 ? (
         <ul className="async-status-tree async-status-cards">
-          {runs.map((run, index) => (
+          {enrichedRuns.map((run, index) => (
             <AsyncStatusNodeView
               key={`${run.id}-${index}`}
               node={run}
@@ -665,6 +685,7 @@ export function ExtensionWidgets({
     () => new Set(),
   );
   const [modelMetadata, setModelMetadata] = useState<AsyncStatusModelMetadata>({});
+  const [childRootToWorkflow, setChildRootToWorkflow] = useState<AsyncStatusChildRootCoverage>({});
   const modelMetadataScopeRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -740,6 +761,7 @@ export function ExtensionWidgets({
     if (!sessionId || !asyncSnapshotIdsKey) {
       modelMetadataScopeRef.current = null;
       setModelMetadata({});
+      setChildRootToWorkflow({});
       return () => { cancelled = true; };
     }
 
@@ -752,21 +774,39 @@ export function ExtensionWidgets({
       {},
       requestedIds,
     ));
+    setChildRootToWorkflow({});
 
     const params = new URLSearchParams({ sessionId, ids: asyncSnapshotIdsKey });
     fetch(apiPathForPeer(remotePeer, `subagents/async-metadata?${params.toString()}`), { cache: "no-store" })
       .then(async (response) => {
-        if (!response.ok) return {};
+        if (!response.ok) return { models: {}, childRootToWorkflow: {} };
         const value: unknown = await response.json();
-        if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return { models: {}, childRootToWorkflow: {} };
+        }
         const models = (value as { models?: unknown }).models;
-        return models && typeof models === "object" && !Array.isArray(models)
-          ? models as AsyncStatusModelMetadata
+        const coverage = (value as { childRootToWorkflow?: unknown }).childRootToWorkflow;
+        const parsedCoverage = coverage && typeof coverage === "object" && !Array.isArray(coverage)
+          ? Object.fromEntries(
+              Object.entries(coverage).filter((entry): entry is [string, string] =>
+                typeof entry[0] === "string"
+                && typeof entry[1] === "string"
+                && entry[0].trim().length > 0
+                && entry[1].trim().length > 0,
+              ),
+            )
           : {};
+        return {
+          models: models && typeof models === "object" && !Array.isArray(models)
+            ? models as AsyncStatusModelMetadata
+            : {},
+          childRootToWorkflow: parsedCoverage,
+        };
       })
-      .then((models) => {
+      .then(({ models, childRootToWorkflow: nextCoverage }) => {
         if (!cancelled) {
           setModelMetadata((current) => mergeAsyncStatusModelMetadata(current, models, requestedIds));
+          setChildRootToWorkflow(nextCoverage);
         }
       })
       .catch(() => {
@@ -801,7 +841,11 @@ export function ExtensionWidgets({
                 {(() => {
                   const snapshot = parseAsyncStatusSnapshot(widget.lines);
                   return snapshot ? (
-                    <AsyncStatusSnapshotContent snapshot={snapshot} modelMetadata={modelMetadata} />
+                    <AsyncStatusSnapshotContent
+                      snapshot={snapshot}
+                      modelMetadata={modelMetadata}
+                      childRootToWorkflow={childRootToWorkflow}
+                    />
                   ) : (
                     <pre className="extension-widget-content">
                       <AnsiText text={formatExtensionWidgetContent(widget.lines)} />

@@ -1,16 +1,13 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from "react";
-import { useRouter } from "next/navigation";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Bot, Brain, Check, ChevronDown, GitBranch, GitFork, Maximize2, MessageSquare, Minimize2, Paperclip, Plus, Send, Sparkles, Trash2, X, Zap } from "lucide-react";
 import { ImagePreview } from "./ImagePreview";
 import { MarkdownBody } from "./MarkdownBody";
+import { SelectorRow } from "./SelectorRow";
+import { SessionChatPanel } from "./SessionChatPanel";
 import { copyText } from "@/lib/clipboard";
-import {
-  getExtensionDialogInputCompositionEndAtOnBlur,
-  handleExtensionDialogInputKeyDown,
-} from "@/lib/extension-dialog-keyboard";
 import {
   compressImageFile,
   isBase64ImageWithinLimits,
@@ -18,27 +15,160 @@ import {
   MAX_ATTACHED_IMAGES,
   type Base64ImageAttachment,
 } from "@/lib/image-attachments";
-import type { SessionForkResult } from "@/hooks/useAgentSession";
-import type { QuickAskEntry } from "@/lib/quick-ask-storage";
-import type { QuickAskRunSnapshot, QuickAskScope } from "@/lib/quick-ask-log";
-import { isQuickAskRunActive } from "@/lib/quick-ask-status";
-import { localizeQuickAskError, observeQuickAskRun, readQuickAskRun, requestQuickAskFork } from "@/lib/quick-ask-observer";
 import { EMBEDDED_SIDEKICK_DISMISS_EVENT, notifyEmbeddedModalState } from "@/lib/embedded-modal";
-import { SelectorRow } from "./SelectorRow";
-import { useI18n } from "@/hooks/useI18n";
+import {
+  getExtensionDialogInputCompositionEndAtOnBlur,
+  handleExtensionDialogInputKeyDown,
+} from "@/lib/extension-dialog-keyboard";
 import { useHiddenModelProviders } from "@/hooks/useHiddenModelProviders";
+import { useI18n } from "@/hooks/useI18n";
+import {
+  useAgentSession,
+  type AttachedImage,
+  type SessionForkResult,
+  type ThinkingLevelOption,
+} from "@/hooks/useAgentSession";
+import type { ChatInputHandle } from "./ChatInput";
+import { useStreamingSelector, selectIsStreaming, selectStreamingMessage } from "@/hooks/useStreamingSelector";
+import { turnCacheHitRate } from "@/lib/turn-resources";
+import type { AgentMessage, AssistantMessage, SessionInfo, UserMessage } from "@/lib/types";
+
+export const SIDEKICK_RIGHT_PANEL_TARGET_ID = "reader-right-panel-sidekick";
+export const SIDEKICK_TOPBAR_PORTAL_ID = "reader-session-topbar-sidekick";
+
+const SIDEKICK_WIDTH = 410;
 
 type Translate = ReturnType<typeof useI18n>["t"];
+type ModelOption = { id: string; name: string; provider: string };
+type SidekickImage = Base64ImageAttachment & { previewUrl: string };
+type SideSessionInfo = SessionInfo & {
+  sideFirstEntryId?: string | null;
+  sideMessageCount?: number;
+};
 
-const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+type SideThread = {
+  id: string;
+  label: string;
+  sessionId: string | null;
+  info: SideSessionInfo | null;
+  initialPrompt: string | null;
+  initialImages: SidekickImage[];
+  draft: string;
+  images: SidekickImage[];
+  count: number;
+};
 
-function compareSidekickModelOptions(
-  a: { provider: string; modelId: string; name: string },
-  b: { provider: string; modelId: string; name: string },
-): number {
-  return MODEL_OPTION_COLLATOR.compare(a.name || a.modelId, b.name || b.modelId)
-    || MODEL_OPTION_COLLATOR.compare(a.provider, b.provider)
-    || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
+type Props = {
+  sessionId: string;
+  open: boolean;
+  /** Kept for the branch-aware caller; ordinary Side sessions are keyed by session id. */
+  historyRevision?: number;
+  onClose: () => void;
+  onQuoteToComposer?: (text: string) => void;
+  mainBusy?: boolean;
+  activeBranchId?: string;
+  activeParentId?: string | null;
+  remotePeer?: string | null;
+  onSessionForked?: (result: SessionForkResult) => void;
+  onCountChange?: (count: number) => void;
+  placement?: "sidebar" | "right-panel";
+  rightPanelTargetId?: string;
+  modelList?: ModelOption[];
+  modelNames?: Record<string, string>;
+  defaultModel?: { provider: string; modelId: string } | null;
+  modelThinkingLevels?: Record<string, string[]>;
+  modelThinkingLevelMaps?: Record<string, Record<string, string | null>>;
+  defaultThinkingLevel?: string | null;
+};
+
+const sidekickActionButtonStyle: React.CSSProperties = {
+  background: "none",
+  border: "none",
+  color: "var(--text-muted)",
+  cursor: "pointer",
+  fontSize: 11,
+  lineHeight: "14px",
+  padding: "2px 5px",
+  borderRadius: 3,
+  display: "inline-flex",
+  alignItems: "center",
+  transition: "color 0.12s, background-color 0.12s",
+};
+
+function sideSessionListUrl(sessionId: string, remotePeer?: string | null): string {
+  const encoded = encodeURIComponent(sessionId);
+  return remotePeer
+    ? `/api/remote/sessions/${encoded}/side?peer=${encodeURIComponent(remotePeer)}`
+    : `/api/sessions/${encoded}/side`;
+}
+
+function sideSessionUrl(sessionId: string, remotePeer?: string | null): string {
+  const encoded = encodeURIComponent(sessionId);
+  return remotePeer
+    ? `/api/remote/sessions/${encoded}?peer=${encodeURIComponent(remotePeer)}`
+    : `/api/sessions/${encoded}`;
+}
+
+function sideSessionDeleteUrl(sessionId: string, remotePeer?: string | null): string {
+  return sideSessionUrl(sessionId, remotePeer);
+}
+
+function sideSessionForkUrl(sessionId: string, remotePeer?: string | null): string {
+  const encoded = encodeURIComponent(sessionId);
+  return remotePeer
+    ? `/api/remote/sessions/${encoded}/fork?peer=${encodeURIComponent(remotePeer)}`
+    : `/api/sessions/${encoded}/fork`;
+}
+
+function sidekickPortalDocument(): Document | null {
+  if (typeof document === "undefined") return null;
+  if (typeof window === "undefined" || window.parent === window) return document;
+  try {
+    return window.parent.document.body ? window.parent.document : document;
+  } catch {
+    return document;
+  }
+}
+
+function imageDataUrl(image: Base64ImageAttachment): string {
+  return `data:${image.mimeType};base64,${image.data}`;
+}
+
+function messageText(message: UserMessage): string {
+  if (typeof message.content === "string") return message.content;
+  return message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+function messageImages(message: UserMessage): SidekickImage[] {
+  if (typeof message.content === "string") return [];
+  return message.content.flatMap((block) => {
+    if (block.type !== "image" || block.source.type !== "base64" || !block.source.data || !block.source.media_type) return [];
+    const image = { data: block.source.data, mimeType: block.source.media_type };
+    return isBase64ImageWithinLimits(image)
+      ? [{ ...image, previewUrl: imageDataUrl(image) }]
+      : [];
+  });
+}
+
+function assistantText(messages: readonly AssistantMessage[]): string {
+  return messages.flatMap((message) => message.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)).join("\n\n");
+}
+
+function assistantThinking(messages: readonly AssistantMessage[]): string {
+  return messages.flatMap((message) => message.content
+    .filter((block) => block.type === "thinking")
+    .map((block) => block.thinking)).filter(Boolean).join("\n\n");
+}
+
+function assistantToolNames(messages: readonly AssistantMessage[]): string[] {
+  return messages.flatMap((message) => message.content
+    .filter((block) => block.type === "toolCall")
+    .map((block) => block.toolName));
 }
 
 function filterSidekickModelOptionsByProvider(
@@ -56,21 +186,14 @@ function filterSidekickModelOptions(
 ): { provider: string; modelId: string; name: string }[] {
   const normalizedQuery = query.trim().toLocaleLowerCase();
   if (!normalizedQuery) return options;
-
-  return options.filter((option) => (
-    `${option.name} ${option.modelId}`
-      .toLocaleLowerCase()
-      .includes(normalizedQuery)
-  ));
+  return options.filter((option) => `${option.name} ${option.modelId}`.toLocaleLowerCase().includes(normalizedQuery));
 }
 
 export function getSidekickThinkingLevels(
   activeModel: { provider: string; modelId: string } | null | undefined,
   modelThinkingLevels?: Record<string, string[]>,
 ): string[] {
-  const levels = activeModel
-    ? modelThinkingLevels?.[`${activeModel.provider}:${activeModel.modelId}`]
-    : undefined;
+  const levels = activeModel ? modelThinkingLevels?.[`${activeModel.provider}:${activeModel.modelId}`] : undefined;
   return levels ? ["auto", ...levels] : ["auto", "off", "low", "medium", "high"];
 }
 
@@ -84,234 +207,40 @@ export function resolveSidekickThinkingLevel(
   return [...available].reverse().find((level) => level !== "auto") ?? "auto";
 }
 
-/** The active topic is always a listed tab; a deleted "default" falls back to the first listed topic. */
-export function resolveSidekickActiveThread(stored: string | undefined, threads: readonly string[]): string {
-  if (stored !== undefined && threads.includes(stored)) return stored;
-  return threads.includes("default") ? "default" : threads[0] ?? "default";
-}
-
-type SidekickImage = Base64ImageAttachment & { previewUrl: string };
-type DisplayImage = Base64ImageAttachment & { previewUrl?: string };
-
-type HistoryRequestState = {
-  requestId: number;
-  sessionId: string;
-  quickAskUrl: string;
-  promise: Promise<void> | null;
-  loaded: boolean;
-};
-
-type SidekickHistoryControllerOptions = {
-  historyRequestRef: { current: HistoryRequestState };
-  fetcher?: typeof fetch;
-  onItems: (items: QuickAskEntry[]) => void;
-  onRuns?: (runs: QuickAskRunSnapshot[]) => void;
-  onPromotedBranches?: (branches: string[]) => void;
-  onLoading: (loading: boolean) => void;
-};
-
-type SidekickHistoryDeleteBody = {
-  branchId?: string;
-  threadId?: string;
-  targetId?: string;
-  requestId?: string;
-};
-
-export function createSidekickHistoryController({
-  historyRequestRef,
-  fetcher = fetch,
-  onItems,
-  onRuns,
-  onPromotedBranches,
-  onLoading,
-}: SidekickHistoryControllerOptions) {
-  const isCurrentIdentity = (sessionId: string, quickAskUrl: string) => {
-    const current = historyRequestRef.current;
-    return current.sessionId === sessionId && current.quickAskUrl === quickAskUrl;
+function makeDraftThread(label: string): SideThread {
+  return {
+    id: `draft-${crypto.randomUUID()}`,
+    label,
+    sessionId: null,
+    info: null,
+    initialPrompt: null,
+    initialImages: [],
+    draft: "",
+    images: [],
+    count: 0,
   };
-
-  const isCurrentRequest = (
-    requestId: number,
-    sessionId: string,
-    quickAskUrl: string,
-  ) => {
-    const current = historyRequestRef.current;
-    return current.requestId === requestId
-      && current.sessionId === sessionId
-      && current.quickAskUrl === quickAskUrl;
-  };
-
-  const syncIdentity = (sessionId: string, quickAskUrl: string) => {
-    const current = historyRequestRef.current;
-    if (current.sessionId === sessionId && current.quickAskUrl === quickAskUrl) return false;
-    historyRequestRef.current = {
-      requestId: current.requestId + 1,
-      sessionId,
-      quickAskUrl,
-      promise: null,
-      loaded: false,
-    };
-    return true;
-  };
-
-  const invalidate = (sessionId: string, quickAskUrl: string) => {
-    if (!isCurrentIdentity(sessionId, quickAskUrl)) return false;
-    const current = historyRequestRef.current;
-    historyRequestRef.current = {
-      ...current,
-      requestId: current.requestId + 1,
-      promise: null,
-      loaded: false,
-    };
-    onLoading(false);
-    return true;
-  };
-
-  const load = (sessionId: string, quickAskUrl: string): Promise<void> => {
-    if (!sessionId) return Promise.resolve();
-    syncIdentity(sessionId, quickAskUrl);
-    if (!isCurrentIdentity(sessionId, quickAskUrl)) return Promise.resolve();
-
-    const current = historyRequestRef.current;
-    if (current.promise) return current.promise;
-    if (current.loaded) return Promise.resolve();
-
-    const requestId = current.requestId;
-    const requestSessionId = sessionId;
-    const requestUrl = quickAskUrl;
-    onLoading(true);
-
-    let requestPromise: Promise<void> | null = null;
-    requestPromise = (async () => {
-      try {
-        const res = await fetcher(requestUrl);
-        if (!res.ok) return;
-        const json = (await res.json()) as { success?: boolean; items?: QuickAskEntry[]; runs?: QuickAskRunSnapshot[]; promotedBranches?: string[] };
-        if (!isCurrentRequest(requestId, requestSessionId, requestUrl)) return;
-        historyRequestRef.current = { ...historyRequestRef.current, loaded: true };
-        if (Array.isArray(json.items)) onItems(json.items);
-        if (Array.isArray(json.promotedBranches)) onPromotedBranches?.(json.promotedBranches.filter((branch) => typeof branch === "string" && branch !== "main"));
-        if (Array.isArray(json.runs)) onRuns?.(json.runs);
-      } catch {
-        // Ignore network errors.
-      } finally {
-        if (!isCurrentRequest(requestId, requestSessionId, requestUrl)) return;
-        const latest = historyRequestRef.current;
-        if (requestPromise === null || latest.promise !== requestPromise) return;
-        onLoading(false);
-        historyRequestRef.current = { ...latest, promise: null };
-      }
-    })();
-
-    historyRequestRef.current = { ...current, promise: requestPromise };
-    return requestPromise;
-  };
-
-  const deleteWithRecovery = async (
-    sessionId: string,
-    quickAskUrl: string,
-    body: SidekickHistoryDeleteBody,
-    onOptimistic: () => void,
-  ) => {
-    if (!sessionId || !invalidate(sessionId, quickAskUrl)) return false;
-    onOptimistic();
-
-    let succeeded = false;
-    try {
-      const res = await fetcher(quickAskUrl, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      succeeded = res.ok;
-    } catch {
-      // Recover from the durable store below.
-    }
-
-    if (succeeded) return true;
-    if (isCurrentIdentity(sessionId, quickAskUrl)) await load(sessionId, quickAskUrl);
-    return false;
-  };
-
-  return { syncIdentity, isCurrentIdentity, invalidate, load, deleteWithRecovery };
-}
-
-function sidekickPortalDocument(): Document | null {
-  if (typeof document === "undefined") return null;
-  if (typeof window === "undefined" || window.parent === window) return document;
-  try {
-    return window.parent.document.body ? window.parent.document : document;
-  } catch {
-    return document;
-  }
-}
-
-function imageDataUrl(image: Base64ImageAttachment): string {
-  return `data:${image.mimeType};base64,${image.data}`;
 }
 
 function ImageAttachments({
   images,
   onRemove,
 }: {
-  images?: DisplayImage[];
+  images?: SidekickImage[];
   onRemove?: (index: number) => void;
 }) {
   const { t } = useI18n();
   if (!images?.length) return null;
-
-  const imageSources = images.map((image) => image.previewUrl || imageDataUrl(image));
+  const sources = images.map((image) => image.previewUrl || imageDataUrl(image));
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 6 }}>
       {images.map((image, index) => (
-        <div
-          key={`${image.mimeType}-${index}`}
-          style={{ position: "relative", width: 52, height: 52, flexShrink: 0 }}
-        >
-          <ImagePreview
-            src={imageSources[index]}
-            alt={t("sidekick.imageAttachment", { index: index + 1 })}
-            images={imageSources}
-            initialIndex={index}
-            style={{ width: "100%", height: "100%" }}
-          >
+        <div key={`${image.mimeType}-${index}`} style={{ position: "relative", width: 52, height: 52, flexShrink: 0 }}>
+          <ImagePreview src={sources[index]} alt={t("sidekick.imageAttachment", { index: index + 1 })} images={sources} initialIndex={index} style={{ width: "100%", height: "100%" }}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={imageSources[index]}
-              alt={t("sidekick.imageAttachment", { index: index + 1 })}
-              draggable={false}
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                borderRadius: 5,
-                border: "1px solid var(--border)",
-                display: "block",
-              }}
-            />
+            <img src={sources[index]} alt={t("sidekick.imageAttachment", { index: index + 1 })} draggable={false} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 5, border: "1px solid var(--border)", display: "block" }} />
           </ImagePreview>
           {onRemove && (
-            <button
-              type="button"
-              onClick={() => onRemove(index)}
-              aria-label={t("sidekick.removeImageAttachment", { index: index + 1 })}
-              title={t("sidekick.removeImage")}
-              style={{
-                position: "absolute",
-                top: -5,
-                right: -5,
-                width: 17,
-                height: 17,
-                padding: 0,
-                display: "grid",
-                placeItems: "center",
-                border: "1px solid var(--border)",
-                borderRadius: "50%",
-                background: "var(--bg-panel)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-              }}
-            >
+            <button type="button" onClick={() => onRemove(index)} aria-label={t("sidekick.removeImageAttachment", { index: index + 1 })} title={t("sidekick.removeImage")} style={{ position: "absolute", top: -5, right: -5, width: 17, height: 17, padding: 0, display: "grid", placeItems: "center", border: "1px solid var(--border)", borderRadius: "50%", background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer" }}>
               <X size={11} aria-hidden="true" />
             </button>
           )}
@@ -321,76 +250,7 @@ function ImageAttachments({
   );
 }
 
-export function sidekickViewKey(url: string, branchId: string, threadId: string): string {
-  return JSON.stringify([url, branchId, threadId]);
-}
-
-export function mergeSidekickThreadLists(
-  previous: Record<string, string[]>,
-  url: string,
-  items: readonly QuickAskEntry[],
-): Record<string, string[]> {
-  const next = { ...previous };
-  for (const item of items) {
-    const branchId = item.data.branchId || item.branchId || "main";
-    const threadId = item.data.threadId || item.threadId || "default";
-    const key = sidekickViewKey(url, branchId, "");
-    next[key] = Array.from(new Set([...(next[key] ?? []), threadId]));
-  }
-  return next;
-}
-
-interface SidekickLiveReply { question: string; images: SidekickImage[]; answer: string; thinking: string; running: boolean; settling?: boolean; activeTools?: string[]; deleting?: boolean; runId?: string; unconfirmed?: boolean; }
-interface SidekickStreamRequest {
-  controller: AbortController; running: boolean; deleting?: boolean; runId?: string;
-  observing?: boolean; accepted?: boolean; stopRequested?: boolean; retained?: boolean;
-  /** Sends this exact request again; the host answers with the turn it already admitted or admits it now, never a second one. */
-  resend?: () => Promise<void>;
-}
-type SidekickDraft = { question: string; images: SidekickImage[]; error: string | null };
-interface SidekickViewState {
-  drafts: Record<string, SidekickDraft>;
-  replies: Record<string, SidekickLiveReply>;
-}
-
-/** Restore the whole draft and release its matching source in the same state transition. */
-export function restoreSidekickDraft(
-  previous: SidekickViewState, key: string,
-  source: Pick<SidekickLiveReply, "runId" | "question" | "images">, processing: boolean, t: Translate, reason?: string,
-): SidekickViewState {
-  const reply = previous.replies[key];
-  if (!reply || reply.runId !== source.runId) return previous;
-  const draft = previous.drafts[key] ?? { question: "", images: [], error: null };
-  if (draft.question.trim() || draft.images.length || processing) {
-    if (reason === undefined) return { ...previous, drafts: { ...previous.drafts, [key]: {
-      ...draft, error: t("sidekick.restoreDraftBusy"),
-    } } };
-    return { ...previous, replies: { ...previous.replies, [key]: {
-      ...reply, running: false, unconfirmed: false, answer: `[${t("sidekick.notSent", { reason })}]`,
-    } } };
-  }
-  const replies = { ...previous.replies }; delete replies[key];
-  return { drafts: { ...previous.drafts, [key]: { question: source.question, images: source.images,
-    error: reason === undefined ? null : t("sidekick.notSent", { reason }) } }, replies };
-}
-
-const sidekickActionButtonStyle: React.CSSProperties = {
-  background: "none",
-  border: "none",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: 11,
-  lineHeight: "14px",
-  padding: "2px 5px",
-  borderRadius: 3,
-  display: "inline-flex",
-  alignItems: "center",
-  transition: "color 0.12s, background-color 0.12s",
-};
-
-export function SidekickQuestion({ question, images, copied, onCopy, onQuote }: {
-  question: string; images?: DisplayImage[]; copied: boolean; onCopy: () => void; onQuote?: () => void;
-}) {
+export function SidekickQuestion({ question, images, copied, onCopy, onQuote }: { question: string; images?: SidekickImage[]; copied: boolean; onCopy: () => void; onQuote?: () => void }) {
   const { t } = useI18n();
   return (
     <div style={{ alignSelf: "flex-end", display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "100%", minWidth: 0 }}>
@@ -398,7 +258,7 @@ export function SidekickQuestion({ question, images, copied, onCopy, onQuote }: 
         <MarkdownBody className="markdown-user-message" keepLineBreaks literalHtml>{question}</MarkdownBody>
         <ImageAttachments images={images} />
       </div>
-      <div className="sidekick-question-actions" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4, marginTop: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4, marginTop: 4 }}>
         <button type="button" onClick={onCopy} aria-label={t("sidekick.copyQuestion")} style={sidekickActionButtonStyle}>{copied ? t("i18n.copied") : t("i18n.copy")}</button>
         {onQuote && <button type="button" onClick={onQuote} aria-label={t("sidekick.quoteQuestion")} style={{ ...sidekickActionButtonStyle, color: "var(--accent)" }}>{t("sidekick.quote")}</button>}
       </div>
@@ -406,56 +266,37 @@ export function SidekickQuestion({ question, images, copied, onCopy, onQuote }: 
   );
 }
 
-export function SidekickAnswer({ entry }: { entry: QuickAskEntry }) {
+function SidekickAnswer({ messages }: { messages: readonly AssistantMessage[] }) {
   const { t } = useI18n();
-  const hasAnswer = Boolean(entry.data.answer?.trim());
-  return <>
-    {entry.data.toolCalls?.length ? <details style={{ marginBottom: 8, color: "var(--text-muted)", fontSize: 11 }}>
-      <summary>{t("sidekick.toolCalls", { count: entry.data.toolCalls.length })}</summary>
-      <ul>{entry.data.toolCalls.map((tool, index) => <li key={`${index}:${tool.name}`}>
-        {tool.name} · {t(tool.isError ? "sidekick.toolFailed" : "sidekick.toolFinished")}
-      </li>)}</ul>
-    </details> : null}
-    {entry.stopReason === "length" && (
-      <p role="status" style={{ color: "var(--text-muted)" }}>{t("sidekick.outputLimitReached")}</p>
-    )}
-    {hasAnswer ? <MarkdownBody>{entry.data.answer}</MarkdownBody> : <>
-      <p role="status" style={{ color: "var(--text-dim)", fontStyle: "italic" }}>{t("sidekick.noAnswerBody")}</p>
-      {entry.data.thinking?.trim() && <MarkdownBody>{t("sidekick.thinkingBlock", { thinking: entry.data.thinking ?? "" })}</MarkdownBody>}
-    </>}
-  </>;
+  const text = assistantText(messages);
+  const thinking = assistantThinking(messages);
+  const tools = assistantToolNames(messages);
+  return (
+    <>
+      {tools.length > 0 && <details style={{ marginBottom: 8, color: "var(--text-muted)", fontSize: 11 }}><summary>{t("sidekick.toolCalls", { count: tools.length })}</summary><ul>{tools.map((tool, index) => <li key={`${tool}-${index}`}>{tool}</li>)}</ul></details>}
+      {text ? <MarkdownBody>{text}</MarkdownBody> : <p role="status" style={{ color: "var(--text-dim)", fontStyle: "italic" }}>{t("sidekick.noAnswerBody")}</p>}
+      {thinking.trim() && <MarkdownBody>{t("sidekick.thinkingBlock", { thinking })}</MarkdownBody>}
+    </>
+  );
 }
 
-export const SIDEKICK_RIGHT_PANEL_TARGET_ID = "reader-right-panel-sidekick";
-export const SIDEKICK_TOPBAR_PORTAL_ID = "reader-session-topbar-sidekick";
-
-const sidekickIconStyle: React.CSSProperties = { display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, width: 24, height: 24, boxSizing: "border-box", border: "1px solid var(--border)", borderRadius: 4, padding: 0, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer" };
-
-const sidekickHeaderButtonStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  flexShrink: 0,
-  width: 24,
-  height: 24,
-  boxSizing: "border-box",
-  border: "none",
-  borderRadius: 5,
-  padding: 0,
-  background: "transparent",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  transition: "color 0.12s, background-color 0.12s",
-};
-
-const sidekickCloseButtonStyle: React.CSSProperties = {
-  ...sidekickHeaderButtonStyle,
-  width: 36,
-};
-
 export function SidekickHeader({ threads, activeThreadId, busyThreads, mainBusy, expanded, rightPanel, canFork, isForking, isPortal = false, onSelect, onCloseThread, onDelete, onCreate, onFork, onExpand, onClose }: {
-  threads: { id: string; label: string; count: number }[]; activeThreadId: string; busyThreads: Set<string>; mainBusy: boolean; expanded: boolean; rightPanel: boolean; canFork: boolean; isForking: boolean; isPortal?: boolean;
-  onSelect: (id: string) => void; onCloseThread: (event: React.MouseEvent, id: string) => void; onDelete: (event: React.MouseEvent, id: string) => void; onCreate: () => void; onFork: () => void; onExpand: () => void; onClose: () => void;
+  threads: { id: string; label: string; count: number }[];
+  activeThreadId: string;
+  busyThreads: Set<string>;
+  mainBusy: boolean;
+  expanded: boolean;
+  rightPanel: boolean;
+  canFork: boolean;
+  isForking: boolean;
+  isPortal?: boolean;
+  onSelect: (id: string) => void;
+  onCloseThread: (event: React.MouseEvent, id: string) => void;
+  onDelete: (event: React.MouseEvent, id: string) => void;
+  onCreate: () => void;
+  onFork: () => void;
+  onExpand: () => void;
+  onClose: () => void;
 }) {
   const { t } = useI18n();
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -467,22 +308,12 @@ export function SidekickHeader({ threads, activeThreadId, busyThreads, mainBusy,
       if (event?.target instanceof Element && event.target.closest("[data-sidekick-context-menu]")) return;
       setContextMenu(null);
     };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setContextMenu(null);
-      }
-    };
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); setContextMenu(null); } };
     document.addEventListener("pointerdown", close, true);
     document.addEventListener("contextmenu", close, true);
-    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", key);
     window.addEventListener("blur", close);
-    return () => {
-      document.removeEventListener("pointerdown", close, true);
-      document.removeEventListener("contextmenu", close, true);
-      document.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("blur", close);
-    };
+    return () => { document.removeEventListener("pointerdown", close, true); document.removeEventListener("contextmenu", close, true); document.removeEventListener("keydown", key); window.removeEventListener("blur", close); };
   }, [contextMenu]);
 
   const openContextMenu = (event: React.MouseEvent, id: string) => {
@@ -491,61 +322,9 @@ export function SidekickHeader({ threads, activeThreadId, busyThreads, mainBusy,
     setContextMenu({ id, x: event.clientX, y: event.clientY });
   };
 
-  const openContextMenuFromKeyboard = (event: React.KeyboardEvent<HTMLButtonElement>, id: string) => {
-    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-    event.preventDefault();
-    const rect = event.currentTarget.getBoundingClientRect();
-    setContextMenu({ id, x: rect.left, y: rect.bottom });
-  };
-
   const contextMenuElement = contextMenu && contextThread && (
-    <div
-      role="menu"
-      aria-label={t("sidekick.threadActions", { label: contextThread.label })}
-      data-sidekick-context-menu="true"
-      data-sidekick-interaction="true"
-      onContextMenu={(event) => event.preventDefault()}
-      style={{
-        position: "fixed",
-        left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 180)),
-        top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 48)),
-        minWidth: 172,
-        padding: 4,
-        border: "1px solid var(--border)",
-        borderRadius: 5,
-        background: "var(--bg-panel)",
-        boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
-        zIndex: 10001,
-      }}
-    >
-      <button
-        type="button"
-        role="menuitem"
-        data-sidekick-context-menu="true"
-        data-sidekick-interaction="true"
-        onClick={(event) => {
-          const id = contextThread.id;
-          setContextMenu(null);
-          onDelete(event, id);
-        }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          width: "100%",
-          padding: "7px 8px",
-          border: 0,
-          borderRadius: 4,
-          background: "transparent",
-          color: "#dc2626",
-          font: "inherit",
-          fontSize: 12,
-          textAlign: "left",
-          cursor: "pointer",
-        }}
-        onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
-      >
+    <div role="menu" aria-label={t("sidekick.threadActions", { label: contextThread.label })} data-sidekick-context-menu="true" data-sidekick-interaction="true" onContextMenu={(event) => event.preventDefault()} style={{ position: "fixed", left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 180)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 48)), minWidth: 172, padding: 4, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)", boxShadow: "0 8px 24px rgba(0,0,0,0.18)", zIndex: 10001 }}>
+      <button type="button" role="menuitem" data-sidekick-context-menu="true" data-sidekick-interaction="true" onClick={(event) => { const id = contextThread.id; setContextMenu(null); onDelete(event, id); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 8px", border: 0, borderRadius: 4, background: "transparent", color: "#dc2626", font: "inherit", fontSize: 12, textAlign: "left", cursor: "pointer" }}>
         <Trash2 size={14} strokeWidth={1.8} aria-hidden="true" />
         <span>{t("sidekick.deleteThreadForever")}</span>
       </button>
@@ -553,241 +332,408 @@ export function SidekickHeader({ threads, activeThreadId, busyThreads, mainBusy,
   );
 
   return (
-    <div
-      data-sidekick-header="true"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        width: "100%",
-        height: isPortal ? "100%" : 36,
-        minHeight: 36,
-        boxSizing: "border-box",
-        padding: "0 10px",
-        borderBottom: isPortal ? "none" : "1px solid var(--border)",
-        background: isPortal ? "transparent" : "var(--bg)",
-        flexShrink: 0,
-      }}
-    >
-      <div
-        role="tablist"
-        aria-label={t("sidekick.threadTabs")}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          flex: 1,
-          minWidth: 0,
-          height: "100%",
-          overflowX: "auto",
-        }}
-      >
+    <div data-sidekick-header="true" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", height: isPortal ? "100%" : 36, minHeight: 36, boxSizing: "border-box", padding: "0 10px", borderBottom: isPortal ? "none" : "1px solid var(--border)", background: isPortal ? "transparent" : "var(--bg)", flexShrink: 0 }}>
+      <div role="tablist" aria-label={t("sidekick.threadTabs")} style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, minWidth: 0, height: "100%", overflowX: "auto" }}>
         {threads.map((thread, index) => (
-          <div
-            key={thread.id}
-            onContextMenu={(event) => openContextMenu(event, thread.id)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              flexShrink: 0,
-              height: 24,
-              borderRadius: 4,
-              background: thread.id === activeThreadId ? "var(--bg-selected)" : "transparent",
-              transition: "background-color 0.12s",
-            }}
-          >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={thread.id === activeThreadId}
-              aria-haspopup="menu"
-              aria-busy={busyThreads.has(thread.id) || undefined}
-              tabIndex={thread.id === activeThreadId ? 0 : -1}
-              onClick={() => {
-                setContextMenu(null);
-                onSelect(thread.id);
-              }}
-              onKeyDown={(event) => {
-                openContextMenuFromKeyboard(event, thread.id);
-                if (event.defaultPrevented) return;
-                let next: number;
-                if (event.key === "ArrowRight") next = (index + 1) % threads.length;
-                else if (event.key === "ArrowLeft") next = (index + threads.length - 1) % threads.length;
-                else if (event.key === "Home") next = 0;
-                else if (event.key === "End") next = threads.length - 1;
-                else return;
-                event.preventDefault();
-                setContextMenu(null);
-                onSelect(threads[next].id);
-                (event.currentTarget.parentElement?.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next])?.focus();
-              }}
-              title={`${t("sidekick.threadTabTitle", { label: thread.label, count: thread.count })}${busyThreads.has(thread.id) ? t("sidekick.threadGeneratingSuffix") : ""}`}
-              style={{
-                border: 0,
-                background: "none",
-                color: thread.id === activeThreadId ? "var(--accent)" : "var(--text-muted)",
-                font: "inherit",
-                fontSize: 12,
-                padding: "0 6px",
-                height: "100%",
-                cursor: "pointer",
-                whiteSpace: "nowrap",
-                display: "inline-flex",
-                alignItems: "center",
-                transition: "color 0.12s",
-              }}
-              onMouseEnter={(e) => { if (thread.id !== activeThreadId) e.currentTarget.style.color = "var(--text)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = thread.id === activeThreadId ? "var(--accent)" : "var(--text-muted)"; }}
-            >
-              {busyThreads.has(thread.id)
-                ? <span className="sidekick-stream-label">{thread.label}</span>
-                : thread.label}
+          <div key={thread.id} onContextMenu={(event) => openContextMenu(event, thread.id)} style={{ display: "inline-flex", alignItems: "center", flexShrink: 0, height: 24, borderRadius: 4, background: thread.id === activeThreadId ? "var(--bg-selected)" : "transparent" }}>
+            <button type="button" role="tab" aria-selected={thread.id === activeThreadId} aria-busy={busyThreads.has(thread.id) || undefined} tabIndex={thread.id === activeThreadId ? 0 : -1} onClick={() => { setContextMenu(null); onSelect(thread.id); }} onKeyDown={(event) => { let next: number; if (event.key === "ArrowRight") next = (index + 1) % threads.length; else if (event.key === "ArrowLeft") next = (index + threads.length - 1) % threads.length; else if (event.key === "Home") next = 0; else if (event.key === "End") next = threads.length - 1; else return; event.preventDefault(); onSelect(threads[next].id); }} title={`${t("sidekick.threadTabTitle", { label: thread.label, count: thread.count })}${busyThreads.has(thread.id) ? t("sidekick.threadGeneratingSuffix") : ""}`} style={{ border: 0, background: "none", color: thread.id === activeThreadId ? "var(--accent)" : "var(--text-muted)", font: "inherit", fontSize: 12, padding: "0 6px", height: "100%", cursor: "pointer", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center" }}>
+              {busyThreads.has(thread.id) ? <span className="sidekick-stream-label">{thread.label}</span> : thread.label}
             </button>
-            {threads.length > 1 && (
-              <button
-                type="button"
-                aria-label={t("sidekick.closeThread", { label: thread.label })}
-                title={t("sidekick.closeThreadTitle")}
-                onClick={(event) => {
-                  setContextMenu(null);
-                  onCloseThread(event, thread.id);
-                }}
-                style={{
-                  border: 0,
-                  background: "none",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 16,
-                  height: 20,
-                  padding: 0,
-                  marginRight: 2,
-                  borderRadius: 2,
-                  transition: "color 0.12s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-              >
-                <X size={10} aria-hidden="true" />
-              </button>
-            )}
+            {threads.length > 1 && <button type="button" aria-label={t("sidekick.closeThread", { label: thread.label })} title={t("sidekick.closeThreadTitle")} onClick={(event) => onCloseThread(event, thread.id)} style={{ border: 0, background: "none", color: "var(--text-muted)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", width: 16, height: 20, padding: 0, marginRight: 2, borderRadius: 2 }}><X size={10} aria-hidden="true" /></button>}
           </div>
         ))}
       </div>
       {contextMenuElement}
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-        <button
-          type="button"
-          onClick={onCreate}
-          aria-label={t("sidekick.newThread")}
-          title={t("sidekick.newThread")}
-          data-sidekick-interaction="true"
-          style={{
-            ...sidekickHeaderButtonStyle,
-            border: "1px solid var(--border)",
-            borderRadius: 5,
-            background: "var(--bg)",
-            transition: "color 0.12s, border-color 0.12s, background-color 0.12s",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.color = "var(--text)";
-            e.currentTarget.style.borderColor = "var(--accent)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.color = "var(--text-muted)";
-            e.currentTarget.style.borderColor = "var(--border)";
-          }}
-        >
-          <Plus size={14} strokeWidth={1.8} aria-hidden="true" />
-        </button>
-        {canFork && (
-          <button
-            type="button"
-            onClick={onFork}
-            disabled={isForking}
-            aria-label={t("sidekick.fork")}
-            title={t("sidekick.forkThreadTitle")}
-            data-sidekick-interaction="true"
-            style={{
-              ...sidekickHeaderButtonStyle,
-              cursor: isForking ? "not-allowed" : "pointer",
-              opacity: isForking ? 0.5 : 1,
-            }}
-            onMouseEnter={(e) => { if (!isForking) e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            <GitBranch size={14} strokeWidth={1.8} aria-hidden="true" />
-          </button>
-        )}
-        {!rightPanel && (
-          <button
-            type="button"
-            onClick={onExpand}
-            aria-expanded={expanded}
-            aria-label={expanded ? t("sidekick.restoreSidebar") : t("sidekick.openCentered")}
-            title={expanded ? t("sidekick.restoreSidebar") : t("sidekick.openCentered")}
-            data-sidekick-interaction="true"
-            style={sidekickHeaderButtonStyle}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {expanded ? <Minimize2 size={14} strokeWidth={1.8} aria-hidden="true" /> : <Maximize2 size={14} strokeWidth={1.8} aria-hidden="true" />}
-          </button>
-        )}
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("sidekick.close")}
-            title={t("sidekick.close")}
-            data-sidekick-interaction="true"
-            style={sidekickHeaderButtonStyle}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            <X size={14} strokeWidth={1.8} aria-hidden="true" />
-          </button>
-        )}
+        <button type="button" onClick={onCreate} aria-label={t("sidekick.newThread")} title={t("sidekick.newThread")} data-sidekick-interaction="true" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, width: 24, height: 24, boxSizing: "border-box", border: "1px solid var(--border)", borderRadius: 5, padding: 0, background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer" }}><Plus size={14} strokeWidth={1.8} aria-hidden="true" /></button>
+        {canFork && <button type="button" onClick={onFork} disabled={isForking} aria-label={t("sidekick.fork")} title={t("sidekick.forkThreadTitle")} data-sidekick-interaction="true" style={{ border: 0, background: "transparent", color: "var(--text-muted)", cursor: isForking ? "wait" : "pointer", width: 24, height: 24, padding: 0 }}>{isForking ? "…" : <GitBranch size={14} strokeWidth={1.8} aria-hidden="true" />}</button>}
+        {!rightPanel && <button type="button" onClick={onExpand} aria-expanded={expanded} aria-label={expanded ? t("sidekick.restoreSidebar") : t("sidekick.openCentered")} title={expanded ? t("sidekick.restoreSidebar") : t("sidekick.openCentered")} data-sidekick-interaction="true" style={{ border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", width: 24, height: 24, padding: 0 }}>{expanded ? <Minimize2 size={14} strokeWidth={1.8} /> : <Maximize2 size={14} strokeWidth={1.8} />}</button>}
+        <button type="button" onClick={onClose} aria-label={t("sidekick.close")} title={t("sidekick.close")} data-sidekick-interaction="true" style={{ border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", width: 24, height: 24, padding: 0 }}><X size={14} strokeWidth={1.8} /></button>
       </div>
     </div>
   );
 }
 
-interface Props {
-  sessionId: string;
-  open: boolean;
-  /** Changes when the host rearranged stored questions (a branch moved to the main line); the history is read again. */
-  historyRevision?: number;
-  onClose: () => void;
-  onQuoteToComposer?: (text: string) => void;
-  mainBusy?: boolean;
-  activeBranchId?: string;
-  activeParentId?: string | null;
-  remotePeer?: string | null;
-  onSessionForked?: (result: SessionForkResult) => void;
-  onCountChange?: (count: number) => void;
-  /** Render the same side-question state inside the shell's resizable right panel. */
-  placement?: "sidebar" | "right-panel";
-  rightPanelTargetId?: string;
-  modelList?: { id: string; name: string; provider: string }[];
+function SidekickComposer({
+  draft,
+  setDraft,
+  images,
+  setImages,
+  error,
+  onError,
+  onSend,
+  disabled = false,
+  modelList,
+  modelNames,
+  currentModel,
+  thinkingLevels,
+  thinkingLevel,
+  onModelChange,
+  onThinkingChange,
+  onStop,
+}: {
+  draft: string;
+  setDraft: (value: string) => void;
+  images: SidekickImage[];
+  setImages: (images: SidekickImage[]) => void;
+  error: string | null;
+  onError: (error: string | null) => void;
+  onSend: () => void;
+  disabled?: boolean;
+  modelList?: ModelOption[];
   modelNames?: Record<string, string>;
-  defaultModel?: { provider: string; modelId: string } | null;
-  modelThinkingLevels?: Record<string, string[]>;
-  modelThinkingLevelMaps?: Record<string, Record<string, string | null>>;
-  defaultThinkingLevel?: string | null;
+  currentModel?: { provider: string; modelId: string } | null;
+  thinkingLevels?: Record<string, string[]>;
+  thinkingLevel?: string | null;
+  onModelChange?: (provider: string, modelId: string) => void;
+  onThinkingChange?: (level: ThinkingLevelOption) => void;
+  onStop?: () => void;
+}) {
+  const { t } = useI18n();
+  const hiddenProviders = useHiddenModelProviders();
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const modelSelectorRef = useRef<HTMLDivElement>(null);
+  const thinkingSelectorRef = useRef<HTMLDivElement>(null);
+  const modelPanelRef = useRef<HTMLDivElement>(null);
+  const thinkingPanelRef = useRef<HTMLDivElement>(null);
+  const compositionActiveRef = useRef(false);
+  const compositionEndAtRef = useRef(0);
+  const [processingImages, setProcessingImages] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const [modelFilter, setModelFilter] = useState("");
+  const [modelMenuPos, setModelMenuPos] = useState<{ bottom: number; left: number } | null>(null);
+  const [thinkingMenuPos, setThinkingMenuPos] = useState<{ bottom: number; left: number } | null>(null);
+
+  const modelOptions = useMemo(() => {
+    const source = modelList?.length ? modelList : Object.entries(modelNames ?? {}).map(([id, name]) => ({ id, name, provider: currentModel?.provider ?? "unknown" }));
+    return source.map((model) => ({ provider: model.provider, modelId: model.id, name: model.name }));
+  }, [currentModel?.provider, modelList, modelNames]);
+  const visibleModels = useMemo(() => filterSidekickModelOptionsByProvider(modelOptions, hiddenProviders, currentModel), [currentModel, hiddenProviders, modelOptions]);
+  const filteredModels = useMemo(() => filterSidekickModelOptions(visibleModels, modelFilter), [modelFilter, visibleModels]);
+  const modelGroups = useMemo(() => {
+    const groups: { provider: string; options: typeof filteredModels }[] = [];
+    for (const option of filteredModels) {
+      const group = groups.find((item) => item.provider === option.provider);
+      if (group) group.options.push(option);
+      else groups.push({ provider: option.provider, options: [option] });
+    }
+    return groups;
+  }, [filteredModels]);
+  const availableThinkingLevels = useMemo(() => getSidekickThinkingLevels(currentModel, thinkingLevels), [currentModel, thinkingLevels]);
+  const selectedThinkingLevel = resolveSidekickThinkingLevel(thinkingLevel ?? null, availableThinkingLevels, thinkingLevel ?? "auto");
+  const displayModelName = currentModel
+    ? modelOptions.find((option) => option.provider === currentModel.provider && option.modelId === currentModel.modelId)?.name ?? currentModel.modelId
+    : t("sidekick.selectModel");
+
+  const resize = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.max(56, Math.min(textarea.scrollHeight, 220))}px`;
+  }, []);
+  useLayoutEffect(() => { resize(); }, [draft, resize]);
+  useEffect(() => { const handler = () => resize(); window.addEventListener("resize", handler); return () => window.removeEventListener("resize", handler); }, [resize]);
+  useEffect(() => {
+    if (!modelOpen && !thinkingOpen) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (modelOpen && !modelSelectorRef.current?.contains(target) && !modelPanelRef.current?.contains(target)) { setModelOpen(false); setModelFilter(""); }
+      if (thinkingOpen && !thinkingSelectorRef.current?.contains(target) && !thinkingPanelRef.current?.contains(target)) setThinkingOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [modelOpen, thinkingOpen]);
+
+  const addFiles = async (files: File[]) => {
+    if (!files.length || processingImages || disabled) return;
+    const room = Math.max(0, MAX_ATTACHED_IMAGES - images.length);
+    const accepted = files.filter((file) => file.type.startsWith("image/") && file.size <= MAX_ATTACHED_IMAGE_BYTES).slice(0, room);
+    if (!accepted.length) { onError(t("sidekick.imageTooLarge", { size: MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024) })); return; }
+    setProcessingImages(true);
+    try {
+      const next = [...images];
+      for (const file of accepted) {
+        const image = await compressImageFile(file);
+        if (!isBase64ImageWithinLimits(image)) throw new Error("image exceeds limit");
+        next.push({ ...image, previewUrl: imageDataUrl(image) });
+      }
+      setImages(next);
+      onError(null);
+    } catch {
+      onError(t("sidekick.imageReadFailed"));
+    } finally {
+      setProcessingImages(false);
+    }
+  };
+
+  const openModelMenu = () => {
+    setThinkingOpen(false);
+    if (!modelOpen && modelSelectorRef.current) {
+      const rect = modelSelectorRef.current.getBoundingClientRect();
+      setModelMenuPos({ bottom: window.innerHeight - rect.top + 6, left: Math.max(8, rect.left) });
+    }
+    setModelOpen((value) => !value);
+  };
+  const openThinkingMenu = () => {
+    setModelOpen(false);
+    if (!thinkingOpen && thinkingSelectorRef.current) {
+      const rect = thinkingSelectorRef.current.getBoundingClientRect();
+      setThinkingMenuPos({ bottom: window.innerHeight - rect.top + 6, left: Math.max(8, rect.left) });
+    }
+    setThinkingOpen((value) => !value);
+  };
+
+  const modelPortal = modelOpen && modelMenuPos && typeof document !== "undefined" ? createPortal(
+    <div ref={modelPanelRef} data-sidekick-interaction="true" style={{ position: "fixed", bottom: modelMenuPos.bottom, left: Math.min(modelMenuPos.left, window.innerWidth - 270), width: "max-content", minWidth: 240, maxWidth: 320, maxHeight: Math.min(360, window.innerHeight * 0.6), overflow: "hidden", display: "flex", flexDirection: "column", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.15)", zIndex: 10000 }}>
+      {visibleModels.length > 8 && <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}><input value={modelFilter} onChange={(event) => setModelFilter(event.target.value)} placeholder={t("chat.filterModels")} aria-label={t("chat.filterModels")} autoFocus style={{ width: "100%", boxSizing: "border-box", padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg)", color: "var(--text)", fontSize: 11 }} /></div>}
+      <div role="listbox" aria-label={t("sidekick.selectModel")} style={{ minHeight: 0, overflowY: "auto" }}>
+        {modelGroups.map((group, index) => <div key={group.provider} role="group" aria-label={group.provider}>
+          {modelGroups.length > 1 && <div style={{ padding: "6px 12px 4px", fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase", borderTop: index ? "1px solid var(--border)" : "none" }}>{group.provider}</div>}
+          {group.options.map((option) => <SelectorRow key={`${option.provider}:${option.modelId}`} active={option.provider === currentModel?.provider && option.modelId === currentModel.modelId} onSelect={() => { onModelChange?.(option.provider, option.modelId); setModelOpen(false); setModelFilter(""); }}>{option.name}</SelectorRow>)}
+        </div>)}
+      </div>
+    </div>, document.body,
+  ) : null;
+  const thinkingPortal = thinkingOpen && thinkingMenuPos && typeof document !== "undefined" ? createPortal(
+    <div ref={thinkingPanelRef} role="listbox" aria-label={t("sidekick.selectThinkingLevel")} data-sidekick-interaction="true" style={{ position: "fixed", bottom: thinkingMenuPos.bottom, left: Math.min(thinkingMenuPos.left, window.innerWidth - 140), minWidth: 110, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, boxShadow: "0 -4px 16px rgba(0,0,0,0.15)", zIndex: 10000, padding: 4 }}>
+      {availableThinkingLevels.map((level) => <button key={level} type="button" role="option" aria-selected={selectedThinkingLevel === level} data-sidekick-interaction="true" onClick={() => { onThinkingChange?.(level as ThinkingLevelOption); setThinkingOpen(false); }} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", padding: "5px 8px", fontSize: 11, textAlign: "left", border: 0, borderRadius: 4, background: selectedThinkingLevel === level ? "var(--bg-selected)" : "transparent", color: selectedThinkingLevel === level ? "var(--accent)" : "var(--text)", cursor: "pointer" }}>{level}{selectedThinkingLevel === level && <Check size={11} />}</button>)}
+    </div>, document.body,
+  ) : null;
+
+  return (
+    <>
+      {modelPortal}{thinkingPortal}
+      <div data-sidekick-composer="true" style={{ padding: "6px 8px 8px", background: "var(--bg)", display: "flex", flexDirection: "column", flex: "0 1 auto", minHeight: 0, maxHeight: "min(44%, 50dvh)", overflow: "hidden" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: "1 1 auto", minHeight: 64, overflow: "hidden", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "8px 8px 6px", position: "relative" }}>
+          <textarea ref={textareaRef} value={draft} onChange={(event) => { setDraft(event.target.value); onError(null); }} onInput={resize} onPaste={(event) => { const files = Array.from(event.clipboardData?.items ?? []).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!files.length) return; event.preventDefault(); void addFiles(files); }} onKeyDown={(event) => { if (event.key !== "Enter" || event.shiftKey) return; handleExtensionDialogInputKeyDown(event.nativeEvent, compositionActiveRef.current, compositionEndAtRef.current, onSend); }} onCompositionStart={() => { compositionActiveRef.current = true; }} onCompositionEnd={() => { compositionActiveRef.current = false; compositionEndAtRef.current = Date.now(); }} onBlur={() => { compositionEndAtRef.current = getExtensionDialogInputCompositionEndAtOnBlur(compositionActiveRef.current, compositionEndAtRef.current); compositionActiveRef.current = false; }} placeholder="" rows={2} disabled={disabled} style={{ display: "block", flex: "1 1 auto", width: "100%", minWidth: 0, background: "transparent", border: 0, outline: 0, resize: "none", boxSizing: "border-box", minHeight: 56, maxHeight: 220, overflowY: "auto", overflowWrap: "anywhere", whiteSpace: "pre-wrap", fontSize: "var(--chat-content-font-size, 14px)", color: "var(--text)", lineHeight: 1.7 }} />
+          <ImageAttachments images={images} onRemove={(index) => setImages(images.filter((_, imageIndex) => imageIndex !== index))} />
+          {error && <div role="alert" style={{ color: "#ef4444", fontSize: 10 }}>{error}</div>}
+          <input ref={fileInputRef} type="file" accept="image/*" multiple tabIndex={-1} aria-hidden="true" style={{ display: "none" }} onChange={(event) => { const files = Array.from(event.target.files ?? []); event.target.value = ""; void addFiles(files); }} />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flex: 1 }}>
+              <div ref={modelSelectorRef} style={{ position: "relative" }}><button type="button" onClick={openModelMenu} aria-label={t("sidekick.selectModel")} title={t("sidekick.currentModel", { model: displayModelName })} style={{ display: "inline-flex", alignItems: "center", gap: 3, height: 22, padding: "0 6px", fontSize: 11, color: modelOpen ? "var(--text)" : "var(--text-muted)", background: modelOpen ? "var(--bg-hover)" : "transparent", border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer", maxWidth: 150, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}><Bot size={11} strokeWidth={1.8} /><span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{displayModelName}</span><ChevronDown size={10} /></button></div>
+              <div ref={thinkingSelectorRef} style={{ position: "relative" }}><button type="button" onClick={openThinkingMenu} aria-label={t("sidekick.thinkingLevel")} title={t("sidekick.thinkingLevelTitle", { level: selectedThinkingLevel })} style={{ display: "inline-flex", alignItems: "center", gap: 3, height: 22, padding: "0 6px", fontSize: 11, color: thinkingOpen ? "var(--text)" : "var(--text-muted)", background: thinkingOpen ? "var(--bg-hover)" : "transparent", border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer" }}><Brain size={11} strokeWidth={1.8} /><span>{selectedThinkingLevel}</span><ChevronDown size={10} /></button></div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={disabled || processingImages || images.length >= MAX_ATTACHED_IMAGES} aria-label={t("sidekick.addImage")} title={t("sidekick.addImage")} style={{ display: "grid", placeItems: "center", width: 25, height: 23, padding: 0, background: "transparent", color: "var(--text-muted)", border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer", opacity: disabled || processingImages || images.length >= MAX_ATTACHED_IMAGES ? 0.45 : 1 }}><Paperclip size={13} /></button>
+              {disabled && onStop && <button type="button" onClick={onStop} style={{ ...sidekickActionButtonStyle, color: "#ef4444" }}>{t("chat.stop")}</button>}
+              <button type="button" onClick={onSend} aria-label={t("chat.send")} title={t("chat.send")} disabled={disabled || processingImages || (!draft.trim() && images.length === 0)} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 25, height: 23, padding: 0, background: "var(--accent)", color: "#fff", border: 0, borderRadius: 4, cursor: "pointer", opacity: disabled || processingImages || (!draft.trim() && images.length === 0) ? 0.45 : 1 }}><Send size={13} /></button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+type SideTurn = { user: UserMessage; answers: AssistantMessage[] };
+
+function sideMessagesAfterBoundary(info: SideSessionInfo, messages: AgentMessage[], entryIds: string[]): AgentMessage[] {
+  const first = info.sideFirstEntryId ? entryIds.indexOf(info.sideFirstEntryId) : -1;
+  if (first >= 0) return messages.slice(first);
+  const expectedUsers = info.sideMessageCount ?? 0;
+  if (!expectedUsers) return [];
+  const userIndices = messages.flatMap((message, index) => message.role === "user" ? [index] : []);
+  const start = userIndices[Math.max(0, userIndices.length - expectedUsers)];
+  return start === undefined ? [] : messages.slice(start);
+}
+
+function sideTurns(messages: readonly AgentMessage[]): SideTurn[] {
+  const turns: SideTurn[] = [];
+  let current: SideTurn | null = null;
+  for (const message of messages) {
+    if (message.role === "user") {
+      current = { user: message, answers: [] };
+      turns.push(current);
+    } else if (message.role === "assistant" && current) {
+      current.answers.push(message);
+    }
+  }
+  return turns;
+}
+
+function SideSessionThread({
+  info,
+  initialPrompt,
+  initialImages,
+  onInitialPromptConsumed,
+  onInfoChange,
+  draft,
+  setDraft,
+  images,
+  setImages,
+  composerError,
+  setComposerError,
+  remotePeer,
+  onQuoteToComposer,
+  onBusyChange,
+  initialModel,
+  initialThinkingLevel,
+}: {
+  info: SideSessionInfo;
+  initialPrompt: string | null;
+  initialImages: SidekickImage[];
+  onInitialPromptConsumed: () => void;
+  onInfoChange: (info: SideSessionInfo) => void;
+  draft: string;
+  setDraft: (value: string) => void;
+  images: SidekickImage[];
+  setImages: (images: SidekickImage[]) => void;
+  composerError: string | null;
+  setComposerError: (value: string | null) => void;
+  remotePeer?: string | null;
+  onQuoteToComposer?: (text: string) => void;
+  onBusyChange: (busy: boolean) => void;
+  initialModel: { provider: string; modelId: string } | null;
+  initialThinkingLevel: string;
+}) {
+  const { t } = useI18n();
+  const chatInputRef = useRef<ChatInputHandle | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const initialPromptKeyRef = useRef<string | null>(null);
+  const [localOwnStartIndex, setLocalOwnStartIndex] = useState<number | null>(null);
+  const agent = useAgentSession({ session: info, sessionRunning: true, newSessionCwd: null, newSessionDraftKey: null, remotePeer: remotePeer ?? undefined, chatInputRef });
+  const streamingMessage = useStreamingSelector(agent.streamingStore, selectStreamingMessage);
+  const isStreaming = useStreamingSelector(agent.streamingStore, selectIsStreaming);
+  const busy = Boolean(agent.agentRunning || agent.sessionStatePending || agent.bashRunning || isStreaming);
+  const ownMessages = useMemo(() => {
+    const first = info.sideFirstEntryId ? agent.entryIds.indexOf(info.sideFirstEntryId) : -1;
+    if (first >= 0) return agent.messages.slice(first);
+    if (localOwnStartIndex !== null) return agent.messages.slice(localOwnStartIndex);
+    return sideMessagesAfterBoundary(info, agent.messages, agent.entryIds);
+  }, [agent.entryIds, agent.messages, info, localOwnStartIndex]);
+  const turns = useMemo(() => sideTurns(ownMessages), [ownMessages]);
+
+  useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
+  useEffect(() => () => onBusyChange(false), [onBusyChange]);
+  useEffect(() => { initialPromptKeyRef.current = null; }, [info.id]);
+  useEffect(() => {
+    if (!initialPrompt || initialPromptKeyRef.current === initialPrompt || agent.loading || agent.error || agent.sessionStatePending || agent.agentRunning || agent.bashRunning) return;
+    initialPromptKeyRef.current = initialPrompt;
+    void (async () => {
+      try {
+        if (initialModel && (!agent.currentModel || agent.currentModel.provider !== initialModel.provider || agent.currentModel.modelId !== initialModel.modelId)) {
+          await agent.handleModelChange(initialModel.provider, initialModel.modelId);
+        }
+        if (initialThinkingLevel && initialThinkingLevel !== "auto") {
+          await agent.handleThinkingLevelChange(initialThinkingLevel as ThinkingLevelOption);
+        }
+        setLocalOwnStartIndex(agent.messages.length);
+        await agent.handleSend(initialPrompt, initialImages);
+        try {
+          const response = await fetch(sideSessionUrl(info.id, remotePeer), { cache: "no-store" });
+          const data = await response.json().catch(() => ({})) as { info?: SideSessionInfo };
+          if (response.ok && data.info) onInfoChange(data.info);
+        } catch {
+          // The durable transcript remains available; the next session refresh retries metadata.
+        }
+        onInitialPromptConsumed();
+      } catch {
+        initialPromptKeyRef.current = null;
+      }
+    })();
+  }, [agent.agentRunning, agent.bashRunning, agent.currentModel, agent.error, agent.handleModelChange, agent.handleSend, agent.handleThinkingLevelChange, agent.loading, agent.messages.length, agent.sessionStatePending, info.id, initialImages, initialModel, initialPrompt, initialThinkingLevel, onInfoChange, onInitialPromptConsumed, remotePeer]);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, [turns, streamingMessage, isStreaming]);
+
+  const send = async () => {
+    const text = draft.trim();
+    const submittedImages = images;
+    if ((!text && !submittedImages.length) || busy) return;
+    setDraft("");
+    setImages([]);
+    setComposerError(null);
+    if (!info.sideFirstEntryId && localOwnStartIndex === null) setLocalOwnStartIndex(agent.messages.length);
+    try {
+      await agent.handleSend(text, submittedImages);
+      if (!info.sideFirstEntryId) {
+        try {
+          const response = await fetch(sideSessionUrl(info.id, remotePeer), { cache: "no-store" });
+          const data = await response.json().catch(() => ({})) as { info?: SideSessionInfo };
+          if (response.ok && data.info) onInfoChange(data.info);
+        } catch {
+          // The transcript is durable; the next list refresh retries the metadata read.
+        }
+      }
+    } catch (error) {
+      setDraft(text);
+      setImages(submittedImages);
+      setComposerError(String(error));
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
+      <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "14px 14px", display: "flex", flexDirection: "column", gap: 16 }}>
+        {agent.loading && turns.length === 0 && <div style={{ textAlign: "center", color: "var(--text-dim)", padding: 20 }}>{t("i18n.loading")}</div>}
+        {!agent.loading && turns.length === 0 && !isStreaming && (
+          <HowItWorks />
+        )}
+        {turns.map((turn, index) => {
+          const question = messageText(turn.user);
+          const answerText = assistantText(turn.answers);
+          const answer = turn.answers.at(-1);
+          const answerModel = answer?.model;
+          const cacheHitRate = answer?.usage ? turnCacheHitRate(answer.usage) : null;
+          return (
+            <div key={`${turn.user.id ?? turn.user.timestamp ?? index}:${index}`} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <SidekickQuestion question={question} images={messageImages(turn.user)} copied={false} onCopy={() => void copyText(question)} onQuote={onQuoteToComposer ? () => onQuoteToComposer(question) : undefined} />
+              {turn.answers.length > 0 && <div style={{ alignSelf: "flex-start", width: "100%", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: "var(--chat-content-font-size, 14px)", lineHeight: 1.7 }} className="prose prose-sm dark:prose-invert max-w-none"><SidekickAnswer messages={turn.answers} /></div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 6, fontSize: 11, color: "var(--text-dim)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{answerModel || "LLM"}</span>
+                    {cacheHitRate !== null && <><span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span><span style={{ color: "var(--accent)", fontWeight: 600, whiteSpace: "nowrap" }}>{t("chat.turnCacheHitRate")} {cacheHitRate.toFixed(1)}%</span></>}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <button type="button" onClick={() => void copyText(answerText || t("sidekick.noAnswerBodyParenthetical"))} style={sidekickActionButtonStyle} title={t("sidekick.copyAnswer")}>{t("i18n.copy")}</button>
+                    {onQuoteToComposer && <button type="button" onClick={() => onQuoteToComposer(t("sidekick.quoteToComposerText", { question, answer: answerText || t("sidekick.noAnswerBodyParenthetical") }))} style={{ ...sidekickActionButtonStyle, color: "var(--accent)" }} title={t("sidekick.quoteAnswerTitle")}>{t("sidekick.quote")}</button>}
+                  </div>
+                </div>
+              </div>}
+            </div>
+          );
+        })}
+        {isStreaming && streamingMessage?.role === "assistant" && <div style={{ display: "flex", flexDirection: "column", gap: 8 }}><div style={{ alignSelf: "flex-start", width: "100%", background: "var(--bg)", border: "1px solid rgba(16,185,129,0.4)", borderRadius: 8, padding: "10px 12px" }}><SidekickAnswer messages={[streamingMessage]} /><div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", marginTop: 6, paddingTop: 4, borderTop: "1px solid var(--border)", fontSize: 10, color: "#10b981" }}><span>{t("sidekick.generating")}</span></div></div></div>}
+        {agent.error && <div role="alert" style={{ color: "#dc2626", fontSize: 12, whiteSpace: "pre-wrap" }}>{String(agent.error)}</div>}
+      </div>
+      <SidekickComposer draft={draft} setDraft={setDraft} images={images} setImages={setImages} error={composerError} onError={setComposerError} onSend={() => void send()} disabled={busy} modelList={agent.modelList as ModelOption[]} modelNames={agent.modelNames} currentModel={agent.currentModel} thinkingLevels={agent.modelThinkingLevels} thinkingLevel={agent.thinkingLevel} onModelChange={(provider, modelId) => void agent.handleModelChange(provider, modelId)} onThinkingChange={(level) => void agent.handleThinkingLevelChange(level)} onStop={() => void agent.handleAbort()} />
+    </div>
+  );
+}
+
+function HowItWorks() {
+  const { t } = useI18n();
+  return (
+    <div style={{ padding: "16px 14px", background: "var(--bg-hover)", borderRadius: 8, border: "1px solid var(--border)", marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text)", fontWeight: 600, fontSize: 13, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}><Sparkles size={15} style={{ color: "var(--accent)" }} aria-hidden="true" /><span>{t("sidekick.howItWorks")}</span></div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 12, lineHeight: 1.55 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}><span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: 4, background: "rgba(59,130,246,0.12)", color: "#3b82f6", flexShrink: 0 }}><GitFork size={13} /></span><div><strong style={{ color: "var(--text)", display: "block", marginBottom: 2 }}>{t("sidekick.howFirstTitle")}</strong><span style={{ color: "var(--text-muted)" }}>{t("sidekick.howFirstBody")}</span></div></div>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}><span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: 4, background: "rgba(245,158,11,0.12)", color: "#f59e0b", flexShrink: 0 }}><Zap size={13} /></span><div><strong style={{ color: "var(--text)", display: "block", marginBottom: 2 }}>{t("sidekick.howParallelTitle")}</strong><span style={{ color: "var(--text-muted)" }}>{t("sidekick.howParallelBody")}</span></div></div>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}><span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: 4, background: "rgba(16,185,129,0.12)", color: "#10b981", flexShrink: 0 }}><MessageSquare size={13} /></span><div><strong style={{ color: "var(--text)", display: "block", marginBottom: 2 }}>{t("sidekick.howFollowUpTitle")}</strong><span style={{ color: "var(--text-muted)" }}>{t("sidekick.howFollowUpBody")}</span></div></div>
+      </div>
+    </div>
+  );
+}
+
+function SideSessionFallback({ sessionId, remotePeer, initialPrompt, onInitialPromptConsumed, onSessionForked }: { sessionId: string; remotePeer?: string | null; initialPrompt?: string | null; onInitialPromptConsumed: () => void; onSessionForked?: (result: SessionForkResult) => void }) {
+  return <SessionChatPanel sessionId={sessionId} running remotePeer={remotePeer} initialPrompt={initialPrompt || undefined} onInitialPromptConsumed={onInitialPromptConsumed} onSessionForked={onSessionForked} />;
 }
 
 export function SidekickDrawer({
   sessionId,
   open,
-  historyRevision = 0,
+  historyRevision: _historyRevision,
   onClose,
   onQuoteToComposer,
   mainBusy = false,
-  activeBranchId = "main",
-  activeParentId,
+  activeBranchId: _activeBranchId = "main",
+  activeParentId: _activeParentId,
   remotePeer,
   onSessionForked,
   onCountChange,
@@ -797,1702 +743,295 @@ export function SidekickDrawer({
   modelNames,
   defaultModel,
   modelThinkingLevels,
-  modelThinkingLevelMaps,
   defaultThinkingLevel,
 }: Props) {
-  const router = useRouter();
-  const quickAskUrl = remotePeer
-    ? `/api/remote/sessions/${encodeURIComponent(sessionId)}/quick-ask?peer=${encodeURIComponent(remotePeer)}`
-    : `/api/sessions/${encodeURIComponent(sessionId)}/quick-ask`;
-  const [items, setItems] = useState<QuickAskEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  // Drafts and in-flight replies belong to an exact peer/session/branch/thread.
-  const [threadLists, setThreadLists] = useState<Record<string, string[]>>({});
-  const [promotedBranches, setPromotedBranches] = useState<string[]>([]);
-  const [recoveryBranch, setRecoveryBranch] = useState<string | null>(null);
-  const sideAskBranchId = activeBranchId === "main" && recoveryBranch ? recoveryBranch : activeBranchId;
-  const listKey = sidekickViewKey(quickAskUrl, sideAskBranchId || "main", "");
-  const threadList = threadLists[listKey] ?? ["default"];
-  const setThreadList = useCallback((value: React.SetStateAction<string[]>) => {
-    setThreadLists((previous) => ({ ...previous, [listKey]: typeof value === "function" ? value(previous[listKey] ?? ["default"]) : value }));
-  }, [listKey]);
-  const [activeThreads, setActiveThreads] = useState<Record<string, string>>({});
-  const activeThreadId = resolveSidekickActiveThread(activeThreads[listKey], threadList);
-  const setActiveThreadId = useCallback((value: string) => setActiveThreads((previous) => ({ ...previous, [listKey]: value })), [listKey]);
-  const viewKey = sidekickViewKey(quickAskUrl, sideAskBranchId || "main", activeThreadId);
-  const [viewState, setViewState] = useState<SidekickViewState>({ drafts: {}, replies: {} });
-  const { drafts, replies } = viewState;
-  const setDrafts = useCallback((update: React.SetStateAction<SidekickViewState["drafts"]>) => {
-    setViewState((previous) => ({ ...previous, drafts: typeof update === "function" ? update(previous.drafts) : update }));
-  }, []);
-  const setReplies = useCallback((update: React.SetStateAction<SidekickViewState["replies"]>) => {
-    setViewState((previous) => ({ ...previous, replies: typeof update === "function" ? update(previous.replies) : update }));
-  }, []);
-  const draftsRef = useRef(drafts);
-  draftsRef.current = drafts;
-  const question = drafts[viewKey]?.question ?? "";
-  const attachedImages = drafts[viewKey]?.images ?? [];
-  const setQuestion = useCallback((value: React.SetStateAction<string>) => {
-    setDrafts((previous) => {
-      const draft = previous[viewKey] ?? { question: "", images: [], error: null };
-      return { ...previous, [viewKey]: { ...draft, question: typeof value === "function" ? value(draft.question) : value } };
-    });
-  }, [setDrafts, viewKey]);
-  const setAttachedImages = useCallback((value: React.SetStateAction<SidekickImage[]>) => {
-    setDrafts((previous) => {
-      const draft = previous[viewKey] ?? { question: "", images: [], error: null };
-      return { ...previous, [viewKey]: { ...draft, images: typeof value === "function" ? value(draft.images) : value } };
-    });
-  }, [setDrafts, viewKey]);
-  const attachmentError = drafts[viewKey]?.error ?? null;
-  const setAttachmentError = useCallback((error: string | null) => {
-    setDrafts((previous) => ({ ...previous, [viewKey]: { ...(previous[viewKey] ?? { question: "", images: [], error: null }), error } }));
-  }, [setDrafts, viewKey]);
-  const [processingImages, setProcessingImages] = useState<Record<string, number>>({});
-  const isProcessingImages = (processingImages[viewKey] ?? 0) > 0;
-  const reply = replies[viewKey];
-  const isStreaming = reply?.running ?? false;
-  const isDeletingThread = reply?.deleting ?? false;
-  const streamingQuestion = reply?.question ?? "";
-  const streamingImages = reply?.images ?? [];
-  const streamingAnswer = reply?.answer ?? "";
-  const streamingThinking = reply?.thinking ?? "";
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-
-  const [isForking, setIsForking] = useState(false);
-  const forkRequestRef = useRef<AbortController | null>(null);
-  const [expanded, setExpanded] = useState(false);
-  const isRightPanelPlacement = placement === "right-panel";
-  const isSidebarPlacement = placement === "sidebar";
-  const shouldPortalToTopbar = isSidebarPlacement && !expanded;
-  const [topbarTarget, setTopbarTarget] = useState<HTMLElement | null>(null);
-
   const { t } = useI18n();
-  const [selectedModel, setSelectedModel] = useState<{ provider: string; modelId: string } | null>(null);
-  const storedModel = [...items].reverse().find((item) => (item.data.threadId ?? item.threadId ?? "default") === activeThreadId
-    && (item.data.branchId ?? item.branchId ?? "main") === (sideAskBranchId || "main"));
-  const threadModel = storedModel?.requestedModel ?? (storedModel?.data.provider && storedModel.data.model
-    ? { provider: storedModel.data.provider, modelId: storedModel.data.model } : null);
-  const requestedModel = selectedModel ?? threadModel ?? defaultModel;
-  const activeModel = requestedModel ?? (modelList?.[0] ? { provider: modelList[0].provider, modelId: modelList[0].id } : null);
-  const [thinkingLevelOverride, setThinkingLevelOverride] = useState<string | null>(null);
-  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
-  const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
-  const [modelFilter, setModelFilter] = useState("");
-  const hiddenModelProviders = useHiddenModelProviders();
-
-  const [modelMenuPos, setModelMenuPos] = useState<{ bottom: number; left: number } | null>(null);
-  const [thinkingMenuPos, setThinkingMenuPos] = useState<{ bottom: number; left: number } | null>(null);
-  const modelSelectorRef = useRef<HTMLDivElement>(null);
-  const thinkingSelectorRef = useRef<HTMLDivElement>(null);
-  const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
-  const thinkingDropdownPanelRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!modelDropdownOpen && !thinkingDropdownOpen) return;
-    const handleOutsideClick = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        modelSelectorRef.current && !modelSelectorRef.current.contains(target) &&
-        (!modelDropdownPanelRef.current || !modelDropdownPanelRef.current.contains(target))
-      ) {
-        setModelDropdownOpen(false);
-        setModelFilter("");
-      }
-      if (
-        thinkingSelectorRef.current && !thinkingSelectorRef.current.contains(target) &&
-        (!thinkingDropdownPanelRef.current || !thinkingDropdownPanelRef.current.contains(target))
-      ) {
-        setThinkingDropdownOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleOutsideClick);
-    return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, [modelDropdownOpen, thinkingDropdownOpen]);
-
-  const modelOptions = useMemo(() => {
-    if (modelList && modelList.length > 0) {
-      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name })).sort(compareSidekickModelOptions);
-    }
-    return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
-      provider: activeModel?.provider ?? "unknown",
-      modelId,
-      name,
-    })).sort(compareSidekickModelOptions);
-  }, [modelList, modelNames, activeModel?.provider]);
-
-  const visibleModelOptions = useMemo(() => {
-    return filterSidekickModelOptionsByProvider(modelOptions, hiddenModelProviders, activeModel);
-  }, [activeModel, hiddenModelProviders, modelOptions]);
-
-  const filteredModelOptions = useMemo(() => {
-    return filterSidekickModelOptions(visibleModelOptions, modelFilter);
-  }, [visibleModelOptions, modelFilter]);
-
-  const showModelFilter = visibleModelOptions.length > 8;
-
-  const modelsByProvider = useMemo(() => {
-    const list: { provider: string; options: typeof filteredModelOptions }[] = [];
-    for (const opt of filteredModelOptions) {
-      const group = list.find((g) => g.provider === opt.provider);
-      if (group) group.options.push(opt);
-      else list.push({ provider: opt.provider, options: [opt] });
-    }
-    return list;
-  }, [filteredModelOptions]);
-
-  const displayModelName = activeModel
-    ? (modelOptions.find((o) => o.modelId === activeModel.modelId && o.provider === activeModel.provider)?.name ?? modelNames?.[activeModel.modelId] ?? activeModel.modelId)
-    : t("sidekick.selectModel");
-
-  const availableThinkingLevelsList = useMemo(
-    () => getSidekickThinkingLevels(activeModel, modelThinkingLevels),
-    [activeModel, modelThinkingLevels],
-  );
-
-  const selectedThinkingLevel = useMemo(
-    () => resolveSidekickThinkingLevel(thinkingLevelOverride, availableThinkingLevelsList, defaultThinkingLevel ?? "auto"),
-    [availableThinkingLevelsList, defaultThinkingLevel, thinkingLevelOverride],
-  );
-
-  useEffect(() => {
-    if (!open || !shouldPortalToTopbar || typeof document === "undefined") {
-      setTopbarTarget(null);
-      return;
-    }
-    const target = document.getElementById(SIDEKICK_TOPBAR_PORTAL_ID);
-    if (target) {
-      setTopbarTarget(target);
-      return;
-    }
-    const frame = requestAnimationFrame(() => {
-      const delayed = document.getElementById(SIDEKICK_TOPBAR_PORTAL_ID);
-      if (delayed) setTopbarTarget(delayed);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [open, shouldPortalToTopbar]);
-
-  const streamRequestsRef = useRef(new Map<string, SidekickStreamRequest>());
-  const observeRunRef = useRef<(run: QuickAskRunSnapshot) => void>(() => {});
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const questionCompositionActiveRef = useRef(false);
-  const questionCompositionEndAtRef = useRef(0);
+  const [threads, setThreads] = useState<SideThread[]>([]);
+  const [activeId, setActiveId] = useState<string>("");
+  const [sideSessionCount, setSideSessionCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [images, setImages] = useState<SidekickImage[]>([]);
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const [busyThreads, setBusyThreads] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<{ provider: string; modelId: string } | null>(defaultModel ?? null);
+  const [selectedThinkingLevel, setSelectedThinkingLevel] = useState(defaultThinkingLevel ?? "auto");
+  const loadSerialRef = useRef(0);
+  const isRightPanelPlacement = placement === "right-panel";
+  const shouldPortalToTopbar = placement === "sidebar" && !expanded;
+  const [topbarTarget, setTopbarTarget] = useState<HTMLElement | null>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const pendingImageCountRef = useRef(new Map<string, { count: number }>());
-  const sessionIdentityRef = useRef({ sessionId, quickAskUrl });
-  if (sessionIdentityRef.current.sessionId !== sessionId || sessionIdentityRef.current.quickAskUrl !== quickAskUrl) sessionIdentityRef.current = { sessionId, quickAskUrl };
-  const historyRequestRef = useRef<HistoryRequestState>({
-    requestId: 0,
-    sessionId: "",
-    quickAskUrl: "",
-    promise: null,
-    loaded: false,
-  });
-  const historyControllerRef = useRef<ReturnType<typeof createSidekickHistoryController> | null>(null);
-  if (!historyControllerRef.current) {
-    historyControllerRef.current = createSidekickHistoryController({
-      historyRequestRef,
-      onItems: (nextItems) => {
-        const identity = sessionIdentityRef.current;
-        const url = historyRequestRef.current.quickAskUrl;
-        setItems((previous) => sessionIdentityRef.current === identity ? nextItems : previous);
-        setThreadLists((previous) => {
-          if (sessionIdentityRef.current !== identity) return previous;
-          return mergeSidekickThreadLists(previous, url, nextItems);
-        });
-      },
-      onRuns: (runs) => { for (const run of runs) observeRunRef.current(run); },
-      onPromotedBranches: setPromotedBranches,
-      onLoading: setLoading,
-    });
-  }
-  const historyController = historyControllerRef.current;
-  historyController.syncIdentity(sessionId, quickAskUrl);
 
-  const recoveryBranches = useMemo(() => {
-    const branches = new Set(promotedBranches.filter((branch) => items.some((item) => (item.data.branchId ?? item.branchId) === branch)));
-    if (recoveryBranch) branches.add(recoveryBranch);
-    for (const key of [...Object.keys(drafts), ...Object.keys(replies), ...Object.keys(processingImages)]) {
-      try {
-        const [url, branch] = JSON.parse(key) as [string, string, string];
-        const draft = drafts[key];
-        if (url === quickAskUrl && branch && branch !== "main"
-          && (replies[key] || draft?.question.trim() || draft?.images.length || draft?.error || (processingImages[key] ?? 0) > 0)) branches.add(branch);
-      } catch { /* Ignore state from an unknown key format. */ }
-    }
-    return [...branches];
-  }, [drafts, items, processingImages, promotedBranches, quickAskUrl, recoveryBranch, replies]);
+  const newThread = useCallback((index: number) => makeDraftThread(t("sidekick.threadTitle", { index })), [t]);
 
-  useLayoutEffect(() => {
-    for (const [key, request] of streamRequestsRef.current) {
-      if (request.retained && !request.running && !replies[key]) {
-        request.retained = false;
-        if (!request.observing) streamRequestsRef.current.delete(key);
-      }
-    }
-  }, [replies]);
-
-  // An unknown admission offers the same request again; a run the host already admitted is only looked up.
-  const unconfirmedRequest = reply?.unconfirmed ? streamRequestsRef.current.get(viewKey) : undefined;
-  const restoreActionLabel = !reply?.unconfirmed ? t("sidekick.restoreQuestion")
-    : unconfirmedRequest?.resend && !unconfirmedRequest.accepted ? t("sidekick.retrySend") : t("sidekick.recheckStatus");
-
-  const processImageFiles = useCallback(async (files: File[]) => {
-    if (!files.length) return;
-    const identity = sessionIdentityRef.current;
-    const key = viewKey;
-    const remaining = Math.max(
-      0,
-      MAX_ATTACHED_IMAGES - attachedImages.length - (pendingImageCountRef.current.get(key)?.count ?? 0),
-    );
-    const invalidFile = files.some((file) => (
-      !file.type.startsWith("image/") || file.size > MAX_ATTACHED_IMAGE_BYTES
-    ));
-    const imageFiles = files
-      .filter((file) => file.type.startsWith("image/") && file.size <= MAX_ATTACHED_IMAGE_BYTES)
-      .slice(0, remaining);
-
-    if (!imageFiles.length) {
-      setAttachmentError(
-        invalidFile
-          ? t("sidekick.imageTooLarge", { size: MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024) })
-          : t("sidekick.tooManyImages", { count: MAX_ATTACHED_IMAGES }),
-      );
-      return;
-    }
-
-    if (invalidFile || files.length > imageFiles.length) {
-      setAttachmentError(
-        invalidFile
-          ? t("sidekick.imageTooLarge", { size: MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024) })
-          : t("sidekick.tooManyImages", { count: MAX_ATTACHED_IMAGES }),
-      );
-    } else {
-      setAttachmentError(null);
-    }
-
-    const imageWindow = pendingImageCountRef.current.get(key) ?? { count: 0 };
-    pendingImageCountRef.current.set(key, imageWindow);
-    imageWindow.count += imageFiles.length;
-    const current = () => sessionIdentityRef.current === identity && pendingImageCountRef.current.get(key) === imageWindow;
-    const pendingCount = imageWindow.count;
-    setProcessingImages((previous) => current() ? { ...previous, [key]: pendingCount } : previous);
+  const loadSideSessions = useCallback(async () => {
+    if (!sessionId) return;
+    const serial = ++loadSerialRef.current;
+    setLoading(true);
+    setLoadError(null);
     try {
-      const newImages = await Promise.all(
-        imageFiles.map(async (file) => {
-          const image = await compressImageFile(file);
-          if (!isBase64ImageWithinLimits(image)) throw new Error("image exceeds limit");
-          return { ...image, previewUrl: imageDataUrl(image) };
-        }),
-      );
-      if (!current()) return;
-      setAttachedImages((previous) => {
-        const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - previous.length));
-        const next = [...previous, ...accepted];
-        return next;
+      const response = await fetch(sideSessionListUrl(sessionId, remotePeer), { cache: "no-store" });
+      const data = await response.json().catch(() => ({})) as { sessions?: SideSessionInfo[]; error?: string };
+      if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+      if (serial !== loadSerialRef.current) return;
+      const persisted = (data.sessions ?? []).map((info, index) => ({ id: info.id, label: t("sidekick.threadTitle", { index: index + 1 }), sessionId: info.id, info, initialPrompt: null, initialImages: [], draft: "", images: [], count: info.sideMessageCount ?? 0 }));
+      setSideSessionCount(persisted.length);
+      const emptyThread = newThread(1);
+      setThreads((previous) => {
+        const previousById = new Map(previous.map((thread) => [thread.id, thread]));
+        const drafts = previous.filter((thread) => !thread.info);
+        const merged = persisted.map((thread) => ({ ...thread, draft: previousById.get(thread.id)?.draft ?? "", images: previousById.get(thread.id)?.images ?? [], initialPrompt: previousById.get(thread.id)?.initialPrompt ?? null, initialImages: previousById.get(thread.id)?.initialImages ?? [] }));
+        const next = [...merged, ...drafts];
+        return next.length ? next : [emptyThread];
       });
-    } catch {
-      if (current()) setAttachmentError(t("sidekick.imageReadFailed"));
+      setActiveId((current) => {
+        if (current && persisted.some((thread) => thread.id === current)) return current;
+        return persisted[0]?.id ?? `draft-${loadSerialRef.current}`;
+      });
+    } catch (error) {
+      if (serial !== loadSerialRef.current) return;
+      setLoadError(String(error));
+      setThreads((previous) => previous.length ? previous : [newThread(1)]);
     } finally {
-      if (current()) {
-        imageWindow.count = Math.max(0, imageWindow.count - imageFiles.length);
-        const pending = imageWindow.count;
-        setProcessingImages((previous) => current() ? { ...previous, [key]: pending } : previous);
-      }
+      if (serial === loadSerialRef.current) setLoading(false);
     }
-  }, [attachedImages.length, setAttachedImages, setAttachmentError, t, viewKey]);
-
-  const removeImage = useCallback((index: number) => {
-    setAttachedImages((previous) => {
-      const next = previous.filter((_, imageIndex) => imageIndex !== index);
-      return next;
-    });
-  }, [setAttachedImages]);
-
-  const handlePaste = useCallback((event: React.ClipboardEvent) => {
-    const imageItems = Array.from(event.clipboardData?.items ?? [])
-      .filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
-    event.preventDefault();
-    const files = imageItems
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null);
-    processImageFiles(files);
-  }, [processImageFiles]);
-
-  const resizeQuestion = useCallback(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-
-    const drawerHeight = drawerRef.current?.clientHeight ?? window.innerHeight;
-    const maxHeight = Math.max(
-      88,
-      Math.min(
-        Math.floor(window.innerHeight * 0.5),
-        Math.floor(drawerHeight * 0.4),
-      ),
-    );
-    textarea.style.height = "auto";
-    const nextHeight = Math.max(56, Math.min(textarea.scrollHeight, maxHeight));
-    textarea.style.height = `${nextHeight}px`;
-    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
-  }, []);
-
-  useLayoutEffect(() => {
-    resizeQuestion();
-  }, [expanded, question, resizeQuestion]);
-
-  const restoreQuestionView = useCallback(() => {
-    requestAnimationFrame(() => {
-      resizeQuestion();
-      const textarea = textareaRef.current;
-      if (!textarea) return;
-      textarea.focus();
-      const len = textarea.value.length;
-      textarea.setSelectionRange(len, len);
-      textarea.scrollTop = textarea.scrollHeight;
-    });
-  }, [resizeQuestion]);
+  }, [newThread, remotePeer, sessionId, t]);
 
   useEffect(() => {
-    const handleResize = () => resizeQuestion();
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, [resizeQuestion]);
+    loadSerialRef.current += 1;
+    setThreads([]);
+    setActiveId("");
+    setSideSessionCount(0);
+    setDraft("");
+    setImages([]);
+    setComposerError(null);
+    setBusyThreads(new Set());
+    void loadSideSessions();
+  }, [loadSideSessions, sessionId, remotePeer]);
+  useEffect(() => { if (open) void loadSideSessions(); }, [loadSideSessions, open]);
+  useEffect(() => { onCountChange?.(sideSessionCount); }, [onCountChange, sideSessionCount]);
+  useEffect(() => { if (defaultModel) setSelectedModel(defaultModel); }, [defaultModel]);
+  useEffect(() => { if (defaultThinkingLevel) setSelectedThinkingLevel(defaultThinkingLevel); }, [defaultThinkingLevel]);
+
+  const activeThread = threads.find((thread) => thread.id === activeId) ?? threads[0] ?? null;
+  useEffect(() => {
+    if (!activeThread) return;
+    setDraft(activeThread.draft);
+    setImages(activeThread.images);
+    setComposerError(null);
+  }, [activeId]); // The active tab owns the draft; updates within it must not reset typing.
+  useEffect(() => {
+    if (!activeId) return;
+    setThreads((previous) => previous.map((thread) => thread.id === activeId ? { ...thread, draft, images } : thread));
+  }, [activeId, draft, images]);
 
   useEffect(() => {
-    if (!open) setExpanded(false);
-  }, [open]);
-
-  useEffect(() => {
-    if (isRightPanelPlacement) setExpanded(false);
-  }, [isRightPanelPlacement]);
-
-  useEffect(() => {
-    // The session overlay is dismissible by clicking outside. The right-panel
-    // view is a docked tool and must stay mounted until its own tab is toggled.
-    if (!open || isRightPanelPlacement) return;
-    const ownerDocument = expanded ? sidekickPortalDocument() ?? document : document;
-    const handleOutsidePointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (target && typeof (target as Element).closest === "function" && (target as Element).closest("[data-sidekick-interaction]")) return;
-      if (target && typeof (target as Node).nodeType === "number" && drawerRef.current?.contains(target as Node)) return;
-      onClose();
+    const handleQuote = (event: Event) => {
+      const text = (event as CustomEvent<{ text?: unknown }>).detail?.text;
+      if (typeof text === "string" && text.trim()) setDraft((current) => current ? `${current}\n\n${text}` : text);
     };
-    ownerDocument.addEventListener("pointerdown", handleOutsidePointerDown);
-    return () => ownerDocument.removeEventListener("pointerdown", handleOutsidePointerDown);
-  }, [expanded, isRightPanelPlacement, onClose, open]);
+    window.addEventListener("pi-sidekick-quote", handleQuote);
+    return () => window.removeEventListener("pi-sidekick-quote", handleQuote);
+  }, []);
 
   useEffect(() => {
     if (!open || isRightPanelPlacement || typeof window === "undefined" || window.parent === window) return;
     const handleEmbeddedParentDismiss = (event: MessageEvent) => {
       if (event.source !== window.parent) return;
       const data = event.data as { type?: unknown } | null;
-      if (data?.type !== EMBEDDED_SIDEKICK_DISMISS_EVENT) return;
-      onClose();
+      if (data?.type === EMBEDDED_SIDEKICK_DISMISS_EVENT) onClose();
     };
     window.addEventListener("message", handleEmbeddedParentDismiss);
     return () => window.removeEventListener("message", handleEmbeddedParentDismiss);
   }, [isRightPanelPlacement, onClose, open]);
-
   useEffect(() => {
     if (!open || !expanded || typeof window === "undefined" || window.parent === window) return;
     if (sidekickPortalDocument() !== document) return;
     notifyEmbeddedModalState(true, "sidekick");
     return () => notifyEmbeddedModalState(false, "sidekick");
   }, [expanded, open]);
-
   useEffect(() => {
     if (!open || !expanded) return;
     const ownerWindow = sidekickPortalDocument()?.defaultView ?? window;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setExpanded(false);
-    };
+    const handleKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setExpanded(false); } };
     ownerWindow.addEventListener("keydown", handleKeyDown);
     return () => ownerWindow.removeEventListener("keydown", handleKeyDown);
   }, [expanded, open]);
-
   useEffect(() => {
-    const handleSidekickQuote = (e: Event) => {
-      const custom = e as CustomEvent<{ text: string }>;
-      if (custom.detail?.text) {
-        const quoteText = custom.detail.text;
-        setQuestion((prev) => (prev ? `${prev}\n\n${quoteText}` : quoteText));
-        restoreQuestionView();
-      }
-    };
-    window.addEventListener("pi-sidekick-quote", handleSidekickQuote);
-    return () => window.removeEventListener("pi-sidekick-quote", handleSidekickQuote);
-  }, [restoreQuestionView, setQuestion]);
-
-  // Load durable history as soon as the session/URL identity is known. Opening reuses an in-flight request.
-  const loadHistory = useCallback(
-    () => historyController.load(sessionId, quickAskUrl),
-    [historyController, quickAskUrl, sessionId],
-  );
-  const deleteHistory = useCallback(
-    (
-      body: SidekickHistoryDeleteBody,
-      onOptimistic: () => void,
-    ) => historyController.deleteWithRecovery(sessionId, quickAskUrl, body, onOptimistic),
-    [historyController, quickAskUrl, sessionId],
-  );
-
-  useEffect(() => {
-    forkRequestRef.current?.abort();
-    forkRequestRef.current = null;
-    setIsForking(false);
-    for (const request of streamRequestsRef.current.values()) request.controller.abort();
-    streamRequestsRef.current.clear();
-    setReplies({});
-    setDrafts({});
-    setProcessingImages({});
-    pendingImageCountRef.current.clear();
-    setItems([]);
-    setThreadLists({});
-    setPromotedBranches([]);
-    setRecoveryBranch(null);
-    setActiveThreads({});
-    if (!sessionId) {
-      setLoading(false);
-      return;
-    }
-    void loadHistory();
-  }, [loadHistory, quickAskUrl, sessionId]);
-
-  useEffect(() => {
-    if (!open) return;
-    void loadHistory();
-    restoreQuestionView();
-  }, [loadHistory, open, restoreQuestionView]);
-
-  const seenHistoryRevisionRef = useRef(historyRevision);
-  useEffect(() => {
-    if (seenHistoryRevisionRef.current === historyRevision) return;
-    seenHistoryRevisionRef.current = historyRevision;
-    historyController.invalidate(sessionId, quickAskUrl);
-    void historyController.load(sessionId, quickAskUrl);
-  }, [historyController, historyRevision, quickAskUrl, sessionId]);
-
-  const scrollToBottom = useCallback(() => {
-    if (scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-    }
-  }, []);
-
-  
-  // Filter items strictly belonging to current branch (or main)
-  const branchItems = useMemo(() => {
-    const target = sideAskBranchId || "main";
-    return items.filter((i) => (i.data.branchId || i.branchId || "main") === target);
-  }, [items, sideAskBranchId]);
-
-  // Compute thread objects: labelled purely as 1, 2, 3...
-  const threads = useMemo(() => {
-    return threadList.map((tid, index) => {
-      const threadItems = branchItems.filter((i) => (i.data.threadId || i.threadId || "default") === tid);
-      return {
-        id: tid,
-        label: `${index + 1}`,
-        count: threadItems.length,
-      };
-    });
-  }, [threadList, branchItems]);
-
-  const activeThreadIndex = useMemo(() => {
-    const idx = threadList.indexOf(activeThreadId);
-    return idx >= 0 ? idx : 0;
-  }, [threadList, activeThreadId]);
-
-  const currentThreadItems = useMemo(() => {
-    return branchItems.filter((i) => (i.data.threadId || i.threadId || "default") === activeThreadId);
-  }, [branchItems, activeThreadId]);
-
-  // Show the number of topic tabs only after this branch has real side-question content.
-  const hasSidekickContent = branchItems.length > 0 || threadList.some((tid) => {
-    const liveReply = replies[sidekickViewKey(quickAskUrl, sideAskBranchId || "main", tid)];
-    return Boolean(liveReply?.question.trim() || liveReply?.images.length);
-  });
-  const sidekickTagCount = hasSidekickContent ? threadList.length : 0;
-
-  useEffect(() => {
-    onCountChange?.(sidekickTagCount);
-  }, [listKey, onCountChange, sidekickTagCount]);
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [currentThreadItems, reply?.runId, streamingAnswer, scrollToBottom]);
-
-  // Create new thread tab
-  const handleCreateNewThread = () => {
-    const newId = `th-${crypto.randomUUID()}`;
-    setThreadList((prev) => [...prev, newId]);
-    setActiveThreadId(newId);
-    setTimeout(() => textareaRef.current?.focus(), 100);
-  };
-
-  // Close a tab without changing the durable Side Ask history.
-  const handleCloseThread = (e: React.MouseEvent, tid: string) => {
-    e.stopPropagation();
-    setThreadList((previous) => {
-      const remaining = previous.filter((id) => id !== tid);
-      return remaining.length > 0 ? remaining : ["default"];
-    });
-    if (activeThreadId === tid) {
-      const remaining = threadList.filter((id) => id !== tid);
-      setActiveThreadId(remaining.length > 0 ? remaining[0] : "default");
-    }
-  };
-
-  // Permanently delete a thread and its durable Side Ask history.
-  const handleDeleteThread = (e: React.MouseEvent, tid: string) => {
-    e.stopPropagation();
-    const deletionKey = sidekickViewKey(quickAskUrl, sideAskBranchId || "main", tid);
-    if (streamRequestsRef.current.get(deletionKey)?.deleting) return;
-    const thread = threads.find((t) => t.id === tid);
-    if (thread && thread.count > 0) {
-      const confirmed = window.confirm(t("sidekick.deleteThreadConfirm", { label: thread.label }));
-      if (!confirmed) return;
-    }
-
-    const branchId = sideAskBranchId || "main";
-    const key = sidekickViewKey(quickAskUrl, branchId, tid);
-    const identity = sessionIdentityRef.current;
-    const draft = draftsRef.current[key];
-    const requestId = streamRequestsRef.current.get(key)?.runId;
-    const owner = streamRequestsRef.current.get(key) ?? { controller: new AbortController(), running: false, deleting: false };
-    owner.deleting = true;
-    streamRequestsRef.current.set(key, owner);
-    setReplies((previous) => ({ ...previous, [key]: { ...(previous[key] ?? { question: "", images: [], answer: "", thinking: "", running: false }), deleting: true } }));
-    // The host deletion owns cancellation, including an admission still in flight.
-    void deleteHistory({ threadId: tid, branchId, ...(requestId ? { requestId } : {}) }, () => owner?.controller.abort()).then((success) => {
-      if (sessionIdentityRef.current !== identity) return;
-      if (!success) {
-        if (streamRequestsRef.current.get(key) === owner) owner.deleting = false;
-        setReplies((previous) => previous[key] ? { ...previous, [key]: { ...previous[key], deleting: false } } : previous);
-        setAttachmentError(t("sidekick.deleteIncomplete")); return;
-      }
-      const sameOwner = () => streamRequestsRef.current.get(key) === owner;
-      const sameDraft = () => draftsRef.current[key] === draft;
-      const removeTab = sameOwner() && sameDraft();
-      if (sameOwner()) {
-        streamRequestsRef.current.delete(key);
-        setReplies((previous) => {
-          if (streamRequestsRef.current.has(key)) return previous;
-          const next = { ...previous }; delete next[key]; return next;
-        });
-      }
-      if (sameDraft()) {
-        pendingImageCountRef.current.delete(key);
-        setProcessingImages((previous) => { const next = { ...previous }; delete next[key]; return next; });
-        setDrafts((previous) => { if (previous[key] !== draft) return previous; const next = { ...previous }; delete next[key]; return next; });
-      }
-      setItems((previous) => previous.filter((item) => (item.data.branchId || item.branchId || "main") !== branchId || (item.data.threadId || item.threadId || "default") !== tid));
-      if (removeTab) {
-        setThreadList((previous) => { const remaining = previous.filter((id) => id !== tid); return remaining.length > 0 ? remaining : ["default"]; });
-        if (activeThreadId === tid) {
-          const remaining = threadList.filter((id) => id !== tid);
-          setActiveThreadId(remaining.length > 0 ? remaining[0] : "default");
-        }
-      } else setAttachmentError(t("sidekick.deletedKeptNew"));
-    });
-  };
-
-  useEffect(() => () => {
-    forkRequestRef.current?.abort();
-    for (const request of streamRequestsRef.current.values()) request.controller.abort();
-    streamRequestsRef.current.clear();
-  }, []);
-
-  const restoreDraft = (key: string, source: Pick<SidekickLiveReply, "runId" | "question" | "images">, reason?: string) => {
-    const identity = sessionIdentityRef.current;
-    const processing = (pendingImageCountRef.current.get(key)?.count ?? 0) > 0;
-    setViewState((previous) => sessionIdentityRef.current !== identity ? previous
-      : restoreSidekickDraft(previous, key, source, processing || (pendingImageCountRef.current.get(key)?.count ?? 0) > 0, t, reason));
-  };
-
-  const forgetDeletedRun = (key: string, runId: string, identity: typeof sessionIdentityRef.current, controller: AbortController) => {
-    if (sessionIdentityRef.current !== identity || streamRequestsRef.current.get(key)?.controller !== controller
-      || streamRequestsRef.current.get(key)?.runId !== runId) return;
-    streamRequestsRef.current.delete(key);
-    controller.abort();
-    setReplies((previous) => {
-      if (sessionIdentityRef.current !== identity || previous[key]?.runId !== runId) return previous;
-      const next = { ...previous }; delete next[key]; return next;
-    });
-    historyController.invalidate(identity.sessionId, identity.quickAskUrl);
-    void historyController.load(identity.sessionId, identity.quickAskUrl);
-  };
-
-  const recoverRun = async (key: string, runId: string, url: string, scope: QuickAskScope, identity: typeof sessionIdentityRef.current) => {
-    const request = streamRequestsRef.current.get(key);
-    if (!request || request.runId !== runId) return;
-    const current = () => sessionIdentityRef.current === identity && streamRequestsRef.current.get(key) === request;
-    let run = await readQuickAskRun({ url, run: { id: runId, ...scope }, signal: request.controller.signal, t, fetcher: fetch });
-    if (!current()) return;
-    if (run === null) { forgetDeletedRun(key, runId, identity, request.controller); return; }
-    if (request.stopRequested) {
-      const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "stop", runId }) });
-      const data = await response.json() as { run?: QuickAskRunSnapshot; error?: string };
-      if (!response.ok || !data.run || data.run.id !== runId || data.run.threadId !== scope.threadId || data.run.branchId !== scope.branchId) {
-        throw new Error(data.error === undefined ? t("sidekick.stopUnconfirmed") : localizeQuickAskError(data.error, t));
-      }
-      run = data.run;
-    }
-    if (current()) observeRunRef.current(run);
-  };
-
-  observeRunRef.current = (initial) => {
-    const identity = sessionIdentityRef.current;
-    const url = identity.quickAskUrl;
-    const key = sidekickViewKey(url, initial.branchId, initial.threadId);
-    const existing = streamRequestsRef.current.get(key);
-    if (existing?.deleting || ((existing?.running || existing?.retained) && existing.runId && existing.runId !== initial.id)) return;
-    if (existing?.observing && existing.runId === initial.id && isQuickAskRunActive(initial)) return;
-    const controller = existing?.runId === initial.id && !existing.controller.signal.aborted ? existing.controller : new AbortController();
-    if (existing && existing.controller !== controller) existing.controller.abort();
-    const request = { controller, running: isQuickAskRunActive(initial), runId: initial.id, observing: true, accepted: true, retained: initial.status !== "completed" };
-    streamRequestsRef.current.set(key, request);
-    const current = () => sessionIdentityRef.current === identity && streamRequestsRef.current.get(key)?.controller === controller;
-    setThreadLists((previous) => {
-      if (!current()) return previous;
-      const list = sidekickViewKey(url, initial.branchId, "");
-      return { ...previous, [list]: Array.from(new Set([...(previous[list] ?? ["default"]), initial.threadId])) };
-    });
-    observeQuickAskRun({ url, run: initial, signal: controller.signal, t,
-      onRun: (run) => {
-        if (!current()) return;
-        request.running = isQuickAskRunActive(run);
-        request.retained = run.status !== "completed";
-        if (run.status === "completed" && run.entry) {
-          const entry = run.entry;
-          historyController.invalidate(identity.sessionId, url);
-          setItems((previous) => current() && !previous.some((item) => item.id === entry.id) ? [...previous, entry] : previous);
-          setReplies((previous) => {
-            if (!current()) return previous;
-            const next = { ...previous }; delete next[key]; return next;
-          });
-        } else {
-          setReplies((previous) => {
-            if (!current()) return previous;
-            const images = previous[key]?.runId === run.id ? previous[key].images
-              : run.images.map((image) => ({ ...image, previewUrl: imageDataUrl(image) }));
-            return { ...previous, [key]: { runId: run.id, question: run.question, images,
-              answer: run.answer + (isQuickAskRunActive(run) ? "" : `\n\n[${run.error === undefined ? t("sidekick.stopped") : localizeQuickAskError(run.error, t)}]`),
-              thinking: run.thinking, running: isQuickAskRunActive(run), settling: run.settling, activeTools: run.activeTools } };
-          });
-        }
-        if (!isQuickAskRunActive(run)) { request.observing = false; controller.abort(); }
-      },
-      onDeleted: () => forgetDeletedRun(key, initial.id, identity, controller),
-      onError: (error) => {
-        if (!current()) return;
-        request.running = false;
-        request.observing = false;
-        request.retained = true;
-        setReplies((previous) => current() && previous[key] ? { ...previous, [key]: { ...previous[key], running: false, unconfirmed: true } } : previous);
-        historyController.invalidate(identity.sessionId, url);
-        setDrafts((previous) => ({ ...previous, [key]: { ...(previous[key] ?? { question: "", images: [] }), error: error.message } }));
-      },
-    });
-  };
-
-  const handleSend = async () => {
-    const q = question.trim();
-    const submittedImages = attachedImages;
-    const key = viewKey;
-    if ((!q && !submittedImages.length) || isForking || streamRequestsRef.current.get(key)?.running
-      || streamRequestsRef.current.get(key)?.deleting || isProcessingImages || !sessionId) return;
-    const requestId = crypto.randomUUID();
-    const controller = new AbortController();
-    const request: SidekickStreamRequest = { controller, running: true, runId: requestId, accepted: false, stopRequested: false, retained: true };
-    streamRequestsRef.current.set(key, request);
-    const identity = sessionIdentityRef.current;
-    const requestUrl = quickAskUrl;
-    const current = () => sessionIdentityRef.current === identity && streamRequestsRef.current.get(key)?.controller === controller;
-    // One admission attempt. The host treats the same request ID as the same turn, so a repeat can never create a second one.
-    const admit = async () => {
-      try {
-        const response = await fetch(requestUrl, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "start", requestId, question: q,
-            images: submittedImages.map(({ data, mimeType }) => ({ data, mimeType })),
-            threadId: activeThreadId, threadTitle: t("sidekick.threadTitle", { index: activeThreadIndex + 1 }), branchId: sideAskBranchId || "main",
-            ...(activeParentId === undefined ? {} : { expectedParentId: activeParentId }),
-            ...(requestedModel ? { model: requestedModel } : {}),
-            ...(selectedThinkingLevel !== "auto" ? { thinkingLevel: selectedThinkingLevel } : {}),
-          }),
-        });
-        const data = await response.json().catch(() => ({})) as { run?: QuickAskRunSnapshot; error?: string };
-        if (!response.ok || !data.run) {
-          const reason = data.error === undefined ? `HTTP ${response.status}` : localizeQuickAskError(data.error, t);
-          // A 4xx is the host refusing before admission: give the input back instead of reporting an unknown state.
-          if (response.status < 400 || response.status >= 500) throw new Error(reason);
-          if (!current()) return;
-          request.running = false;
-          restoreDraft(key, { runId: requestId, question: q, images: submittedImages }, reason);
-          return;
-        }
-        request.accepted = true;
-        let run = data.run;
-        if (request.stopRequested) {
-          const stopped = await fetch(requestUrl, { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "stop", runId: run.id }) });
-          const result = await stopped.json() as { run?: QuickAskRunSnapshot; error?: string };
-          if (!stopped.ok || !result.run) throw new Error(result.error === undefined ? t("sidekick.stopFailed") : localizeQuickAskError(result.error, t));
-          run = result.run;
-        }
-        if (current()) observeRunRef.current(run);
-      } catch (error) {
-        if (!current()) return;
-        // A lost admission response does not prove that the host rejected the turn.
-        // Look the request ID up first; if it is still unknown the reply offers to send the same request again.
-        try {
-          await recoverRun(key, requestId, requestUrl, { threadId: activeThreadId, branchId: sideAskBranchId || "main" }, identity);
-          return;
-        } catch { /* The original identity stays recoverable while the host is unavailable. */ }
-        if (!current()) return;
-        request.running = false;
-        setReplies((previous) => current() && previous[key] ? { ...previous, [key]: {
-          ...previous[key], running: false, unconfirmed: true,
-          answer: previous[key].answer + `\n\n[${t("sidekick.statusUnconfirmed", { error: String(error) })}]`,
-        } } : previous);
-        historyController.invalidate(identity.sessionId, requestUrl);
-      }
-    };
-    request.resend = admit;
-    setQuestion(""); setAttachedImages([]); setAttachmentError(null);
-    setReplies((previous) => ({ ...previous, [key]: { runId: requestId, question: q, images: submittedImages,
-      answer: "", thinking: "", running: true } }));
-    await admit();
-  };
-
-  const handleAbort = async () => {
-    const request = streamRequestsRef.current.get(viewKey);
-    if (!request?.runId) return;
-    if (!request.accepted) { request.stopRequested = true; return; }
-    const identity = sessionIdentityRef.current;
-    try {
-      const response = await fetch(quickAskUrl, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "stop", runId: request.runId }) });
-      const data = await response.json() as { run?: QuickAskRunSnapshot; error?: string };
-      if (!response.ok || !data.run) throw new Error(data.error === undefined ? t("sidekick.stopFailed") : localizeQuickAskError(data.error, t));
-      if (sessionIdentityRef.current === identity) observeRunRef.current(data.run);
-    } catch (error) { if (sessionIdentityRef.current === identity) setAttachmentError(String(error)); }
-  };
-
-  const handleRestoreQuestion = async () => {
-    if (!reply || reply.running) return;
-    if (reply.unconfirmed) {
-      if (!reply.runId) { setAttachmentError(t("sidekick.missingRequestIdentity")); return; }
-      const request = streamRequestsRef.current.get(viewKey);
-      if (request?.runId === reply.runId && request.resend && !request.accepted) {
-        // Same request ID again: the host returns the turn it already admitted or admits this one, so no second turn can exist.
-        request.running = true;
-        setReplies((previous) => previous[viewKey]?.runId === reply.runId
-          ? { ...previous, [viewKey]: { ...previous[viewKey], running: true, unconfirmed: false, answer: "" } } : previous);
-        setAttachmentError(null);
-        await request.resend();
-        return;
-      }
-      const identity = sessionIdentityRef.current;
-      setAttachmentError(t("sidekick.checkingAcceptance"));
-      try {
-        await recoverRun(viewKey, reply.runId, identity.quickAskUrl, { threadId: activeThreadId, branchId: sideAskBranchId || "main" }, identity);
-      } catch (error) {
-        if (sessionIdentityRef.current === identity && streamRequestsRef.current.get(viewKey)?.runId === reply.runId) {
-          setAttachmentError(t("sidekick.acceptanceUnconfirmed", { error: String(error) }));
-        }
-      }
-      return;
-    }
-    const draft = draftsRef.current[viewKey];
-    if (draft?.question.trim() || draft?.images.length || isProcessingImages || pendingImageCountRef.current.get(viewKey)?.count) {
-      setAttachmentError(t("sidekick.restoreDraftBusy"));
-      return;
-    }
-    restoreDraft(viewKey, reply);
-    restoreQuestionView();
-  };
-
-  const handleCopy = async (id: string, text: string) => {
-    try { await copyText(text); } catch { setAttachmentError(t("sidekick.copyFailed")); return; }
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
-
-  const handleDelete = (targetId: string) => {
-    void deleteHistory({ targetId, branchId: sideAskBranchId || "main" }, () => {
-      setItems((prev) => prev.filter((i) => i.id !== targetId));
-    });
-  };
-
-  // Fork current thread or single item into a true independent top-level session
-  const handleForkToSession = async (targetId?: string) => {
-    if (isForking || !sessionId) return;
-    setIsForking(true);
-    const controller = new AbortController();
-    forkRequestRef.current = controller;
-    const identity = sessionIdentityRef.current;
-    const current = () => !controller.signal.aborted && sessionIdentityRef.current === identity && forkRequestRef.current === controller;
-
-    try {
-      const data = await requestQuickAskFork({ url: quickAskUrl, signal: controller.signal, t,
-        body: { threadId: targetId ? undefined : activeThreadId, targetId, branchId: sideAskBranchId || "main" },
-      });
-      if (!current()) return;
-
-      // Let the shell own session selection, refresh, URL state, and embedded/remote routing.
-      // This also closes the drawer through the shell before the new ChatWindow mounts.
-      setIsForking(false);
+    if (!open || isRightPanelPlacement) return;
+    const ownerDocument = expanded ? sidekickPortalDocument() ?? document : document;
+    const handleOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (target && typeof (target as Element).closest === "function" && (target as Element).closest("[data-sidekick-interaction]")) return;
+      if (target && drawerRef.current?.contains(target as Node)) return;
       onClose();
-      if (onSessionForked) {
-        onSessionForked({ newSessionId: data.newSessionId, newSessionPath: data.newSessionPath, subprojectAssignmentFailed: data.subprojectAssignmentFailed });
-        return;
-      }
+    };
+    ownerDocument.addEventListener("pointerdown", handleOutside);
+    return () => ownerDocument.removeEventListener("pointerdown", handleOutside);
+  }, [expanded, isRightPanelPlacement, onClose, open]);
+  useEffect(() => {
+    if (!open || !shouldPortalToTopbar || typeof document === "undefined") { setTopbarTarget(null); return; }
+    const target = document.getElementById(SIDEKICK_TOPBAR_PORTAL_ID);
+    if (target) { setTopbarTarget(target); return; }
+    const frame = requestAnimationFrame(() => setTopbarTarget(document.getElementById(SIDEKICK_TOPBAR_PORTAL_ID)));
+    return () => cancelAnimationFrame(frame);
+  }, [open, shouldPortalToTopbar]);
 
-      // Compatibility fallback for standalone consumers that do not provide the shell callback.
-      if (typeof window === "undefined") return;
-      if (window.parent !== window) {
-        window.parent.postMessage({
-          type: "pi-web:session-opened",
-          sessionId: data.newSessionId,
-          cwd: null,
-          path: null,
-        }, "*");
-      }
-      const params = new URLSearchParams(window.location.search);
-      params.set("session", data.newSessionId);
-      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
-    } catch (err) {
-      if (current()) alert(t("sidekick.forkFailed", { error: String(err) }));
+  const selectThread = (id: string) => {
+    if (id === activeId) return;
+    setThreads((previous) => previous.map((thread) => thread.id === activeId ? { ...thread, draft, images } : thread));
+    const next = threads.find((thread) => thread.id === id);
+    setActiveId(id);
+    setDraft(next?.draft ?? "");
+    setImages(next?.images ?? []);
+    setComposerError(null);
+  };
+  const createThread = () => {
+    const thread = newThread(threads.length + 1);
+    setThreads((previous) => [...previous, thread]);
+    setActiveId(thread.id);
+    setDraft("");
+    setImages([]);
+    setTimeout(() => document.querySelector<HTMLTextAreaElement>("[data-sidekick-composer] textarea")?.focus(), 0);
+  };
+  const closeThread = (event: React.MouseEvent, id: string) => {
+    event.stopPropagation();
+    const remaining = threads.filter((thread) => thread.id !== id);
+    if (!remaining.length) {
+      const thread = newThread(1);
+      setThreads([thread]);
+      setActiveId(thread.id);
+      setDraft("");
+      setImages([]);
+      return;
+    }
+    setThreads(remaining);
+    if (id === activeId) {
+      const next = remaining[0];
+      setActiveId(next.id);
+      setDraft(next.draft);
+      setImages(next.images);
+      setComposerError(null);
+    }
+  };
+  const deleteThread = async (event: React.MouseEvent, id: string) => {
+    event.stopPropagation();
+    const thread = threads.find((item) => item.id === id);
+    if (!thread) return;
+    if (!thread.info) { closeThread(event, id); return; }
+    if (!window.confirm(t("sidekick.deleteThreadConfirm", { label: thread.label }))) return;
+    try {
+      const response = await fetch(sideSessionDeleteUrl(thread.info.id, remotePeer), { method: "DELETE" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setSideSessionCount((count) => Math.max(0, count - 1));
+      closeThread(event, id);
+    } catch (error) {
+      setComposerError(String(error));
+    }
+  };
+  const setBusy = useCallback((id: string, busy: boolean) => {
+    setBusyThreads((previous) => { const next = new Set(previous); if (busy) next.add(id); else next.delete(id); return next; });
+  }, []);
+
+  const createSideSession = async () => {
+    const prompt = draft.trim();
+    const submittedImages = images;
+    if ((!prompt && !submittedImages.length) || !activeThread || activeThread.info || creating) return;
+    setCreating(true);
+    setComposerError(null);
+    try {
+      const response = await fetch(sideSessionForkUrl(sessionId, remotePeer), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ side: true, name: prompt }) });
+      const data = await response.json().catch(() => ({})) as { sessionId?: string; error?: string };
+      if (!response.ok || !data.sessionId) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const infoResponse = await fetch(sideSessionUrl(data.sessionId, remotePeer), { cache: "no-store" });
+      const infoData = await infoResponse.json().catch(() => ({})) as { info?: SideSessionInfo; error?: string };
+      if (!infoResponse.ok || !infoData.info) throw new Error(infoData.error ?? `HTTP ${infoResponse.status}`);
+      const info = infoData.info;
+      setThreads((previous) => previous.map((thread) => thread.id === activeThread.id ? { ...thread, sessionId: info.id, info, initialPrompt: prompt, initialImages: submittedImages, draft: "", images: [], count: 0 } : thread));
+      setSideSessionCount((count) => count + 1);
+      setDraft("");
+      setImages([]);
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
     } finally {
-      if (current()) { forkRequestRef.current = null; setIsForking(false); }
+      setCreating(false);
     }
   };
 
-  if (!open) return null;
+  const promoteActiveSideSession = async () => {
+    const thread = activeThread;
+    if (!thread?.info || promoting || busyThreads.has(thread.id)) return;
+    setPromoting(true);
+    setComposerError(null);
+    try {
+      const response = await fetch(sideSessionForkUrl(thread.info.id, remotePeer), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ promote: true }),
+      });
+      const data = await response.json().catch(() => ({})) as { sessionId?: string; sessionPath?: string; error?: string };
+      if (!response.ok || !data.sessionId) throw new Error(data.error ?? `HTTP ${response.status}`);
+      onClose();
+      onSessionForked?.({ newSessionId: data.sessionId, newSessionPath: data.sessionPath });
+    } catch (error) {
+      setComposerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPromoting(false);
+    }
+  };
 
-  const resolvedTopbarTarget = topbarTarget ?? (typeof document !== "undefined" && shouldPortalToTopbar ? document.getElementById(SIDEKICK_TOPBAR_PORTAL_ID) : null);
-  const isPortaled = Boolean(shouldPortalToTopbar && resolvedTopbarTarget);
-
-  const headerElement = (
-    <SidekickHeader
-      threads={threads}
-      activeThreadId={activeThreadId}
-      busyThreads={new Set(threads.filter((thread) => replies[sidekickViewKey(quickAskUrl, sideAskBranchId || "main", thread.id)]?.running).map((thread) => thread.id))}
-      mainBusy={mainBusy}
-      expanded={expanded}
-      rightPanel={isRightPanelPlacement}
-      canFork={currentThreadItems.length > 0 || isStreaming}
-      isForking={isForking}
-      isPortal={isPortaled}
-      onSelect={setActiveThreadId}
-      onCloseThread={handleCloseThread}
-      onDelete={handleDeleteThread}
-      onCreate={handleCreateNewThread}
-      onFork={() => void handleForkToSession()}
-      onExpand={() => setExpanded((value) => !value)}
-      onClose={onClose}
+  const activeSideBusy = activeThread ? busyThreads.has(activeThread.id) : false;
+  const canPromote = Boolean(activeThread?.info && (activeThread.info.sideMessageCount ?? 0) > 0 && !activeSideBusy);
+  const activeModel = activeThread?.info ? null : selectedModel;
+  const headerThreads = threads.map((thread, index) => ({ id: thread.id, label: thread.label || `${index + 1}`, count: thread.count }));
+  const headerElement = <SidekickHeader threads={headerThreads} activeThreadId={activeThread?.id ?? ""} busyThreads={busyThreads} mainBusy={mainBusy} expanded={expanded} rightPanel={isRightPanelPlacement} canFork={canPromote} isForking={promoting} isPortal={Boolean(shouldPortalToTopbar && topbarTarget)} onSelect={selectThread} onCloseThread={closeThread} onDelete={(event, id) => void deleteThread(event, id)} onCreate={createThread} onFork={() => void promoteActiveSideSession()} onExpand={() => setExpanded((value) => !value)} onClose={onClose} />;
+  const activeContent = activeThread?.info ? (
+    <SideSessionThread
+      key={activeThread.info.id}
+      info={activeThread.info}
+      initialPrompt={activeThread.initialPrompt}
+      initialImages={activeThread.initialImages}
+      onInitialPromptConsumed={() => setThreads((previous) => previous.map((thread) => thread.id === activeThread.id ? { ...thread, initialPrompt: null, initialImages: [] } : thread))}
+      onInfoChange={(info) => setThreads((previous) => previous.map((thread) => thread.id === activeThread.id ? { ...thread, info, count: info.sideMessageCount ?? thread.count } : thread))}
+      draft={draft}
+      setDraft={setDraft}
+      images={images}
+      setImages={setImages}
+      composerError={composerError}
+      setComposerError={setComposerError}
+      remotePeer={remotePeer}
+      onQuoteToComposer={onQuoteToComposer}
+      onBusyChange={(busy) => setBusy(activeThread.id, busy)}
+      initialModel={activeThread.initialPrompt ? selectedModel : null}
+      initialThinkingLevel={activeThread.initialPrompt ? selectedThinkingLevel : "auto"}
     />
-  );
-
-  const drawer = (
-    <div
-      ref={drawerRef}
-      data-sidekick-drawer="true"
-      className="chat-content"
-      role={expanded ? "dialog" : "complementary"}
-      aria-modal={expanded ? true : undefined}
-      aria-label={t("sidekick.title")}
-      style={{
-        ...(isRightPanelPlacement
-          ? {
-              position: "relative",
-              width: "100%",
-              height: "100%",
-              minWidth: 0,
-              maxWidth: "none",
-              maxHeight: "none",
-              border: 0,
-              borderRadius: 0,
-              boxShadow: "none",
-              zIndex: 1,
-            }
-          : expanded
-          ? {
-              position: "relative",
-              width: "min(1120px, calc(100vw - 28px))",
-              height: "min(88vh, calc(100dvh - 36px))",
-              maxWidth: "calc(100vw - 28px)",
-              maxHeight: "calc(100dvh - 36px)",
-              border: "1px solid var(--border)",
-              borderRadius: 10,
-              boxShadow: "0 24px 64px rgba(0, 0, 0, 0.36)",
-              zIndex: 1,
-            }
-          : {
-              position: "absolute",
-              top: 0,
-              right: 0,
-              bottom: 0,
-              width: 410,
-              maxWidth: "94vw",
-              borderLeft: "1px solid var(--border)",
-              boxShadow: "-4px 0 24px rgba(0,0,0,0.18)",
-              zIndex: 55,
-            }),
-        background: "var(--bg-panel)",
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-        overflow: "hidden",
-        fontSize: 12,
-        color: "var(--text)",
-      }}
-    >
-      {!isPortaled && headerElement}
-
-      {/* Messages Stream Container */}
-      <div
-        ref={scrollContainerRef}
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflowY: "auto",
-          padding: "14px 14px",
-          display: "flex",
-          flexDirection: "column",
-          gap: 16,
-        }}
-      >
-        {loading && items.length === 0 && (
-          <div style={{ textAlign: "center", color: "var(--text-dim)", padding: 20 }}>
-            {t("i18n.loading")}
-          </div>
-        )}
-
-        {activeBranchId === "main" && recoveryBranches.length > 0 && (
-          <div role="group" aria-label={t("sidekick.branchAsks")} style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            <button type="button" aria-pressed={!recoveryBranch} onClick={() => setRecoveryBranch(null)}>{t("sidekick.mainAsks")}</button>
-            {recoveryBranches.map((branch) => (
-              <button type="button" key={branch} aria-pressed={recoveryBranch === branch}
-                onClick={() => setRecoveryBranch(branch)}>{t("sidekick.branchAsk", { branch })}</button>
-            ))}
-          </div>
-        )}
-
-        {!loading && currentThreadItems.length === 0 && !isStreaming && (
-          <div
-            style={{
-              padding: "16px 14px",
-              background: "var(--bg-hover)",
-              borderRadius: 8,
-              border: "1px solid var(--border)",
-              marginTop: 12,
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text)", fontWeight: 600, fontSize: 13, borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-              <Sparkles size={15} style={{ color: "var(--accent)" }} aria-hidden="true" />
-              <span>{t("sidekick.howItWorks")}</span>
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 12, lineHeight: 1.55 }}>
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: 4, background: "rgba(59, 130, 246, 0.12)", color: "#3b82f6", flexShrink: 0, marginTop: 1 }}>
-                  <GitFork size={13} strokeWidth={2} aria-hidden="true" />
-                </span>
-                <div>
-                  <strong style={{ color: "var(--text)", display: "block", marginBottom: 2 }}>{t("sidekick.howFirstTitle")}</strong>
-                  <span style={{ color: "var(--text-muted)" }}>{t("sidekick.howFirstBody")}</span>
-                </div>
-              </div>
-
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: 4, background: "rgba(245, 158, 11, 0.12)", color: "#f59e0b", flexShrink: 0, marginTop: 1 }}>
-                  <Zap size={13} strokeWidth={2} aria-hidden="true" />
-                </span>
-                <div>
-                  <strong style={{ color: "var(--text)", display: "block", marginBottom: 2 }}>{t("sidekick.howParallelTitle")}</strong>
-                  <span style={{ color: "var(--text-muted)" }}>{t("sidekick.howParallelBody")}</span>
-                </div>
-              </div>
-
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, borderRadius: 4, background: "rgba(16, 185, 129, 0.12)", color: "#10b981", flexShrink: 0, marginTop: 1 }}>
-                  <MessageSquare size={13} strokeWidth={2} aria-hidden="true" />
-                </span>
-                <div>
-                  <strong style={{ color: "var(--text)", display: "block", marginBottom: 2 }}>{t("sidekick.howFollowUpTitle")}</strong>
-                  <span style={{ color: "var(--text-muted)" }}>{t("sidekick.howFollowUpBody")}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Render persistent quick-ask entries for active thread */}
-        {currentThreadItems.map((item) => {
-          const usage = item.usage || item.data?.usage;
-          const cachedTokens = Number(usage?.cacheRead ?? (usage as Record<string, unknown> | undefined)?.cachedInputTokens ?? (usage as Record<string, unknown> | undefined)?.cached_tokens ?? (usage as Record<string, unknown> | undefined)?.cached_input_tokens ?? 0);
-          const inputTokens = Number(usage?.input ?? (usage as Record<string, unknown> | undefined)?.inputTokens ?? (usage as Record<string, unknown> | undefined)?.prompt_tokens ?? 0);
-          const writeTokens = Number(usage?.cacheWrite ?? (usage as Record<string, unknown> | undefined)?.cacheWriteTokens ?? (usage as Record<string, unknown> | undefined)?.cache_creation_input_tokens ?? 0);
-          const totalPrompt = inputTokens + cachedTokens + writeTokens;
-          const cacheRate =
-            cachedTokens > 0 && totalPrompt > 0
-              ? (cachedTokens / totalPrompt) * 100
-              : null;
-          const itemImages = Array.isArray(item.data.images)
-            ? item.data.images.filter(isBase64ImageWithinLimits)
-            : [];
-
-          return (
-            <div key={item.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {/* Question Bubble */}
-              <SidekickQuestion question={item.data.question} images={itemImages} copied={copiedId === `question:${item.id}`} onCopy={() => void handleCopy(`question:${item.id}`, item.data.question)} onQuote={onQuoteToComposer ? () => onQuoteToComposer(item.data.question) : undefined} />
-
-              {/* Answer Card */}
-              <div
-                style={{
-                  alignSelf: "flex-start",
-                  width: "100%",
-                  background: "var(--bg)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 8,
-                  padding: "10px 12px",
-                }}
-              >
-                <div style={{ fontSize: "var(--chat-content-font-size, 14px)", lineHeight: 1.7 }} className="prose prose-sm dark:prose-invert max-w-none">
-                  <SidekickAnswer entry={item} />
-                </div>
-
-                {/* Footer details & actions */}
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    borderTop: "1px solid var(--border)",
-                    marginTop: 8,
-                    paddingTop: 6,
-                    fontSize: 11,
-                    color: "var(--text-dim)",
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.data.model || item.model || "LLM"}</span>
-                    {cacheRate !== null && (
-                      <>
-                        <span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span>
-                        <span style={{ color: "#10b981", fontWeight: 600, whiteSpace: "nowrap" }}>
-                          CH {cacheRate.toFixed(1)}%
-                        </span>
-                      </>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                    <button
-                      onClick={() => handleCopy(item.id, item.data.answer || item.data.thinking || t("sidekick.noAnswerBodyParenthetical"))}
-                      style={{
-                        ...sidekickActionButtonStyle,
-                        color: copiedId === item.id ? "#10b981" : "var(--text-muted)",
-                      }}
-                      title={t("sidekick.copyAnswer")}
-                    >
-                      {copiedId === item.id ? t("i18n.copied") : t("i18n.copy")}
-                    </button>
-                    {onQuoteToComposer && (
-                      <button
-                        onClick={() =>
-                          onQuoteToComposer(t("sidekick.quoteToComposerText", { question: item.data.question, answer: item.data.answer || item.data.thinking || t("sidekick.noAnswerBodyParenthetical") }))
-                        }
-                        style={{
-                          ...sidekickActionButtonStyle,
-                          color: "var(--accent)",
-                        }}
-                        title={t("sidekick.quoteAnswerTitle")}
-                      >
-                        {t("sidekick.quote")}
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleForkToSession(item.id)}
-                      disabled={isForking}
-                      style={{
-                        ...sidekickActionButtonStyle,
-                        color: "var(--accent)",
-                        cursor: isForking ? "wait" : "pointer",
-                      }}
-                      title={t("sidekick.forkFromAnswerTitle")}
-                    >
-                      {t("sidekick.forkFromAnswer")}
-                    </button>
-                    <button
-                      onClick={() => handleDelete(item.id)}
-                      style={{
-                        ...sidekickActionButtonStyle,
-                        color: "var(--text-dim)",
-                      }}
-                      title={t("sidekick.deleteQuestion")}
-                    >
-                      {t("i18n.delete")}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-
-        {/* Live streaming bubble */}
-        {(isStreaming || streamingAnswer || reply?.unconfirmed) && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {/* Optimistic Question Bubble */}
-            {(streamingQuestion || streamingImages.length > 0) && <SidekickQuestion question={streamingQuestion} images={streamingImages} copied={copiedId === `question:${viewKey}`} onCopy={() => void handleCopy(`question:${viewKey}`, streamingQuestion)} onQuote={onQuoteToComposer ? () => onQuoteToComposer(streamingQuestion) : undefined} />}
-            <div
-              style={{
-                alignSelf: "flex-start",
-                width: "100%",
-                background: "var(--bg)",
-                border: isStreaming ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid rgba(239, 68, 68, 0.4)",
-                borderRadius: 8,
-                padding: "10px 12px",
-              }}
-            >
-              {streamingThinking && (
-                <div
-                  style={{
-                    fontSize: 10,
-                    color: "var(--text-dim)",
-                    marginBottom: 6,
-                    fontStyle: "italic",
-                    whiteSpace: "pre-wrap",
-                  }}
-                >
-                  💭 {streamingThinking}
-                </div>
-              )}
-              <div style={{ fontSize: "var(--chat-content-font-size, 14px)", lineHeight: 1.7 }}>
-                <MarkdownBody>{streamingAnswer || "..."}</MarkdownBody>
-              </div>
-              {!isStreaming && (streamingQuestion || streamingImages.length > 0) && <button type="button" onClick={handleRestoreQuestion} style={{ border: 0, background: "none", color: "var(--accent)", padding: "4px 0", cursor: "pointer" }}>{restoreActionLabel}</button>}
-              {isStreaming && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    marginTop: 6,
-                    paddingTop: 4,
-                    borderTop: "1px solid var(--border)",
-                    fontSize: 10,
-                    color: "#10b981",
-                  }}
-                >
-                  <span>{reply?.settling ? t("sidekick.stopping") : reply?.activeTools?.length
-                    ? t("sidekick.executingTools", { tools: reply.activeTools.join(", ") }) : t("sidekick.generating")}</span>
-                  <button
-                    disabled={reply?.settling}
-                    onClick={handleAbort}
-                    style={{
-                      background: "none",
-                      border: "none",
-                      color: "#ef4444",
-                      cursor: reply?.settling ? "default" : "pointer",
-                      opacity: reply?.settling ? 0.5 : 1,
-                      fontSize: 10,
-                    }}
-                  >
-                    {t("chat.stop")}
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Drawer Input Composer */}
-      <div
-        style={{
-          padding: "6px 8px 8px",
-          background: "var(--bg)",
-          display: "flex",
-          flexDirection: "column",
-          flex: "0 1 auto",
-          minHeight: 0,
-          maxHeight: isRightPanelPlacement ? "min(55%, 70dvh)" : "min(40%, 50dvh)",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-            flex: "1 1 auto",
-            minHeight: 64,
-            overflow: "hidden",
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            padding: "8px 8px 6px 8px",
-            position: "relative",
-          }}
-        >
-          <textarea
-            ref={textareaRef}
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onInput={resizeQuestion}
-            onPaste={handlePaste}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter" || e.shiftKey) return;
-              handleExtensionDialogInputKeyDown(
-                e.nativeEvent,
-                questionCompositionActiveRef.current,
-                questionCompositionEndAtRef.current,
-                () => { void handleSend(); },
-              );
-            }}
-            onCompositionStart={() => {
-              questionCompositionActiveRef.current = true;
-            }}
-            onBlur={() => {
-              questionCompositionEndAtRef.current = getExtensionDialogInputCompositionEndAtOnBlur(
-                questionCompositionActiveRef.current,
-                questionCompositionEndAtRef.current,
-              );
-              questionCompositionActiveRef.current = false;
-            }}
-            onCompositionEnd={() => {
-              questionCompositionActiveRef.current = false;
-              questionCompositionEndAtRef.current = Date.now();
-            }}
-            placeholder=""
-            wrap="soft"
-            rows={2}
-            style={{
-              display: "block",
-              flex: "1 1 auto",
-              width: "100%",
-              minWidth: 0,
-              maxWidth: "100%",
-              background: "transparent",
-              border: "none",
-              outline: "none",
-              resize: "none",
-              boxSizing: "border-box",
-              minHeight: 56,
-              maxHeight: "100%",
-              overflowX: "hidden",
-              overflowY: "auto",
-              overflowWrap: "anywhere",
-              whiteSpace: "pre-wrap",
-              fontSize: "var(--chat-content-font-size, 14px)",
-              color: "var(--text)",
-              lineHeight: 1.7,
-            }}
-          />
-          <ImageAttachments images={attachedImages} onRemove={removeImage} />
-          {attachmentError && (
-            <div style={{ color: "#ef4444", fontSize: 10 }}>{attachmentError}</div>
-          )}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            tabIndex={-1}
-            aria-hidden="true"
-            style={{ display: "none" }}
-            onChange={(event) => {
-              const files = Array.from(event.target.files ?? []);
-              event.target.value = "";
-              processImageFiles(files);
-            }}
-          />
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 4, position: "relative" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flex: 1 }}>
-              {/* 模型选择器 */}
-              <div style={{ position: "relative" }} ref={modelSelectorRef}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setThinkingDropdownOpen(false);
-                    if (!modelDropdownOpen && modelSelectorRef.current) {
-                      const rect = modelSelectorRef.current.getBoundingClientRect();
-                      setModelMenuPos({ bottom: window.innerHeight - rect.top + 6, left: Math.max(8, rect.left) });
-                    }
-                    setModelDropdownOpen((prev) => !prev);
-                  }}
-                  aria-label={t("sidekick.selectModel")}
-                  title={t("sidekick.currentModel", { model: displayModelName })}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 3,
-                    height: 22,
-                    padding: "0 6px",
-                    fontSize: 11,
-                    color: modelDropdownOpen ? "var(--text)" : "var(--text-muted)",
-                    background: modelDropdownOpen ? "var(--bg-hover)" : "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 4,
-                    cursor: "pointer",
-                    maxWidth: 130,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    transition: "color 0.12s, border-color 0.12s",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                  onMouseLeave={(e) => { if (!modelDropdownOpen) e.currentTarget.style.color = "var(--text-muted)"; }}
-                >
-                  <Bot size={11} strokeWidth={1.8} style={{ flexShrink: 0 }} />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {displayModelName}
-                  </span>
-                  <ChevronDown size={10} strokeWidth={2} style={{ flexShrink: 0, opacity: 0.6 }} />
-                </button>
-              </div>
-
-              {/* 思考强度选择器 */}
-              <div style={{ position: "relative" }} ref={thinkingSelectorRef}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setModelDropdownOpen(false);
-                    if (!thinkingDropdownOpen && thinkingSelectorRef.current) {
-                      const rect = thinkingSelectorRef.current.getBoundingClientRect();
-                      setThinkingMenuPos({ bottom: window.innerHeight - rect.top + 6, left: Math.max(8, rect.left) });
-                    }
-                    setThinkingDropdownOpen((prev) => !prev);
-                  }}
-                  aria-label={t("sidekick.thinkingLevel")}
-                  title={t("sidekick.thinkingLevelTitle", { level: selectedThinkingLevel })}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 3,
-                    height: 22,
-                    padding: "0 6px",
-                    fontSize: 11,
-                    color: thinkingDropdownOpen ? "var(--text)" : "var(--text-muted)",
-                    background: thinkingDropdownOpen ? "var(--bg-hover)" : "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 4,
-                    cursor: "pointer",
-                    whiteSpace: "nowrap",
-                    transition: "color 0.12s, border-color 0.12s",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                  onMouseLeave={(e) => { if (!thinkingDropdownOpen) e.currentTarget.style.color = "var(--text-muted)"; }}
-                >
-                  <Brain size={11} strokeWidth={1.8} style={{ flexShrink: 0 }} />
-                  <span>{selectedThinkingLevel}</span>
-                  <ChevronDown size={10} strokeWidth={2} style={{ flexShrink: 0, opacity: 0.6 }} />
-                </button>
-              </div>
-            </div>
-
-            {/* 右侧：图片附件 + 发送按钮 */}
-            <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isStreaming || isDeletingThread || isProcessingImages || attachedImages.length >= MAX_ATTACHED_IMAGES}
-                aria-label={t("sidekick.addImage")}
-                title={t("sidekick.addImage")}
-                style={{
-                  display: "grid",
-                  placeItems: "center",
-                  width: 25,
-                  height: 23,
-                  padding: 0,
-                  background: "transparent",
-                  color: "var(--text-muted)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 4,
-                  cursor: isStreaming || isDeletingThread || isProcessingImages || attachedImages.length >= MAX_ATTACHED_IMAGES
-                    ? "not-allowed"
-                    : "pointer",
-                  opacity: isStreaming || isDeletingThread || isProcessingImages || attachedImages.length >= MAX_ATTACHED_IMAGES ? 0.45 : 1,
-                }}
-              >
-                <Paperclip size={13} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                onClick={handleSend}
-                aria-label={t("chat.send")}
-                title={t("chat.send")}
-                disabled={isStreaming || isDeletingThread || isProcessingImages || (!question.trim() && attachedImages.length === 0)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  padding: 0,
-                  width: 25,
-                  height: 23,
-                  justifyContent: "center",
-                  background: "var(--accent)",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 4,
-                  fontSize: 11,
-                  fontWeight: 500,
-                  cursor: isStreaming || isDeletingThread || isProcessingImages || (!question.trim() && attachedImages.length === 0)
-                    ? "not-allowed"
-                    : "pointer",
-                  opacity: isStreaming || isDeletingThread || isProcessingImages || (!question.trim() && attachedImages.length === 0) ? 0.45 : 1,
-                  transition: "opacity 0.12s",
-                }}
-              >
-                <Send size={13} aria-hidden="true" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+  ) : activeThread?.sessionId ? (
+    <SideSessionFallback sessionId={activeThread.sessionId} remotePeer={remotePeer} initialPrompt={activeThread.initialPrompt} onInitialPromptConsumed={() => setThreads((previous) => previous.map((thread) => thread.id === activeThread.id ? { ...thread, initialPrompt: null } : thread))} onSessionForked={onSessionForked} />
+  ) : (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "14px 14px" }}><HowItWorks /></div>
+      <SidekickComposer draft={draft} setDraft={setDraft} images={images} setImages={setImages} error={composerError} onError={setComposerError} onSend={() => void createSideSession()} disabled={creating} modelList={modelList} modelNames={modelNames} currentModel={activeModel} thinkingLevels={modelThinkingLevels} thinkingLevel={selectedThinkingLevel} onModelChange={(provider, modelId) => setSelectedModel({ provider, modelId })} onThinkingChange={(level) => setSelectedThinkingLevel(level)} />
     </div>
   );
 
-  const topbarPortal = isPortaled && topbarTarget
-    ? createPortal(headerElement, topbarTarget)
-    : isPortaled && resolvedTopbarTarget
-      ? createPortal(headerElement, resolvedTopbarTarget)
-      : null;
+  const resolvedTopbarTarget = topbarTarget ?? (typeof document !== "undefined" && shouldPortalToTopbar ? document.getElementById(SIDEKICK_TOPBAR_PORTAL_ID) : null);
+  const isPortaled = Boolean(shouldPortalToTopbar && resolvedTopbarTarget);
+  const drawer = <div ref={drawerRef} data-sidekick-drawer="true" className="chat-content" role={expanded ? "dialog" : "complementary"} aria-modal={expanded ? true : undefined} aria-label={t("sidekick.title")} style={{ ...(isRightPanelPlacement ? { position: "relative", width: "100%", height: "100%", minWidth: 0, border: 0, boxShadow: "none", zIndex: 1 } : expanded ? { position: "relative", width: "min(1120px, calc(100vw - 28px))", height: "min(88vh, calc(100dvh - 36px))", maxWidth: "calc(100vw - 28px)", maxHeight: "calc(100dvh - 36px)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 24px 64px rgba(0,0,0,0.36)", zIndex: 1 } : { position: "absolute", top: 0, right: 0, bottom: 0, width: SIDEKICK_WIDTH, maxWidth: "94vw", borderLeft: "1px solid var(--border)", boxShadow: "-4px 0 24px rgba(0,0,0,0.18)", zIndex: 55 }), background: "var(--bg-panel)", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", fontSize: 12, color: "var(--text)" }}>
+    {!isPortaled && headerElement}
+    {loading && !activeThread ? <div style={{ padding: 20, color: "var(--text-dim)", textAlign: "center" }}>{t("i18n.loading")}</div> : loadError && !activeThread?.info && !activeThread?.sessionId ? <div role="alert" style={{ padding: 16, color: "#dc2626", fontSize: 12 }}>{loadError}</div> : <div style={{ flex: 1, minHeight: 0 }}>{activeContent}</div>}
+  </div>;
 
-  const modelMenuPortal = modelDropdownOpen && modelMenuPos && typeof document !== "undefined" && document.body
-    ? createPortal(
-        <div
-          ref={modelDropdownPanelRef}
-          data-sidekick-interaction="true"
-          style={{
-            position: "fixed",
-            bottom: modelMenuPos.bottom,
-            left: Math.max(8, Math.min(modelMenuPos.left, (window.visualViewport?.width ?? window.innerWidth) - 270)),
-            width: "max-content",
-            minWidth: 240,
-            maxWidth: 320,
-            maxHeight: Math.min(360, (window.visualViewport?.height ?? window.innerHeight) * 0.6),
-            overflow: "hidden",
-            display: "flex",
-            flexDirection: "column",
-            background: "var(--bg)",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            boxShadow: "0 -4px 16px rgba(0,0,0,0.15)",
-            zIndex: 10000,
-          }}
-        >
-          {showModelFilter && (
-            <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-              <input
-                value={modelFilter}
-                onChange={(e) => setModelFilter(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setModelFilter("");
-                    setModelDropdownOpen(false);
-                  }
-                }}
-                placeholder={t("chat.filterModels")}
-                aria-label={t("chat.filterModels")}
-                autoFocus
-                autoComplete="off"
-                spellCheck={false}
-                style={{
-                  width: "100%",
-                  fontSize: 11,
-                  fontFamily: "var(--font-mono)",
-                  padding: "5px 8px",
-                  border: "1px solid var(--border)",
-                  borderRadius: 5,
-                  outline: "none",
-                  background: "var(--bg)",
-                  color: "var(--text)",
-                  boxSizing: "border-box",
-                }}
-              />
-            </div>
-          )}
-          <div
-            role="listbox"
-            aria-label={t("sidekick.selectModel")}
-            style={{ minHeight: 0, overflowY: "auto", flex: 1 }}
-          >
-            {modelsByProvider.length === 0 ? (
-              <div role="presentation" style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                {modelFilter.trim() ? t("chat.noMatchingModels") : "No available models"}
-              </div>
-            ) : (
-              modelsByProvider.map((group, gi) => (
-                <div key={group.provider} role="group" aria-label={group.provider}>
-                  {modelsByProvider.length > 1 && (
-                    <div
-                      role="presentation"
-                      style={{
-                        padding: "6px 12px 4px",
-                        fontSize: 10,
-                        fontWeight: 600,
-                        color: "var(--text-dim)",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.07em",
-                        borderTop: gi > 0 ? "1px solid var(--border)" : "none",
-                        position: "sticky",
-                        top: 0,
-                        background: "var(--bg)",
-                        zIndex: 1,
-                      }}
-                    >
-                      {group.provider}
-                    </div>
-                  )}
-                  {group.options.map((opt) => {
-                    const isActive = opt.modelId === activeModel?.modelId && opt.provider === activeModel?.provider;
-                    return (
-                      <SelectorRow
-                        key={`${opt.provider}:${opt.modelId}`}
-                        active={isActive}
-                        onSelect={() => {
-                          setSelectedModel({ provider: opt.provider, modelId: opt.modelId });
-                          setModelDropdownOpen(false);
-                          setModelFilter("");
-                        }}
-                      >
-                        {opt.name}
-                      </SelectorRow>
-                    );
-                  })}
-                </div>
-              ))
-            )}
-          </div>
-        </div>,
-        document.body,
-      )
-    : null;
-
-  const thinkingMenuPortal = thinkingDropdownOpen && thinkingMenuPos && typeof document !== "undefined" && document.body
-    ? createPortal(
-        <div
-          ref={thinkingDropdownPanelRef}
-          role="listbox"
-          aria-label={t("sidekick.selectThinkingLevel")}
-          data-sidekick-interaction="true"
-          style={{
-            position: "fixed",
-            bottom: thinkingMenuPos.bottom,
-            left: Math.max(8, Math.min(thinkingMenuPos.left, (window.visualViewport?.width ?? window.innerWidth) - 130)),
-            minWidth: 100,
-            background: "var(--bg)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            boxShadow: "0 -4px 16px rgba(0,0,0,0.15)",
-            zIndex: 10000,
-            padding: 4,
-          }}
-        >
-          {availableThinkingLevelsList.map((lvl) => {
-            const isSelected = selectedThinkingLevel === lvl;
-            return (
-              <button
-                key={lvl}
-                type="button"
-                role="option"
-                aria-selected={isSelected}
-                data-sidekick-interaction="true"
-                onClick={() => {
-                  setThinkingLevelOverride(lvl);
-                  setThinkingDropdownOpen(false);
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  width: "100%",
-                  padding: "5px 8px",
-                  fontSize: 11,
-                  textAlign: "left",
-                  border: "none",
-                  borderRadius: 4,
-                  background: isSelected ? "var(--bg-selected)" : "transparent",
-                  color: isSelected ? "var(--accent)" : "var(--text)",
-                  cursor: "pointer",
-                }}
-                onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}
-              >
-                <span>{lvl}</span>
-                {isSelected && <Check size={11} strokeWidth={2} style={{ color: "var(--accent)" }} />}
-              </button>
-            );
-          })}
-        </div>,
-        document.body,
-      )
-    : null;
-
+  if (!open) return null;
+  const topbarPortal = isPortaled && resolvedTopbarTarget ? createPortal(headerElement, resolvedTopbarTarget) : null;
   const portalDocument = sidekickPortalDocument();
   if (isRightPanelPlacement) {
     const target = typeof document !== "undefined" ? document.getElementById(rightPanelTargetId) : null;
-    if (!target) return null;
-    return (
-      <>
-        {topbarPortal}
-        {modelMenuPortal}
-        {thinkingMenuPortal}
-        {createPortal(drawer, target)}
-      </>
-    );
+    return target ? <>{topbarPortal}{createPortal(drawer, target)}</> : null;
   }
-  if (!expanded || !portalDocument?.body) {
-    return (
-      <>
-        {topbarPortal}
-        {modelMenuPortal}
-        {thinkingMenuPortal}
-        {drawer}
-      </>
-    );
-  }
-
-  return (
-    <>
-      {topbarPortal}
-      {modelMenuPortal}
-      {thinkingMenuPortal}
-      {createPortal(
-        <div
-          role="presentation"
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 9999,
-            background: "rgba(0, 0, 0, 0.5)",
-            backdropFilter: "blur(2px)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)",
-          }}
-        >
-          {drawer}
-        </div>,
-        portalDocument.body,
-      )}
-    </>
-  );
+  if (!expanded || !portalDocument?.body) return <>{topbarPortal}{drawer}</>;
+  return <>{topbarPortal}{createPortal(<div role="presentation" style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)" }}>{drawer}</div>, portalDocument.body)}</>;
 }

@@ -9,6 +9,8 @@ export interface SessionHeader {
   parentSession?: string;
   /** Reader-only Talk Map context source; distinct from Pi's fork parent. */
   contextSourceSessionId?: string;
+  /** Reader-only Prompt Cache key lineage; never used as a runtime identity. */
+  promptCacheLineage?: string;
 }
 
 export interface SessionEntryBase {
@@ -173,7 +175,7 @@ export interface BashExecutionMessage extends ReaderMessageTiming {
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage;
 
-export type ExtensionUiRequest = { runtimeGeneration?: string; createdAt?: number; sideAskRunId?: string; sideAskLabel?: string } & (
+export type ExtensionUiRequest = { runtimeGeneration?: string; createdAt?: number } & (
   | {
       type: "extension_ui_request";
       id: string;
@@ -423,6 +425,7 @@ export interface SessionInfo {
   parentSessionId?: string; // fork source or subagent parent
   relation?:
     | { kind: "fork"; originSessionId?: string }
+    | { kind: "side"; parentSessionId: string }
     | { kind: "subagent"; parentSessionId: string; profile: string; description: string; model?: string; status: SubagentSessionStatus };
   /** Reader-only Talk Map context source; does not represent a Pi fork. */
   contextSourceSessionId?: string;

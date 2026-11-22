@@ -98,41 +98,12 @@ export interface InstallRemoteClaudeHostOptions {
   replace?: boolean;
 }
 
-export type RemoteClaudeProviderModel = Readonly<{
-  provider: string;
-  id: string;
-}>;
-
-export type RemoteClaudeProviderAssociationInput = {
-  providerSessionId: string;
-  /** The live AgentSession object. This identity is intentionally opaque. */
-  hostIdentity: object;
-  /** The exact SessionManager owned by hostIdentity. */
-  sessionManager: SessionManager;
-  /** The model currently selected by hostIdentity. */
-  model: RemoteClaudeProviderModel;
-};
-
-export interface RemoteClaudeProviderAssociation {
-  readonly providerSessionId: string;
-  readonly binding: RemoteClaudeHostBinding;
-  readonly generation: number;
-  readonly model: RemoteClaudeProviderModel;
-}
-
-export interface RemoteClaudeProviderAssociationLease extends RemoteClaudeProviderAssociation {
-  /** Release only this request's alias association. */
-  dispose(): void;
-}
-
 interface RemoteClaudeHostBridge {
   readonly version: 1;
   resolve(sessionId: string): RemoteClaudeHostBinding | undefined;
-  resolveByHost(hostIdentity: object): RemoteClaudeHostBinding | undefined;
-  resolveByManager(sessionManager: object): RemoteClaudeHostBinding | undefined;
+  resolveByHost(hostIdentity: RemoteClaudeHostBinding["hostIdentity"]): RemoteClaudeHostBinding | undefined;
+  resolveByManager(sessionManager: RemoteClaudeHostBinding["sessionManager"]): RemoteClaudeHostBinding | undefined;
   assert(binding: RemoteClaudeHostBinding, operation: string, request?: Record<string, unknown>): void;
-  associateProviderSession(input: RemoteClaudeProviderAssociationInput): RemoteClaudeProviderAssociationLease;
-  resolveProviderSession(providerSessionId: string): RemoteClaudeProviderAssociation | undefined;
 }
 
 interface RemoteClaudeHostRegistry extends RemoteClaudeHostBridge {
@@ -140,7 +111,6 @@ interface RemoteClaudeHostRegistry extends RemoteClaudeHostBridge {
   byHost: WeakMap<object, RemoteClaudeHostBinding>;
   byManager: WeakMap<object, RemoteClaudeHostBinding>;
   generationBySession: Map<string, number>;
-  providerAssociations: Map<string, RemoteClaudeProviderAssociationRecord>;
 }
 
 function canonicalLivePath(value: unknown): string | undefined {
@@ -148,160 +118,7 @@ function canonicalLivePath(value: unknown): string | undefined {
   try { return realpathSync(value); } catch { return undefined; }
 }
 
-interface RemoteClaudeProviderAssociationRecord {
-  providerSessionId: string;
-  binding: RemoteClaudeHostBinding;
-  generation: number;
-  model: RemoteClaudeProviderModel;
-  leases: Set<symbol>;
-}
-
 const contractCache = new Map<string, Promise<RemoteHostContract>>();
-
-function providerModel(value: unknown): RemoteClaudeProviderModel | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const candidate = value as { provider?: unknown; id?: unknown };
-  if (typeof candidate.provider !== "string" || !candidate.provider
-    || typeof candidate.id !== "string" || !candidate.id) return undefined;
-  return { provider: candidate.provider, id: candidate.id };
-}
-
-function sameProviderModel(left: RemoteClaudeProviderModel, right: RemoteClaudeProviderModel): boolean {
-  return left.provider === right.provider && left.id === right.id;
-}
-
-/** Read the model from the live AgentSession object, never from request data. */
-function liveHostModel(hostIdentity: object): RemoteClaudeProviderModel | undefined {
-  try {
-    const candidate = hostIdentity as { model?: unknown; getModel?: () => unknown };
-    const direct = providerModel(candidate.model);
-    if (direct) return direct;
-    if (typeof candidate.getModel === "function") return providerModel(candidate.getModel());
-  } catch {
-    // A disposed or partially torn-down AgentSession is not a trusted host.
-  }
-  return undefined;
-}
-
-function dropProviderAssociationsForBinding(root: RemoteClaudeHostRegistry, binding: RemoteClaudeHostBinding): void {
-  for (const [providerSessionId, association] of root.providerAssociations) {
-    if (association.binding === binding) root.providerAssociations.delete(providerSessionId);
-  }
-}
-
-function assertProviderAssociationLive(
-  root: RemoteClaudeHostRegistry,
-  association: RemoteClaudeProviderAssociationRecord,
-): void {
-  const { binding } = association;
-  if (association.generation !== binding.generation) {
-    throw new Error("Remote Claude provider session association generation is stale");
-  }
-  const currentModel = liveHostModel(binding.hostIdentity);
-  if (!currentModel || !sameProviderModel(currentModel, association.model)) {
-    throw new Error("Remote Claude provider session model is no longer current");
-  }
-  root.assert(binding, "side-ask", {
-    sessionManager: binding.sessionManager,
-    hostIdentity: binding.hostIdentity,
-    sessionId: binding.sessionId,
-    generation: binding.generation,
-  });
-}
-
-function associateProviderSession(
-  root: RemoteClaudeHostRegistry,
-  input: RemoteClaudeProviderAssociationInput,
-): RemoteClaudeProviderAssociationLease {
-  if (typeof input?.providerSessionId !== "string"
-    || input.providerSessionId.length === 0
-    || input.providerSessionId.length > 4096) {
-    throw new Error("Remote Claude provider session id is invalid");
-  }
-  if (!input.hostIdentity || typeof input.hostIdentity !== "object"
-    || !input.sessionManager || typeof input.sessionManager !== "object") {
-    throw new Error("Remote Claude provider session requires a live AgentSession and SessionManager");
-  }
-  const requestedModel = providerModel(input.model);
-  if (!requestedModel) throw new Error("Remote Claude provider session model is invalid");
-  const binding = root.byHost.get(input.hostIdentity);
-  if (!binding) throw new Error("Remote Claude provider session host binding is unavailable");
-  if (binding.sessionManager !== input.sessionManager) {
-    throw new Error("Remote Claude provider session manager does not match the live host binding");
-  }
-  const currentModel = liveHostModel(binding.hostIdentity);
-  if (!currentModel || !sameProviderModel(currentModel, requestedModel)) {
-    throw new Error("Remote Claude provider session model does not match the live AgentSession");
-  }
-  root.assert(binding, "side-ask", {
-    sessionManager: input.sessionManager,
-    hostIdentity: input.hostIdentity,
-    sessionId: binding.sessionId,
-    generation: binding.generation,
-  });
-
-  const existing = root.providerAssociations.get(input.providerSessionId);
-  if (existing) {
-    assertProviderAssociationLive(root, existing);
-    if (existing.binding !== binding || existing.generation !== binding.generation
-      || !sameProviderModel(existing.model, requestedModel)) {
-      throw new Error("Remote Claude provider session association conflicts with the live host binding");
-    }
-  }
-  const association = existing ?? {
-    providerSessionId: input.providerSessionId,
-    binding,
-    generation: binding.generation,
-    model: Object.freeze({ ...requestedModel }),
-    leases: new Set<symbol>(),
-  } satisfies RemoteClaudeProviderAssociationRecord;
-  if (!existing) root.providerAssociations.set(input.providerSessionId, association);
-  const leaseToken = Symbol(`remote-claude-provider:${input.providerSessionId}`);
-  association.leases.add(leaseToken);
-  let disposed = false;
-  const lease: RemoteClaudeProviderAssociationLease = {
-    providerSessionId: association.providerSessionId,
-    binding: association.binding,
-    generation: association.generation,
-    model: association.model,
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      const current = root.providerAssociations.get(association.providerSessionId);
-      if (current !== association) return;
-      association.leases.delete(leaseToken);
-      if (association.leases.size === 0) root.providerAssociations.delete(association.providerSessionId);
-    },
-  };
-  return Object.freeze(lease);
-}
-
-function resolveProviderSession(
-  root: RemoteClaudeHostRegistry,
-  providerSessionId: string,
-): RemoteClaudeProviderAssociation | undefined {
-  if (typeof providerSessionId !== "string" || providerSessionId.length === 0) return undefined;
-  const association = root.providerAssociations.get(providerSessionId);
-  if (!association) return undefined;
-  assertProviderAssociationLive(root, association);
-  return Object.freeze({
-    providerSessionId: association.providerSessionId,
-    binding: association.binding,
-    generation: association.generation,
-    model: association.model,
-  });
-}
-
-function ensureProviderAssociationApi(root: RemoteClaudeHostRegistry): RemoteClaudeHostRegistry {
-  if (!(root.providerAssociations instanceof Map)) root.providerAssociations = new Map();
-  if (typeof root.associateProviderSession !== "function") {
-    root.associateProviderSession = (input) => associateProviderSession(root, input);
-  }
-  if (typeof root.resolveProviderSession !== "function") {
-    root.resolveProviderSession = (providerSessionId) => resolveProviderSession(root, providerSessionId);
-  }
-  return root;
-}
 
 function registry(): RemoteClaudeHostRegistry {
   const root = globalThis as typeof globalThis & { [REMOTE_CLAUDE_HOST_BRIDGE_KEY]?: RemoteClaudeHostRegistry };
@@ -313,7 +130,7 @@ function registry(): RemoteClaudeHostRegistry {
     && existing.byManager
     && existing.generationBySession instanceof Map
     && typeof existing.resolveByManager === "function") {
-    return ensureProviderAssociationApi(existing);
+    return existing;
   }
   const created: RemoteClaudeHostRegistry = {
     version: 1,
@@ -321,7 +138,6 @@ function registry(): RemoteClaudeHostRegistry {
     byHost: new WeakMap(),
     byManager: new WeakMap(),
     generationBySession: new Map(),
-    providerAssociations: new Map(),
     resolve(sessionId) { return this.bindings.get(sessionId); },
     resolveByHost(hostIdentity) { return this.byHost.get(hostIdentity); },
     resolveByManager(sessionManager) { return this.byManager.get(sessionManager); },
@@ -364,13 +180,17 @@ function registry(): RemoteClaudeHostRegistry {
           || (binding.parentGeneration !== undefined && binding.parentGeneration !== parent.generation)) {
           throw new Error("Remote Claude Reader parent binding is no longer current");
         }
-        try { parent.contract.assertRemoteHostOperation(parent.scope, "side-ask"); }
+        try {
+          parent.contract.assertRemoteHostOperation(parent.scope, "start-child", {
+            readerMarker: parent.readerMarker,
+            parentSessionId: parent.sessionId,
+            toolName: "Agent",
+          });
+        }
         catch { throw new Error("Remote Claude Reader parent binding is no longer live"); }
       }
       binding.contract.assertRemoteHostOperation(binding.scope, operation, request);
     },
-    associateProviderSession(input) { return associateProviderSession(this, input); },
-    resolveProviderSession(providerSessionId) { return resolveProviderSession(this, providerSessionId); },
   };
   root[REMOTE_CLAUDE_HOST_BRIDGE_KEY] = created;
   return created;
@@ -455,7 +275,6 @@ function unindexBinding(root: RemoteClaudeHostRegistry, binding: RemoteClaudeHos
 }
 
 function revokeBinding(root: RemoteClaudeHostRegistry, binding: RemoteClaudeHostBinding): void {
-  dropProviderAssociationsForBinding(root, binding);
   unindexBinding(root, binding);
   try { binding.contract.revokeRemoteHostScope(binding.scope); } catch { /* already revoked */ }
 }
@@ -568,30 +387,16 @@ export function resolveRemoteClaudeHost(sessionId: string): RemoteClaudeHostBind
   return registry().resolve(sessionId);
 }
 
-export function resolveRemoteClaudeHostByIdentity(hostIdentity: object): RemoteClaudeHostBinding | undefined {
+export function resolveRemoteClaudeHostByIdentity(hostIdentity: RemoteClaudeHostBinding["hostIdentity"]): RemoteClaudeHostBinding | undefined {
   return registry().resolveByHost(hostIdentity);
 }
 
-export function resolveRemoteClaudeHostByManager(sessionManager: object): RemoteClaudeHostBinding | undefined {
+export function resolveRemoteClaudeHostByManager(sessionManager: RemoteClaudeHostBinding["sessionManager"]): RemoteClaudeHostBinding | undefined {
   return registry().resolveByManager(sessionManager);
 }
 
 export function assertRemoteClaudeHost(binding: RemoteClaudeHostBinding, operation: string, request: Record<string, unknown> = {}): void {
   registry().assert(binding, operation, request);
-}
-
-/** Associate a provider alias with the exact live Reader host for one request. */
-export function associateRemoteClaudeProviderSession(
-  input: RemoteClaudeProviderAssociationInput,
-): RemoteClaudeProviderAssociationLease {
-  return registry().associateProviderSession(input);
-}
-
-/** Resolve and revalidate a provider alias before the plugin performs a turn. */
-export function resolveRemoteClaudeProviderSession(
-  providerSessionId: string,
-): RemoteClaudeProviderAssociation | undefined {
-  return registry().resolveProviderSession(providerSessionId);
 }
 
 export function revokeRemoteClaudeHost(binding: RemoteClaudeHostBinding | undefined): void {
@@ -653,7 +458,8 @@ export function createRemoteClaudeHostGuardExtension(): InlineExtension {
     hidden: true,
     factory: (pi) => {
       pi.on("tool_call", (event, context) => {
-        const manager = (context as unknown as { sessionManager?: object } | undefined)?.sessionManager;
+        // SAFETY: the Reader bridge attaches the live SessionManager to the SDK context; the SDK type omits this identity-only field.
+        const manager = (context as unknown as { sessionManager?: SessionManager } | undefined)?.sessionManager;
         if (!manager) return;
         const binding = resolveRemoteClaudeHostByManager(manager);
         if (!binding) return;

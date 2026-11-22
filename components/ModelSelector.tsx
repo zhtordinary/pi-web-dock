@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { SelectorRow } from "./SelectorRow";
@@ -31,13 +31,6 @@ interface ModelSelectorProps {
 }
 
 const MODEL_FILTER_THRESHOLD = 8;
-const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compareModelOptions(a: ModelSelectorOption, b: ModelSelectorOption): number {
-  return MODEL_OPTION_COLLATOR.compare(a.name || a.modelId, b.name || b.modelId)
-    || MODEL_OPTION_COLLATOR.compare(a.provider, b.provider)
-    || MODEL_OPTION_COLLATOR.compare(a.modelId, b.modelId);
-}
 
 export function filterModelOptions(options: ModelSelectorOption[], query: string): ModelSelectorOption[] {
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -74,9 +67,8 @@ export function ModelSelector({
   const [anchorRect, setAnchorRect] = useState<{ top: number; right: number; bottom: number; left: number; width: number } | null>(null);
   const [filter, setFilter] = useState("");
   const locked = disabled || busy;
-  const sortedOptions = useMemo(() => [...options].sort(compareModelOptions), [options]);
-  const filteredOptions = filterModelOptions(sortedOptions, filter);
-  const showFilter = sortedOptions.length > MODEL_FILTER_THRESHOLD;
+  const filteredOptions = filterModelOptions(options, filter);
+  const showFilter = options.length > MODEL_FILTER_THRESHOLD;
   const modelsByProvider: { provider: string; options: ModelSelectorOption[] }[] = [];
 
   for (const option of filteredOptions) {
@@ -86,8 +78,8 @@ export function ModelSelector({
   }
 
   const currentName = selectedLabel ?? (value
-    ? sortedOptions.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
-    : emptyLabel ?? (sortedOptions.length > 0 ? t("chat.selectModel") : t("chat.noModels")));
+    ? options.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
+    : emptyLabel ?? (options.length > 0 ? t("chat.selectModel") : t("chat.noModels")));
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -180,7 +172,7 @@ export function ModelSelector({
         aria-expanded={open}
         aria-busy={busy || undefined}
         disabled={locked}
-        title={busy ? t("chat.switchingModel") : locked ? currentName : sortedOptions.length > 0 || onClear ? t("chat.changeModel") : t("chat.noAvailableModels")}
+        title={busy ? t("chat.switchingModel") : locked ? currentName : options.length > 0 || onClear ? t("chat.changeModel") : t("chat.noAvailableModels")}
         style={buttonStyle}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();

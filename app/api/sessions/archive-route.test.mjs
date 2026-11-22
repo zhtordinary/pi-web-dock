@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
-import { zhCNLocale } from "../../../lib/i18n/messages/zh-CN.ts";
 const routeSource = await readFile(new URL("./[id]/archive/route.ts", import.meta.url), "utf8");
 const closeSource = await readFile(new URL("../../../lib/session-close.ts", import.meta.url), "utf8");
 const shutdownSource = await readFile(new URL("./[id]/shutdown/route.ts", import.meta.url), "utf8");
@@ -16,9 +15,9 @@ const security = compile(await readFile(new URL("../../../lib/request-security.t
 const pathModule = await import("node:path");
 const fsModule = await import("node:fs");
 const { sessionMutationRequest } = compile(await readFile(new URL("../../../lib/session-mutation-command.ts", import.meta.url), "utf8"), {});
-function fixture({ background = [], busy = false, sideAsk = false, queued = 0, siblingError, siblingHadRuntime = false, recent = false, conflict = false, closingOwner = false, already = false, child = false } = {}) {
+function fixture({ background = [], busy = false, queued = 0, siblingError, siblingHadRuntime = false, recent = false, conflict = false, closingOwner = false, already = false, child = false } = {}) {
   const calls = [], rpc = {
-    sessionFile: "/active/session.jsonl", isAlive: () => true, isRunning: () => busy, hasActiveSideAsk: () => sideAsk,
+    sessionFile: "/active/session.jsonl", isAlive: () => true, isRunning: () => busy,
     getExecutionState: () => ({ active: busy, queuedCount: queued }),
     setUnattendedEnabled: value => calls.push(["unattended", value]),
     shutdown: async () => { calls.push("shutdown"); },
@@ -50,7 +49,6 @@ function fixture({ background = [], busy = false, sideAsk = false, queued = 0, s
     "@/lib/session-caches": { clearSessionCaches: () => calls.push("clear") },
   };
   const close = compile(closeSource, { "./rpc-manager": dependencies["@/lib/rpc-manager"], "./subagent-activity": { getSessionBackgroundRunIds: () => background },
-    "./i18n/messages/zh-CN.ts": { zhCNLocale },
     "./state-file-transaction": { acquireStateWriteLock: () => { calls.push("runtime-lock"); if (closingOwner) throw Object.assign(new Error("native writer still owns transcript"), { code: "ELOCKED" }); return () => calls.push("runtime-unlock"); } },
   });
   dependencies["@/lib/session-close"] = close;
@@ -89,20 +87,11 @@ test("archive rejects missing Host, untrusted hosts, cross-origin requests and n
     assert.deepEqual(f.calls, []);
   }
 });
-for (const [label, values] of [["parent", { busy: true }], ["background child", { background: ["child"] }], ["queue", { queued: 1 }], ["side ask", { sideAsk: true }]]) {
+for (const [label, values] of [["parent", { busy: true }], ["background child", { background: ["child"] }], ["queue", { queued: 1 }]]) {
   test(`archive refuses active ${label} without moving history`, async () => {
     const f = fixture(values); assert.equal((await f.archive()).status, 409); assert.ok(!f.calls.includes("move")); assert.ok(!f.calls.includes("shutdown"));
   });
 }
-test("a running Side Ask blocks archive with its own message", async () => {
-  const f = fixture({ sideAsk: true });
-  const response = await f.archive();
-  assert.equal(response.status, 409);
-  const body = await response.json();
-  assert.equal(body.code, "session_busy");
-  assert.match(body.error, /侧边提问正在回答/);
-  assert.ok(!f.calls.includes("move") && !f.calls.includes("shutdown"));
-});
 test("archive closes both channels then exclusively moves and verifies history", async () => {
   const f = fixture(); const response = await f.archive();
   assert.equal(response.status, 200); assert.equal((await response.json()).executionClosed, true);

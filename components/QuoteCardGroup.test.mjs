@@ -112,5 +112,25 @@ test("SidekickDrawer uses direct textarea quote to distinguish from main chat qu
 
   assert.doesNotMatch(source, /<QuoteCardGroup/, "must not mount QuoteCardGroup in Sidekick composer");
   assert.match(source, /pi-sidekick-quote/, "must listen to pi-sidekick-quote event");
-  assert.match(source, /setQuestion\(\(prev\) => \(prev \? `\$\{prev\}\\n\\n\$\{quoteText\}` : quoteText\)\)/, "must directly append quote text to textarea");
+  assert.match(source, /setDraft\(\(current\) => current \? `\$\{current\}\\n\\n\$\{text\}` : text\)/, "must directly append quote text to textarea");
+});
+
+test("ChatWindow wires Sidekick quotes back to the main composer", async () => {
+  const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /onQuoteToComposer=\{\(text\) => chatInputRef\?\.current\?\.insertIfEmpty\(text\)\}/, "must expose Sidekick quote actions to ChatInput");
+});
+
+test("Sidekick shows canonical cache hit rate and keeps stop in the composer", async () => {
+  const source = await readFile(new URL("./SidekickDrawer.tsx", import.meta.url), "utf8");
+  assert.match(source, /turnCacheHitRate\(answer\.usage\)/, "must use the canonical per-turn cache rate");
+  assert.match(source, /onStop=\{\(\) => void agent\.handleAbort\(\)\}/, "must keep stop in the composer");
+  const streaming = source.slice(source.indexOf("isStreaming && streamingMessage"), source.indexOf("agent.error &&", source.indexOf("isStreaming && streamingMessage")));
+  assert.doesNotMatch(streaming, /handleAbort/, "must not duplicate stop in the streaming answer card");
+});
+
+test("Sidekick promotes a persisted side session through the official fork route", async () => {
+  const source = await readFile(new URL("./SidekickDrawer.tsx", import.meta.url), "utf8");
+  assert.match(source, /body: JSON\.stringify\(\{ promote: true \}\)/, "must request promotion from the side session fork route");
+  assert.match(source, /onSessionForked\?\.\(\{ newSessionId: data\.sessionId/, "must hand the visible session to the shell");
 });

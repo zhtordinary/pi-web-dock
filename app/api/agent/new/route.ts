@@ -13,6 +13,7 @@ import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security"
 import type { ReaderControlReceipt } from "@/lib/reader-control-receipts";
 import { validateSessionToolSelection } from "@/lib/session-tool-selection";
 import { readerCreateFailureDiagnostic } from "@/lib/reader-create-diagnostics";
+import { cwdMissingBody } from "@/lib/missing-cwd";
 import { appendWorktreeBinding, type WorktreeBindingDraft } from "@/lib/worktree-bindings";
 import { listWorktrees, resolveProject } from "@/lib/worktree";
 
@@ -107,7 +108,7 @@ async function createSession(
     }
     if (!existsSync(cwd)) {
       return NextResponse.json({
-        error: `Directory does not exist: ${cwd}`,
+        ...cwdMissingBody(cwd),
         ...(commandType === "prompt"
           ? { code: "prompt_rejected", accepted: false }
           : {}),

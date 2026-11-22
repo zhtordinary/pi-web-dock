@@ -10,7 +10,6 @@ export type ReaderStreamKind =
   | "terminal"
   | "file-watch"
   | "ui-requests"
-  | "quick-ask"
   | "provider-login";
 
 export const READER_STREAM_KINDS: readonly ReaderStreamKind[] = [
@@ -20,7 +19,6 @@ export const READER_STREAM_KINDS: readonly ReaderStreamKind[] = [
   "terminal",
   "file-watch",
   "ui-requests",
-  "quick-ask",
   "provider-login",
 ];
 

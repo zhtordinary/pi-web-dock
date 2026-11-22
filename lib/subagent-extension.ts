@@ -19,6 +19,74 @@ const HOST_SUBAGENT_EXTENSION_PATH = `<inline:${HOST_SUBAGENT_EXTENSION_NAME}>`;
 const SUBAGENT_TOOL_NAMES = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const LEGACY_SUBAGENT_PACKAGE_NAME = "pi-subagents";
 const TERMINAL_SUBAGENT_STATUSES = new Set<SubagentRunInfo["status"]>(["completed", "failed", "aborted", "interrupted"]);
+// Node timers overflow above a signed 32-bit millisecond delay.
+const MAX_SUBAGENT_WAIT_SECONDS = Math.floor(2_147_483_647 / 1000);
+const waitTimeoutParameter = () => Type.Optional(Type.Integer({
+  minimum: 1,
+  maximum: MAX_SUBAGENT_WAIT_SECONDS,
+  description: "Optional seconds to wait for completion. When omitted, a foreground Agent or get_subagent_result with wait: true waits until completion or cancellation. When provided, expiry returns status without cancelling the child.",
+}));
+
+function waitTimeoutMs(seconds?: number): number | undefined {
+  if (seconds === undefined) return undefined;
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > MAX_SUBAGENT_WAIT_SECONDS) {
+    throw new Error(`wait_timeout must be an integer between 1 and ${MAX_SUBAGENT_WAIT_SECONDS} seconds`);
+  }
+  return seconds * 1000;
+}
+
+function pollDelay(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error("Result wait aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, 500);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** When provided, bound the caller's wait, not the child run. Abort only the local polling on exit. */
+async function waitForSubagent<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number | undefined,
+  signal?: AbortSignal,
+): Promise<T | undefined> {
+  if (signal?.aborted) throw new Error("Result wait aborted");
+  const polling = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    const waits: Array<Promise<T | undefined>> = [
+      new Promise<T | undefined>((_resolve, reject) => {
+        onAbort = () => reject(new Error("Result wait aborted"));
+        signal?.addEventListener("abort", onAbort, { once: true });
+      }),
+      operation(polling.signal),
+    ];
+    if (timeoutMs !== undefined) {
+      waits.push(new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }));
+    }
+    return await Promise.race(waits);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    polling.abort();
+  }
+}
+
+function waitTimeoutText(run: SubagentRunInfo | undefined, sessionId: string, timeoutMs: number): string {
+  const status = run ? subagentFinalText(run) : `Subagent ${sessionId}: status lookup is still pending.`;
+  return `Wait budget exhausted (${timeoutMs / 1000} seconds). ${status} Only the wait ended; the subagent was not cancelled.`;
+}
+
 /**
  * The control tools are declared to the model and activated on registration like `direct` tools,
  * but pi never lets another tool call a `model-only` tool through `ctx.executeTool()`, so a
@@ -41,6 +109,7 @@ export interface SubagentToolDetails {
   worktreePath?: string;
   worktreeBranch?: string;
   worktreeCleanupError?: string;
+  worktreeExists?: boolean;
 }
 
 export interface StartSubagentRequest {
@@ -112,7 +181,21 @@ export function subagentToolDetails(run: SubagentRunInfo): SubagentToolDetails {
     ...(run.worktreePath ? { worktreePath: run.worktreePath } : {}),
     ...(run.worktreeBranch ? { worktreeBranch: run.worktreeBranch } : {}),
     ...(run.worktreeCleanupError ? { worktreeCleanupError: run.worktreeCleanupError } : {}),
+    ...(run.worktreeExists !== undefined ? { worktreeExists: run.worktreeExists } : {}),
   };
+}
+
+/** Report only the cleanup facts recorded with the run; old records remain explicitly unknown. */
+function worktreeOutcomeText(run: SubagentRunInfo): string | undefined {
+  if (!run.worktreePath || !run.worktreeBranch || run.worktreeExists === undefined) return undefined;
+  if (!run.worktreeExists) return `Its worktree was removed; branch ${run.worktreeBranch} keeps any commits it made.`;
+  if (run.worktreeCleanupError && worktreeHasUncommittedFiles(run.worktreeCleanupError)) {
+    return `Its worktree was kept at ${run.worktreePath} (branch ${run.worktreeBranch}) because it still has uncommitted or untracked files.`;
+  }
+  if (run.worktreeCleanupError) {
+    return `Its worktree is still at ${run.worktreePath} (branch ${run.worktreeBranch}); cleanup was not completed.`;
+  }
+  return `Its worktree is still at ${run.worktreePath} (branch ${run.worktreeBranch}).`;
 }
 
 export function subagentFinalText(run: SubagentRunInfo): string {
@@ -120,22 +203,21 @@ export function subagentFinalText(run: SubagentRunInfo): string {
     return `Subagent ${run.sessionId} is ${run.status}.`;
   }
   // Keep the session ID in the text: the model only sees `content`, never `details`, and needs it for `resume` / `get_subagent_result`.
+  const worktree = worktreeOutcomeText(run);
+  const withWorktree = (status: string) => worktree ? `${status}\n\n${worktree}` : status;
   if (run.status === "completed") {
     const result = run.result?.trim();
-    return result ? `Subagent ${run.sessionId} completed.\n\n${result}` : `Subagent ${run.sessionId} completed without text output.`;
+    return result
+      ? `${withWorktree(`Subagent ${run.sessionId} completed.`)}\n\n${result}`
+      : withWorktree(`Subagent ${run.sessionId} completed without text output.`);
   }
   const partial = run.result?.trim();
   if (run.status === "aborted") {
-    return partial
-      ? `Subagent ${run.sessionId} was stopped.\n\nPartial output:\n\n${partial}`
-      : `Subagent ${run.sessionId} was stopped.`;
+    const status = withWorktree(`Subagent ${run.sessionId} was stopped.`);
+    return partial ? `${status}\n\nPartial output:\n\n${partial}` : status;
   }
-  if (run.status === "interrupted") {
-    return partial
-      ? `Subagent ${run.sessionId} was interrupted before completion.\n\nPartial output:\n\n${partial}`
-      : `Subagent ${run.sessionId} was interrupted before completion.`;
-  }
-  const failure = `Subagent ${run.sessionId} failed: ${run.error ?? "Unknown error"}`;
+  if (run.status === "interrupted") return withWorktree(`Subagent ${run.sessionId} was interrupted before completion.`);
+  const failure = withWorktree(`Subagent ${run.sessionId} failed: ${run.error ?? "Unknown error"}`);
   return partial ? `${failure}\n\nPartial output:\n\n${partial}` : failure;
 }
 
@@ -192,7 +274,7 @@ export function createSubagentExtension(
       pi.registerTool(defineTool({
         name: "Agent",
         label: "Agent",
-        description: `Delegate a focused task to a configured subagent. Each subagent runs as a full, inspectable Pi session. Use background mode for independent work and foreground mode when the result is needed immediately.\n\nAvailable agent types:\n${agentTypeDescription(profiles)}`,
+        description: `Delegate a focused task to a configured subagent. Each subagent runs as a full, inspectable Pi session. Use background mode for independent work and foreground mode when the result is needed immediately. Foreground completion waits until it finishes by default; set wait_timeout (seconds) to bound the wait. If an explicit wait budget is exhausted, the child keeps running and reports its completion automatically.\n\nAvailable agent types:\n${agentTypeDescription(profiles)}`,
         promptSnippet: "Delegate a focused task to an inspectable subagent session",
         exposure: SUBAGENT_TOOL_EXPOSURE,
         promptGuidelines: [
@@ -211,6 +293,7 @@ export function createSubagentExtension(
           })),
           description: Type.String({ description: "Short activity label shown in the UI." }),
           run_in_background: Type.Optional(Type.Boolean({ description: "Return immediately and notify this session when complete." })),
+          wait_timeout: waitTimeoutParameter(),
           model: Type.Optional(Type.String({ description: "Optional provider/modelId override." })),
           thinking: Type.Optional(Type.String({ description: "Optional thinking level override." })),
           max_turns: Type.Optional(Type.Number({ description: "Optional positive agent turn limit." })),
@@ -218,7 +301,33 @@ export function createSubagentExtension(
           isolation: Type.Optional(Type.String({ description: "Run the subagent in an isolated git worktree." })),
         }),
         async execute(toolCallId, params, signal, onUpdate, ctx) {
+          // Runtime cancellation follows this signal only while the Agent call is attached.
+          // A later parent Stop must not cancel a child whose foreground wait already expired.
+          const childAbort = new AbortController();
+          const onParentAbort = () => childAbort.abort();
+          if (signal?.aborted) childAbort.abort();
+          else signal?.addEventListener("abort", onParentAbort, { once: true });
+          let attached = true;
+          let latestRun: SubagentRunInfo | undefined;
+          const update = (run: SubagentRunInfo) => {
+            latestRun = run;
+            if (attached) onUpdate?.({
+              content: [{ type: "text", text: `${run.profile}: ${run.description} (${run.status})` }],
+              details: subagentToolDetails(run),
+            });
+          };
+          const notifyOnCompletion = (execution: SubagentExecution) => {
+            void execution.completion
+              .then((run) => runtime.notifyParent(run))
+              .catch((error) => {
+                console.error(
+                  "[pi-web] failed to deliver subagent completion:",
+                  error instanceof Error ? error.message : error,
+                );
+              });
+          };
           try {
+            const timeoutMs = waitTimeoutMs(params.wait_timeout);
             const resume = params.resume?.trim();
             if (resume) {
               const creationOptions = [
@@ -241,11 +350,8 @@ export function createSubagentExtension(
                   task: params.prompt,
                   description: params.description,
                   ...(params.run_in_background !== undefined ? { runInBackground: params.run_in_background } : {}),
-                  signal,
-                  onUpdate: (run) => onUpdate?.({
-                    content: [{ type: "text", text: `${run.profile}: ${run.description} (${run.status})` }],
-                    details: subagentToolDetails(run),
-                  }),
+                  signal: childAbort.signal,
+                  onUpdate: update,
                 })
               : await runtime.start({
               parentContext: ctx,
@@ -260,29 +366,27 @@ export function createSubagentExtension(
               ...(params.max_turns !== undefined ? { maxTurns: params.max_turns } : {}),
               ...(params.inherit_context !== undefined ? { inheritContext: params.inherit_context } : {}),
               ...(params.isolation === "worktree" ? { isolation: "worktree" as const } : {}),
-              signal,
-              onUpdate: (run) => onUpdate?.({
-                content: [{ type: "text", text: `${run.profile}: ${run.description} (${run.status})` }],
-                details: subagentToolDetails(run),
-              }),
+              signal: childAbort.signal,
+              onUpdate: update,
                 });
 
             if (execution.run.runInBackground) {
-              void execution.completion
-                .then((run) => runtime.notifyParent(run))
-                .catch((error) => {
-                  console.error(
-                    "[pi-web] failed to deliver subagent completion:",
-                    error instanceof Error ? error.message : error,
-                  );
-                });
+              notifyOnCompletion(execution);
               return {
                 content: [{ type: "text", text: `Subagent started in background. Session ID: ${execution.run.sessionId}. You will be notified when it completes.` }],
                 details: subagentToolDetails(execution.run),
               };
             }
 
-            const run = await execution.completion;
+            const run = await waitForSubagent(() => execution.completion, timeoutMs, signal);
+            if (run === undefined) {
+              if (timeoutMs === undefined) throw new Error("Subagent completion wait ended without a result");
+              notifyOnCompletion(execution);
+              return {
+                content: [{ type: "text", text: `Wait budget exhausted (${timeoutMs / 1000} seconds). ${subagentFinalText(latestRun ?? execution.run)} Only the wait ended; the subagent was not cancelled. Its completion report will arrive automatically.` }],
+                details: subagentToolDetails(latestRun ?? execution.run),
+              };
+            }
             return {
               content: [{ type: "text", text: subagentFinalText(run) }],
               details: subagentToolDetails(run),
@@ -294,6 +398,9 @@ export function createSubagentExtension(
               details: undefined,
               isError: true,
             };
+          } finally {
+            attached = false;
+            signal?.removeEventListener("abort", onParentAbort);
           }
         },
       }));
@@ -305,29 +412,35 @@ export function createSubagentExtension(
         exposure: SUBAGENT_TOOL_EXPOSURE,
         parameters: Type.Object({
           agent_id: Type.String({ description: "Subagent session ID." }),
-          wait: Type.Optional(Type.Boolean({ description: "Wait until the subagent finishes." })),
+          wait: Type.Optional(Type.Boolean({ description: "Wait for completion. Without wait_timeout, keep waiting until completion or cancellation; with wait_timeout, return status when the budget expires without cancelling the child." })),
+          wait_timeout: waitTimeoutParameter(),
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-          let run = await runtime.get(params.agent_id, ctx);
-          if (!run) return { content: [{ type: "text", text: withSubagentCandidates(`Subagent not found: ${params.agent_id}`, ctx) }], details: undefined, isError: true };
-          while (params.wait && (run.status === "queued" || run.status === "starting" || run.status === "running")) {
-            await new Promise<void>((resolve, reject) => {
-              const onAbort = () => {
-                clearTimeout(timer);
-                reject(new Error("Result wait aborted"));
+          let run: SubagentRunInfo | null | undefined;
+          if (params.wait) {
+            const timeoutMs = waitTimeoutMs(params.wait_timeout);
+            const settled = await waitForSubagent(async (pollSignal) => {
+              for (;;) {
+                const found = await runtime.get(params.agent_id, ctx);
+                if (pollSignal.aborted) throw new Error("Result wait aborted");
+                run = found;
+                if (!run || TERMINAL_SUBAGENT_STATUSES.has(run.status)) return { run };
+                await pollDelay(pollSignal);
+              }
+            }, timeoutMs, signal);
+            if (!settled) {
+              if (timeoutMs === undefined) throw new Error("Result wait ended without a result");
+              return {
+                content: [{ type: "text", text: waitTimeoutText(run ?? undefined, params.agent_id, timeoutMs) }],
+                details: run ? subagentToolDetails(run) : undefined,
               };
-              const timer = setTimeout(() => {
-                signal?.removeEventListener("abort", onAbort);
-                resolve();
-              }, 500);
-              if (signal?.aborted) onAbort();
-              else signal?.addEventListener("abort", onAbort, { once: true });
-            });
+            }
+            run = settled.run;
+          } else {
             run = await runtime.get(params.agent_id, ctx);
-            if (!run) return { content: [{ type: "text", text: withSubagentCandidates(`Subagent not found: ${params.agent_id}`, ctx) }], details: undefined, isError: true };
           }
-          // The parent now holds this result, so the background completion notification must not
-          // deliver the same text again and wake a duplicate turn.
+          if (!run) return { content: [{ type: "text", text: withSubagentCandidates(`Subagent not found: ${params.agent_id}`, ctx) }], details: undefined, isError: true };
+          // Only background runs notify the parent after completion; foreground results have no duplicate delivery path.
           if (run.runInBackground && TERMINAL_SUBAGENT_STATUSES.has(run.status)) runtime.markResultConsumed(run);
           return {
             content: [{ type: "text", text: subagentFinalText(run) }],

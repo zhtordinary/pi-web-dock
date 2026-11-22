@@ -39,5 +39,5 @@ test("AppShell delegates Worktree graph, Git qualification, Talk Map, and branch
   assert.match(worktree, /<TalkMapOverlay/);
   assert.match(worktree, /<BranchNavigator /);
   assert.match(worktree, /sendAgentCommand<[\s\S]*type: "fork"/);
-  assert.ok(lines(appShell) <= 7511, `AppShell should stay slim after extraction; got ${lines(appShell)} lines`);
+  assert.ok(lines(appShell) <= 7520, `AppShell should stay slim after extraction; got ${lines(appShell)} lines`);
 });

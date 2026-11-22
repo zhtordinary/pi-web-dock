@@ -77,12 +77,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Password authentication is disabled" }, { status: 404 });
   }
 
+  // Read the body before checking the shared throttle. From the check through
+  // compare and failure recording there is no await, so a concurrent burst
+  // cannot all pass the check before the first failure lands.
+  const body = await request.json().catch(() => null) as { password?: unknown } | null;
   const retryAfterMs = getAuthRetryAfterMs();
   if (retryAfterMs > 0) {
     return tooManyAttempts(retryAfterMs);
   }
-
-  const body = await request.json().catch(() => null) as { password?: unknown } | null;
   if (!body || typeof body.password !== "string" || !isValidWebPassword(body.password, password)) {
     const delayMs = recordAuthFailure();
     console.warn(`[web-auth] Password authentication failed; next attempt blocked for ${delayMs}ms`);

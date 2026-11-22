@@ -20,7 +20,7 @@ import {
   inspectUploadTargets,
   parseUploadConflictStrategy,
   validateUploadFileNames,
-  writeUploadFileAtomicSync,
+  writeUploadFileAtomic,
 } from "@/lib/file-upload";
 import {
   explorerFilterFromSearchParams,
@@ -51,7 +51,7 @@ import { watchDirectory } from "@/lib/watch-directory";
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
 const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
-const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
+// One limit for all files in a multipart request; a single file may use all of it.
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 // Multipart boundaries and headers are not file bytes, but must be bounded too.
 const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + 1024 * 1024;
@@ -316,9 +316,6 @@ export async function POST(
       throw error;
     }
     const files = formData.getAll("files").filter((entry): entry is File => typeof entry !== "string");
-    if (files.some((file) => file.size > MAX_UPLOAD_FILE_BYTES)) {
-      return NextResponse.json({ error: "Each upload must be 25MB or smaller" }, { status: 413 });
-    }
     if (files.reduce((total, file) => total + file.size, 0) > MAX_UPLOAD_TOTAL_BYTES) {
       return NextResponse.json({ error: "Uploads must total 100MB or less" }, { status: 413 });
     }
@@ -377,7 +374,9 @@ export async function POST(
       }
 
       try {
-        writeUploadFileAtomicSync(destination, bytes, {
+        // Large writes yield to the event loop; the helper keeps the final
+        // destination check and same-directory rename atomic.
+        await writeUploadFileAtomic(destination, bytes, {
           replaceExisting: conflictSet.has(file.name),
         });
         uploaded.push(file.name);
@@ -558,6 +557,8 @@ function createFileBodyStream(filePath: string, range?: { start: number; end: nu
         if (closed) return;
         try {
           controller.enqueue(new Uint8Array(chunk));
+          // Pause disk reads when the client has not consumed the queued bytes.
+          if ((controller.desiredSize ?? 1) <= 0) fileStream.pause();
         } catch {
           closed = true;
           fileStream.destroy();
@@ -582,6 +583,9 @@ function createFileBodyStream(filePath: string, range?: { start: number; end: nu
         }
       });
     },
+    pull() {
+      if (!closed) fileStream.resume();
+    },
     cancel() {
       closed = true;
       fileStream.destroy();
@@ -605,7 +609,9 @@ function getContentDisposition(filePath: string, asDownload = false): string {
 function streamFile(filePath: string, stat: fs.Stats, contentType: string, rangeHeader: string | null, asDownload = false): Response {
   const headers: Record<string, string> = {
     "Content-Type": contentType,
-    "Cache-Control": "no-cache",
+    // Next can gzip compressible route responses; file bytes, especially 206 ranges,
+    // must be sent exactly as stored.
+    "Cache-Control": "no-cache, no-transform",
     "Accept-Ranges": "bytes",
     "Content-Disposition": getContentDisposition(filePath, asDownload),
     "X-Content-Type-Options": "nosniff",
@@ -630,7 +636,7 @@ function streamFile(filePath: string, stat: fs.Stats, contentType: string, range
   }
 
   const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
-  if (!match) {
+  if (!match || (!match[1] && !match[2])) {
     return new Response(null, {
       status: 416,
       headers: {

@@ -82,7 +82,7 @@ test("wires image groups through the native preview without replacing focus-safe
   const sidekickSource = await readFile(new URL("./SidekickDrawer.tsx", import.meta.url), "utf8");
   assert.match(inputSource, /<ImagePreview[\s\S]*images=\{attachedImages\.map\(\(image\) => image\.previewUrl\)\}[\s\S]*initialIndex=\{i\}/);
   assert.match(messageSource, /<ImagePreview[\s\S]*images=\{imageSources\}[\s\S]*initialIndex=\{index\}/);
-  assert.match(sidekickSource, /<ImagePreview[\s\S]*images=\{imageSources\}[\s\S]*initialIndex=\{index\}/);
+  assert.match(sidekickSource, /<SessionChatPanel[\s\S]*initialPrompt=/, "side sessions reuse the ordinary ChatWindow preview path");
   assert.match(messageSource, /const resultImages = resultContent\.filter/);
   assert.match(source, /activateNativeImagePreview/);
   assert.match(source, /deactivateNativeImagePreview/);

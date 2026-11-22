@@ -2354,7 +2354,7 @@ function safeNonNegativeInteger(value) {
 }
 
 const READER_STREAM_DIAGNOSTIC_KINDS = new Set([
-  "agent", "reader-events", "activity", "terminal", "file-watch", "ui-requests", "quick-ask", "provider-login",
+  "agent", "reader-events", "activity", "terminal", "file-watch", "ui-requests", "provider-login",
 ]);
 const READER_STREAM_DIAGNOSTIC_FIELDS = new Set([
   "kind", "sessionId", "holder", "openedAt", "connectedAt", "lastWriteAt", "droppedEvents", "queuedBytes",

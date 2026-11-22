@@ -18,6 +18,7 @@ import {
   type GitPorcelainEntry,
 } from "./git-status";
 import { hasParentDirectorySegment } from "./path-security";
+import { projectGitEnvironment } from "./git-environment.ts";
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 10_000;
@@ -27,7 +28,7 @@ async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFE
   const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
     timeout: GIT_TIMEOUT_MS,
     maxBuffer,
-    env: { ...process.env, LC_ALL: "C" },
+    env: projectGitEnvironment(),
   });
   return stdout;
 }

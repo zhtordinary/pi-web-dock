@@ -27,6 +27,7 @@ import { useSubagentVisibility, setSubagentVisibility } from "@/hooks/useSubagen
 import { SessionSubprojectMenu } from "./SessionSubprojectMenu";
 import { isSubprojectReorderDragBlocked, useSessionSubprojectPointerDrag } from "@/lib/session-subproject-pointer-dnd";
 import { lineageParentId } from "@/lib/session-lineage";
+import { isHiddenRelation } from "@/lib/session-family";
 export { ToolbarIconButton } from "./ToolbarIconButton";
 
 declare global {
@@ -1272,9 +1273,10 @@ export function SessionSidebar({ selectedSessionId, selectedSession: selectedSes
   );
   const visibleFilteredSessions = filterSubprojectItems(filteredSessions, selectedSubprojectHiddenIds);
   const visibleSubagentSessions = useMemo(
-    () => visibleFilteredSessions.filter((session) => session.id === selectedSessionId
-      || session.relation?.kind !== "subagent"
-      || visibleSubagentParentIds.has(session.relation.parentSessionId)),
+    () => visibleFilteredSessions.filter((session) => {
+      if (session.id === selectedSessionId || !isHiddenRelation(session.relation)) return true;
+      return session.relation.kind === "subagent" && visibleSubagentParentIds.has(session.relation.parentSessionId);
+    }),
     [selectedSessionId, visibleFilteredSessions, visibleSubagentParentIds],
   );
   const subagentParentIds = useMemo(

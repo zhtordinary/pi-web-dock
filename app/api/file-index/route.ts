@@ -7,6 +7,7 @@ import { isWindowsAbsolutePath } from "@/lib/paths";
 import { hasParentDirectorySegment } from "@/lib/path-security";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
 import { isAlwaysHiddenPath, isHiddenOutsideGit } from "@/lib/file-tree-visibility";
+import { projectGitEnvironment } from "@/lib/git-environment";
 
 const execFileAsync = promisify(execFile);
 
@@ -54,7 +55,7 @@ async function listWithGit(cwd: string, hideGitIgnored: boolean): Promise<FileLi
     const { stdout } = await execFileAsync(
       "git",
       ["-C", cwd, "-c", "core.fsmonitor=false", "ls-files", "--cached", "--others", ...ignoreArgs, "-z"],
-      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
+      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: projectGitEnvironment() },
     );
     const all = stdout.split("\0").filter((file) => file && !isAlwaysHiddenPath(file));
     if (all.length > GIT_HARD_CAP) {

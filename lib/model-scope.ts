@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import { resolveDefaultThinkingLevel } from "./thinking-level";
+import { isLegacyOpenAIProvider } from "./openai-provider-aliases";
 
 const THINKING_LEVEL_SUFFIXES = new Set<ThinkingLevel>([
   "off",
@@ -39,6 +40,11 @@ export interface ModelScopeResult {
   warnings: string[];
 }
 
+/** The provider/model order saved by the Models settings editor. */
+export interface ModelOrderConfig {
+  providers?: Record<string, unknown>;
+}
+
 export interface InitialModelScopeOptions {
   requestedModel?: { provider: string; modelId: string };
   defaultModel?: { provider: string; modelId: string };
@@ -50,6 +56,8 @@ export interface InitialModelScopeResult {
   model?: Model<Api>;
   thinkingLevel?: ThinkingLevel;
   scopedModels: ScopedModel[];
+  /** A retired default must be replaced by an explicit user selection. */
+  requiresModelSelection?: boolean;
 }
 
 function matchesModel(
@@ -105,6 +113,7 @@ export async function resolveVisibleModels(
     .filter((diagnostic) => (
       diagnostic.code !== "no-match"
       || scopedModels.length === 0
+      || isLegacyOpenAIProvider(diagnostic.pattern.replace(/^!/, "").split("/", 1)[0])
       || !isSuppressibleUnmatchedGlob(diagnostic.pattern)
     ))
     .map((diagnostic) => diagnostic.message);
@@ -135,12 +144,78 @@ export async function resolveVisibleModels(
 }
 
 /**
+ * Return model choices in the order saved by the Models settings editor.
+ * Models absent from that file keep their existing runtime order after the
+ * configured providers/models; filtering by enabledModels never changes it.
+ */
+export function orderSelectorModels(
+  scope: ModelScopeResult,
+  config: ModelOrderConfig = {},
+): Model<Api>[] {
+  const providerOrder = new Map<string, number>();
+  const modelOrder = new Map<string, Map<string, number>>();
+  for (const [provider, entry] of Object.entries(config.providers ?? {})) {
+    providerOrder.set(provider, providerOrder.size);
+    const models = entry && typeof entry === "object" && !Array.isArray(entry)
+      && Array.isArray((entry as { models?: unknown }).models)
+      ? (entry as { models: unknown[] }).models
+        .filter((model): model is { id: string } => (
+          model !== null && typeof model === "object" && !Array.isArray(model)
+          && typeof (model as { id?: unknown }).id === "string"
+        ))
+      : [];
+    modelOrder.set(provider, new Map(models.map((model, index) => [model.id, index])));
+  }
+
+  const originalProviderOrder = new Map<string, number>();
+  const originalModelOrder = new Map<string, number>();
+  scope.visible.forEach((model, index) => {
+    if (!originalProviderOrder.has(model.provider)) originalProviderOrder.set(model.provider, originalProviderOrder.size);
+    originalModelOrder.set(`${model.provider}\0${model.id}`, index);
+  });
+  const configuredProviderCount = providerOrder.size;
+  return [...scope.visible].sort((left, right) => {
+    const leftProviderOrder = providerOrder.get(left.provider);
+    const rightProviderOrder = providerOrder.get(right.provider);
+    const leftProviderRank = leftProviderOrder ?? configuredProviderCount + (originalProviderOrder.get(left.provider) ?? 0);
+    const rightProviderRank = rightProviderOrder ?? configuredProviderCount + (originalProviderOrder.get(right.provider) ?? 0);
+    if (leftProviderRank !== rightProviderRank) return leftProviderRank - rightProviderRank;
+
+    const ranks = modelOrder.get(left.provider);
+    if (ranks) {
+      const leftModelRank = ranks.get(left.id);
+      const rightModelRank = ranks.get(right.id);
+      const leftRank = leftModelRank ?? ranks.size + (originalModelOrder.get(`${left.provider}\0${left.id}`) ?? 0);
+      const rightRank = rightModelRank ?? ranks.size + (originalModelOrder.get(`${right.provider}\0${right.id}`) ?? 0);
+      if (leftRank !== rightRank) return leftRank - rightRank;
+    }
+    return (originalModelOrder.get(`${left.provider}\0${left.id}`) ?? 0)
+      - (originalModelOrder.get(`${right.provider}\0${right.id}`) ?? 0);
+  });
+}
+
+/** Apply the settings order to both selector data and SDK startup scope. */
+export function orderModelScope(
+  scope: ModelScopeResult,
+  config: ModelOrderConfig = {},
+): ModelScopeResult {
+  const visible = orderSelectorModels(scope, config);
+  if (scope.scopedModels.length === 0) return { ...scope, visible };
+  const scopedByKey = new Map(scope.scopedModels.map((scoped) => [`${scoped.model.provider}\0${scoped.model.id}`, scoped]));
+  const scopedModels = visible
+    .map((model) => scopedByKey.get(`${model.provider}\0${model.id}`))
+    .filter((scoped): scoped is ScopedModel => Boolean(scoped));
+  return { ...scope, visible, scopedModels };
+}
+
+/**
  * Select the model and thinking level used to create a new AgentSession.
  *
  * This mirrors pi's startup rule: prefer an explicit selection, otherwise use
  * the saved default when it is in scope, then the first resolver-ordered model.
- * A scoped-model thinking pin is applied unless the caller supplied an explicit
- * thinking level.
+ * An unavailable retired OpenAI default requires an explicit selection instead
+ * of silently choosing another provider. A scoped-model thinking pin is applied
+ * unless the caller supplied an explicit thinking level.
  */
 export function selectInitialModelScope(
   scope: ModelScopeResult,
@@ -148,6 +223,10 @@ export function selectInitialModelScope(
 ): InitialModelScopeResult {
   const requestedRef = options.requestedModel;
   const defaultRef = options.defaultModel;
+  if (!requestedRef && defaultRef && isLegacyOpenAIProvider(defaultRef.provider)
+    && !scope.visible.some((model) => matchesModel(model, defaultRef))) {
+    return { scopedModels: [...scope.scopedModels], requiresModelSelection: true };
+  }
   const requested = requestedRef
     ? scope.visible.find((model) => matchesModel(model, requestedRef))
     : undefined;

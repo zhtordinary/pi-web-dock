@@ -24,6 +24,7 @@ const {
   formatAsyncStatusDuration,
   formatAgentGroupLabel,
   collectAsyncStatusIds,
+  filterCoveredAsyncStatusRuns,
   mergeAsyncStatusModelMetadata,
 } = await jiti.import("./ExtensionWidgets.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
@@ -324,6 +325,47 @@ test("distinguishes same-label workflow and step nodes without deduplicating the
   assert.match(html, /id: step-1/);
 });
 
+test("hides only standalone roots covered by an exact active workflow identity", () => {
+  const snapshot = {
+    kind: "pi-subagents.async-status-snapshot",
+    version: 1,
+    omitted: { runs: 0, children: 0, byteLimitExceeded: false },
+    runs: [
+      {
+        id: "workflow-1",
+        kind: "workflow",
+        label: "custom-executor",
+        state: "running",
+        children: [{ id: "A1", kind: "step", label: "Execute A1", state: "running" }],
+      },
+      {
+        id: "child-1",
+        kind: "subagent",
+        label: "custom-executor",
+        state: "running",
+        children: [{ id: "step:0", kind: "step", label: "Execute A1", state: "running" }],
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    filterCoveredAsyncStatusRuns(snapshot, { "child-1": "workflow-1" }).map((run) => run.id),
+    ["workflow-1"],
+  );
+  assert.deepEqual(
+    filterCoveredAsyncStatusRuns(snapshot, { "child-1": "another-workflow" }).map((run) => run.id),
+    ["workflow-1", "child-1"],
+  );
+
+  const html = renderToStaticMarkup(
+    React.createElement(AsyncStatusSnapshotContent, {
+      snapshot,
+      childRootToWorkflow: { "child-1": "workflow-1" },
+    }),
+  );
+  assert.match(html, /id: workflow-1/);
+  assert.doesNotMatch(html, /id: child-1/);
+});
 
 test("scopes async metadata IDs by root run and preserves duplicate child identities", () => {
   const snapshot = {
@@ -361,7 +403,7 @@ test("falls back to plain AnsiText for malformed or object-valued fields without
   assert.equal(snapshot, null);
 
   const source = await (await import("node:fs/promises")).readFile(new URL("./ExtensionWidgets.tsx", import.meta.url), "utf8");
-  assert.match(source, /snapshot \? \([\s\S]*?<AsyncStatusSnapshotContent snapshot=\{snapshot\} modelMetadata=\{modelMetadata\} \/>[\s\S]*?: \([\s\S]*?<pre className="extension-widget-content">[\s\S]*?<AnsiText text=\{formatExtensionWidgetContent\(widget\.lines\)\} \/>/);
+  assert.match(source, /snapshot \? \([\s\S]*?<AsyncStatusSnapshotContent[\s\S]*?childRootToWorkflow=\{childRootToWorkflow\}[\s\S]*?\/>[\s\S]*?: \([\s\S]*?<pre className="extension-widget-content">[\s\S]*?<AnsiText text=\{formatExtensionWidgetContent\(widget\.lines\)\} \/>/);
   assert.equal(parseAsyncStatusSnapshot(["ordinary widget text"]), null);
 });
 

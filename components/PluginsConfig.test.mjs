@@ -181,6 +181,8 @@ test("shows built-in runtime extensions as an enabled, searchable read-only cate
       id: "pi-web-fast-mode",
       labelKey: "i18n.builtinRuntimeExtensionFastMode",
       descriptionKey: "i18n.builtinRuntimeExtensionFastModeDescription",
+      category: "capability",
+      sourcePath: "lib/fast-mode.ts",
       source: "reader",
       origin: "inline",
       scope: "session",
@@ -191,6 +193,8 @@ test("shows built-in runtime extensions as an enabled, searchable read-only cate
       id: "pi-web-session-control",
       labelKey: "i18n.builtinRuntimeExtensionSessionControl",
       descriptionKey: "i18n.builtinRuntimeExtensionSessionControlDescription",
+      category: "capability",
+      sourcePath: "lib/session-control.ts",
       source: "reader",
       origin: "inline",
       scope: "session",
@@ -201,6 +205,7 @@ test("shows built-in runtime extensions as an enabled, searchable read-only cate
 
   assert.equal(builtinRuntimeExtensionKey(extensions[0]), "builtin:pi-web-fast-mode");
   assert.deepEqual(filterBuiltinRuntimeExtensions(extensions, { searchQuery: "session_control", showEnabled: true, viewScope: "global" }), [extensions[1]]);
+  assert.deepEqual(filterBuiltinRuntimeExtensions(extensions, { searchQuery: "lib/fast-mode.ts", showEnabled: true, viewScope: "global" }), [extensions[0]]);
   assert.deepEqual(filterBuiltinRuntimeExtensions(extensions, { searchQuery: "", showEnabled: false, viewScope: "global" }), []);
   assert.deepEqual(filterBuiltinRuntimeExtensions(extensions, { searchQuery: "", showEnabled: true, viewScope: "project" }), []);
 
@@ -228,7 +233,12 @@ test("shows built-in runtime extensions as an enabled, searchable read-only cate
   assert.match(detail, /i18n\.builtinRuntimeExtensionCapabilities/);
   assert.match(detail, /extension\.capabilities\.map/);
   assert.match(detail, /i18n\.builtinRuntimeExtensionHint/);
+  assert.match(detail, /extension\.sourcePath/);
   assert.doesNotMatch(detail, /onAction|runAction|onToggle|fetch\(|<button/, "built-in runtime details stay read-only");
+  assert.match(source, /titleKey="i18n\.builtinRuntimeExtensions"/);
+  assert.match(source, /titleKey="i18n\.builtinRuntimeInfrastructure"/);
+  assert.match(source, /extension\.category === "capability"/);
+  assert.match(source, /extension\.category === "infrastructure"/);
 });
 
 test("finds a local package by its description as well as its name", () => {

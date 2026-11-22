@@ -7,6 +7,7 @@ import { matchesExpectedLeaf } from "@/lib/branch-navigation";
 import { localDeviceIdentity, readActivityConfig } from "@/lib/activity-peers";
 import { samePath } from "@/lib/paths";
 import { redactLiveValue } from "@/lib/live-agent-events";
+import { cwdMissingBody, missingCwdFromError } from "@/lib/missing-cwd";
 import { isApiRequestAllowed, hasJsonContentType } from "@/lib/request-security";
 import {
   controlRequestFingerprint,
@@ -162,9 +163,13 @@ export async function POST(
       }, { status: 404 });
     }
 
+    const selectedModel = body.type === "set_model" && typeof body.provider === "string" && typeof body.modelId === "string"
+      && [body.provider, body.modelId].every((value) => value.trim() && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value))
+      ? { provider: body.provider, modelId: body.modelId } : undefined;
     const { session } = await startRpcSession(id, filePath, undefined, {
       ...(toolNames !== undefined ? { toolNames } : {}),
       ...(requestedStrictToolAllowlist !== undefined ? { strictToolAllowlist: requestedStrictToolAllowlist } : {}),
+      ...(selectedModel ? { initialModel: selectedModel } : {}),
     });
     if (body.type === "initialize_runtime") await session.waitUntilReady?.();
     const result = await session.send(command);
@@ -179,8 +184,9 @@ export async function POST(
         ...("owner" in error ? { owner: error.owner } : {}),
       }, { status: 409 });
     }
+    const missingCwd = missingCwdFromError(error);
     return NextResponse.json({
-      error: redactLiveValue(error instanceof Error ? error.message : String(error)),
+      ...(missingCwd ? cwdMissingBody(missingCwd) : { error: redactLiveValue(error instanceof Error ? error.message : String(error)) }),
       ...(commandType === "extension_ui_response" && error && typeof error === "object" && "code" in error ? { code: String(error.code), accepted: false } : {}),
       ...(commandType === "clear_queue" && error && typeof error === "object" && "code" in error ? {
         code: String(error.code),

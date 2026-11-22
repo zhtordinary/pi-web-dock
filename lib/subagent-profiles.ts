@@ -12,6 +12,7 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
 import { readBuiltInSubagentOverride } from "./subagent-settings";
 import { readPiSubagentStoredOverride } from "./pi-subagent-settings";
+import { getProjectTrustStatus } from "./project-trust";
 
 import {
   BUILTIN_TOOLS,
@@ -33,6 +34,8 @@ export {
 export interface SubagentProfileContext {
   /** Provider from a verified parent-session runtime snapshot. */
   parentProvider?: string;
+  /** The live parent-session trust decision, when one was verified; otherwise read from trust.json. */
+  projectTrusted?: boolean;
 }
 
 type NativeOverride = {
@@ -217,12 +220,12 @@ function findProjectRoot(cwd: string): string | undefined {
     : nearest;
 }
 
-function nativeSettingsFor(cwd: string, context: SubagentProfileContext): NativeSettings {
+function nativeSettingsFor(cwd: string, context: SubagentProfileContext, projectTrusted: boolean): NativeSettings {
   const userPath = join(getAgentDir(), "settings.json");
   const projectRoot = findProjectRoot(cwd);
   const projectPath = projectRoot ? join(projectRoot, ".pi", "settings.json") : undefined;
   const user = parseNativeSettings(userPath, context.parentProvider, "user");
-  const project = projectPath ? parseNativeSettings(projectPath, context.parentProvider, "project") : {
+  const project = projectTrusted && projectPath ? parseNativeSettings(projectPath, context.parentProvider, "project") : {
     overrides: {},
     overrideSources: {},
   } satisfies NativeSettings;
@@ -398,7 +401,8 @@ function getPackageBuiltinDir(): string {
 }
 
 function listSources(cwd: string, context: SubagentProfileContext): SubagentProfile[] {
-  const nativeSettings = nativeSettingsFor(cwd, context);
+  const projectTrusted = context.projectTrusted ?? getProjectTrustStatus(cwd, getAgentDir()).trusted;
+  const nativeSettings = nativeSettingsFor(cwd, context, projectTrusted);
   const result: SubagentProfile[] = BUILTIN_PROFILES.map((profile) => withReaderBuiltinOverride({ ...profile, tools: [...profile.tools] }));
   result.push(...scanProfileDir(getPackageBuiltinDir(), "runtime", cwd, nativeSettings));
 
@@ -410,7 +414,14 @@ function listSources(cwd: string, context: SubagentProfileContext): SubagentProf
 
   const projectDir = join(resolve(cwd), ".pi", "agents");
   result.push(...scanProfileDir(projectDir, "project", cwd));
-  return result;
+  return result.map((profile) => {
+    const trustGated = profile.scope === "project" || profile.scope === "workspace";
+    return {
+      ...profile,
+      executionAllowed: trustGated ? projectTrusted : true,
+      ...(trustGated ? { trustRequired: true } : {}),
+    };
+  });
 }
 
 export function listSubagentProfiles(cwd: string, context: SubagentProfileContext = {}): SubagentProfile[] {
@@ -419,7 +430,10 @@ export function listSubagentProfiles(cwd: string, context: SubagentProfileContex
 
 export function getResolvedSubagentProfiles(cwd: string, context: SubagentProfileContext = {}): SubagentProfile[] {
   const map = new Map<string, SubagentProfile>();
-  for (const profile of listSources(cwd, context)) map.set(profile.name.toLowerCase(), profile);
+  for (const profile of listSources(cwd, context)) {
+    const key = profile.name.toLowerCase();
+    if (!map.has(key) || profile.executionAllowed !== false) map.set(key, profile);
+  }
   return [...map.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 

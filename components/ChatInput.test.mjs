@@ -30,6 +30,10 @@ const globalsCssSource = await readFile(new URL("../app/globals.css", import.met
 const chatWindowSourceForTest = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 const useAgentSessionSourceForTest = await readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8");
 
+test("keeps the server-provided model order in the main picker", () => {
+  assert.doesNotMatch(chatInputSource, /sort\(compareModelOptions\)/);
+});
+
 test("inserts newline at the current selection without losing surrounding draft", () => {
   assert.deepEqual(insertAtSelection("alpha beta", 5, 5, "\n"), {
     value: "alpha\n beta",

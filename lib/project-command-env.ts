@@ -1,16 +1,20 @@
 import {
   createBashToolDefinition,
   createLocalBashOperations,
+  createLocalPowerShellOperations,
+  createPowerShellToolDefinition,
   getAgentDir,
   type BashOperations,
   type InlineExtension,
   type LoadExtensionsResult,
 } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
-import { BUILTIN_RUNTIME_EXTENSION_NAMES } from "./builtin-runtime-extensions";
+import { BUILTIN_RUNTIME_EXTENSION_NAMES } from "./builtin-runtime-extensions.ts";
 
 const HOST_EXTENSION_NAME = BUILTIN_RUNTIME_EXTENSION_NAMES.projectCommandEnvironment;
 const HOST_EXTENSION_PATH = `<inline:${HOST_EXTENSION_NAME}>`;
+const POWERSHELL_HOST_EXTENSION_NAME = BUILTIN_RUNTIME_EXTENSION_NAMES.projectCommandPowerShell;
+const POWERSHELL_HOST_EXTENSION_PATH = `<inline:${POWERSHELL_HOST_EXTENSION_NAME}>`;
 // Pi's own abort path settles well within this once the process tree is gone.
 const ABORT_SETTLE_GRACE_MS = 1000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -172,21 +176,48 @@ export function createProjectCommandBashExtension(options: {
   };
 }
 
-export function preferUserBashExtension(base: LoadExtensionsResult): LoadExtensionsResult {
-  const hostExtensionIndex = base.extensions.findIndex((extension) => extension.path === HOST_EXTENSION_PATH);
+export function createProjectCommandPowerShellExtension(options: { cwd: string }): InlineExtension {
+  return {
+    name: POWERSHELL_HOST_EXTENSION_NAME,
+    hidden: true,
+    factory: (pi) => {
+      pi.registerTool({
+        ...createPowerShellToolDefinition(options.cwd),
+        defaultActive: false,
+        execute(toolCallId, params, signal, onUpdate, context) {
+          const executionDefinition = createPowerShellToolDefinition(options.cwd, {
+            operations: createProjectCommandBashOperations({ localOperations: createLocalPowerShellOperations() }),
+          });
+          return executionDefinition.execute(toolCallId, params, signal, onUpdate, context);
+        },
+      });
+    },
+  };
+}
+
+function preferUserToolExtension(base: LoadExtensionsResult, hostPath: string, toolName: string): LoadExtensionsResult {
+  const hostExtensionIndex = base.extensions.findIndex((extension) => extension.path === hostPath);
   if (hostExtensionIndex < 0) return base;
 
-  const userBashOwner = base.extensions
+  const userToolOwner = base.extensions
     .slice(0, hostExtensionIndex)
-    .find((extension) => extension.tools.has("bash"));
-  if (!userBashOwner) return base;
+    .find((extension) => extension.tools.has(toolName));
+  if (!userToolOwner) return base;
 
   return {
     ...base,
     extensions: base.extensions.filter((_, index) => index !== hostExtensionIndex),
     errors: base.errors.filter((error) => !(
-      error.path === HOST_EXTENSION_PATH
-      && error.error === `Tool "bash" conflicts with ${userBashOwner.path}`
+      error.path === hostPath
+      && error.error === `Tool "${toolName}" conflicts with ${userToolOwner.path}`
     )),
   };
+}
+
+export function preferUserBashExtension(base: LoadExtensionsResult): LoadExtensionsResult {
+  return preferUserToolExtension(base, HOST_EXTENSION_PATH, "bash");
+}
+
+export function preferUserPowerShellExtension(base: LoadExtensionsResult): LoadExtensionsResult {
+  return preferUserToolExtension(base, POWERSHELL_HOST_EXTENSION_PATH, "powershell");
 }

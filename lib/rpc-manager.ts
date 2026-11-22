@@ -10,15 +10,8 @@ import {
   type Model as PiModel,
   type ModelsSimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { createAgentSessionFromServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type AgentSession, type ExtensionAPI, type InlineExtension, type SessionEntry as PiSessionEntry, type SessionMessageEntry as NativeSessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import { createInitialSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import { QuickAskRuntime, type QuickAskAgentInput, type QuickAskAgentSession } from "./quick-ask-runtime";
-import { quickAskCachedMcpSummaries } from "./quick-ask-session";
+import { createAgentSessionFromServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type AgentSession, type SessionEntry as PiSessionEntry, type SessionMessageEntry as NativeSessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { createReaderAgentSessionServices, invalidateModelRuntimeWithExtensions } from "./model-runtime";
-import { QuickAskError } from "./quick-ask-context";
-import { projectSessionQuickAsks as projectSessionQuickAsksForFork } from "./quick-ask-storage";
-import { createQuickAskBranch, findQuickAskBranch, materializeQuickAskBranch, materializeQuickAskTransfer, quickAskItems, quickAskTransferState,
-  QUICK_ASK_TRANSFER_PENDING, QUICK_ASK_TRANSFER, type QuickAskForkResult, type QuickAskScope } from "./quick-ask-log";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
@@ -84,12 +77,15 @@ import {
   type QuestionAnalysisJobView,
   type QuestionDraftEntryData,
 } from "./question-analysis-jobs";
-import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
+import { orderModelScope, resolveVisibleModels, selectInitialModelScope, type InitialModelScopeResult } from "./model-scope";
+import { isLegacyOpenAIProvider } from "./openai-provider-aliases";
 import { resolveDefaultThinkingLevel } from "./thinking-level";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
+  createProjectCommandPowerShellExtension,
   preferUserBashExtension,
+  preferUserPowerShellExtension,
 } from "./project-command-env";
 import {
   readSessionThinkingLevel,
@@ -98,13 +94,15 @@ import {
   THINKING_LEVEL_NAMES,
 } from "./rpc-session-tool-policy";
 export { readSessionThinkingLevel, resolveActiveToolNames } from "./rpc-session-tool-policy";
-import { createSessionControlExtension, isProtectedSideAskControl } from "./session-control";
-import { SIDE_ASK_CHILD, SIDE_ASK_NATIVE_CHILD, SIDE_ASK_PEER_OWNERSHIP, preferSideAskSessionControl, readSideAskPeerOwnership, sideAskChildReference, type SideAskPeerOwnership } from "./side-ask-ownership";
+import { createSessionControlExtension } from "./session-control";
+import { readSideRelation, sideToolNames } from "./side-session";
+import { createPromptCacheLineageExtension, readPromptCacheLineage } from "./prompt-cache-lineage";
 import { drainLocalOwnerOutboxes, persistSessionWaitEvent, persistSessionUiRequestEvent, invalidateSessionUiRequestWaits } from "./session-waits";
 import { drainPendingSessionWakes } from "./session-control-wake-queue";
 import { createSubagentExtension, preferPiWebSubagentExtension, type SubagentExecution, type SubagentExtensionRuntime } from "./subagent-extension";
 import { createSubagentSkillsBinding } from "./subagent-skills";
 import {
+  getSubagentExactSystemPrompt,
   hasSubagentResourceSnapshot,
   listSubagentProfiles,
   readSubagentSessionResources,
@@ -120,7 +118,6 @@ import {
 } from "./subagent-runtime";
 import {
   createRemoteClaudeHostGuardExtension,
-  associateRemoteClaudeProviderSession as associateRemoteClaudeProviderHostSession,
   installRemoteClaudeHost,
   REMOTE_CLAUDE_PROVIDER_ID,
   refreshRemoteClaudeHost,
@@ -150,6 +147,8 @@ import { assignSession, subprojectForSession } from "./subproject-state";
 import { resolveProject } from "./worktree";
 import { assertReaderExecutionCwd, readerRuntimeProjectRoot } from "./reader-execution-cwd";
 import { createCompactionModelExtension } from "./compaction-model-extension";
+import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
+import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import { createImageGenerationOutputExtension } from "./image-generation-output-extension";
 import { appendSessionFastMode, createFastModeExtension, fastModeStatus, isFastModeSupported, parseFastModeSelection, readSessionFastMode } from "./fast-mode";
 import { applyRuntimeCompactionOverride, buildTransientSessionRecreationOptions } from "./session-runtime";
@@ -170,7 +169,7 @@ import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { createPiWebBuiltinExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
 import { mcpPromptPreparation, type McpCommandCandidate } from "./mcp-command";
-import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension, isMcpTool, isReadOnlySelection, readOnlyMcpBlockReason } from "./mcp-read-only-policy";
+import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension, isMcpTool } from "./mcp-read-only-policy";
 import { getModelThinkingDefaults, readModelsConfig } from "./models-config-store";
 import {
   agentEndErrorMessage,
@@ -401,10 +400,7 @@ type ActiveCustomUi = {
   width: number;
   resolve: (value: unknown) => void;
   settled: boolean;
-  sideAskRunId?: string;
-  sideAskLabel?: string;
 };
-type SideAskUiOwner = { signal: AbortSignal; runId: string; label: string };
 
 type ExtensionUiRequestBody = Record<string, unknown> & {
   method: ExtensionUiRequest["method"];
@@ -424,6 +420,7 @@ type ExtensionCommandContextActionsLike = {
 type ExtensionBindingOptions = {
   forceEmptySystemPrompt?: boolean;
   uiContext?: ExtensionUiContextLike;
+  afterSessionStart?: () => Promise<void>;
 };
 
 // Pi 0.84 exposes Agent.continue() but AgentSession does not yet expose a
@@ -657,78 +654,6 @@ export async function forkPersistedSessionFromFile(
   });
 }
 
-/** Each cold write phase joins runtime admission and uses the current source owner. */
-export async function forkQuickAskSession(
-  sourceSessionId: string, sessionFile: string, requestedScope: QuickAskScope, targetId?: string, inferThread = false,
-): Promise<QuickAskForkResult> {
-  for (let starting = getLocks().get(sourceSessionId); starting; starting = getLocks().get(sourceSessionId)) {
-    await starting;
-  }
-  const owner = getRpcSession(sourceSessionId);
-  if (owner?.isShuttingDown()) throw new QuickAskError("Session is shutting down", 409);
-  const sourceOwnership = owner?.isAlive() ? undefined : acquireSessionRuntimeOwnership(sessionFile);
-  let created: QuickAskForkResult;
-  let sourceCwd: string;
-  const scope = { ...requestedScope };
-  try {
-    const source = owner?.isAlive() ? owner.inner.sessionManager : SessionManager.open(sessionFile);
-    if (source.getSessionId() !== sourceSessionId || source.getSessionFile() !== sessionFile) {
-      throw new QuickAskError("Side Ask source identity changed", 409);
-    }
-    const entries = source.getEntries();
-    if (targetId && inferThread) {
-      const target = projectSessionQuickAsksForFork(entries).find((item) => item.id === targetId
-        && (item.data.branchId ?? item.branchId ?? "main") === scope.branchId);
-      if (!target) throw new QuickAskError("Quick Ask fork point not found", 404);
-      scope.threadId = target.data.threadId ?? target.threadId ?? "default";
-    }
-    if (owner?.isAlive()) return owner.getQuickAskRuntime().fork(scope, targetId);
-    const transferred = !targetId ? quickAskTransferState(entries, scope) : undefined;
-    if (transferred?.status === "completed") return transferred.result;
-    if (!targetId) created = materializeQuickAskTransfer(source, scope, (type, data) => {
-      source.appendCustomEntry(type, data);
-      invalidateSessionReadCache(sessionFile);
-    });
-    else {
-      const items = quickAskItems(entries, scope);
-      const index = items.findIndex((item) => item.id === targetId);
-      if (index < 0) throw new QuickAskError("Quick Ask fork point not found", 404);
-      const branch = findQuickAskBranch(entries, scope) ?? createQuickAskBranch(entries, scope, source.getLeafId());
-      created = materializeQuickAskBranch(source, branch, items.slice(0, index + 1), targetId);
-    }
-    invalidateSessionReadCache(sessionFile);
-    cacheSessionPath(created.newSessionId, created.newSessionPath);
-    sourceCwd = source.getCwd();
-  } finally { sourceOwnership?.release(); }
-  const inherited = await inheritSubprojectAssignment(sourceSessionId, created.newSessionId, sourceCwd);
-  const result = { ...created, ...(!inherited ? { subprojectAssignmentFailed: true } : {}) };
-  if (!targetId) {
-    // Inheritance yields: a main runtime may now own a newer manager/leaf. Join
-    // its admission before choosing a writer; never append through `source`.
-    for (let starting = getLocks().get(sourceSessionId); starting; starting = getLocks().get(sourceSessionId)) {
-      await starting;
-    }
-    const currentOwner = getRpcSession(sourceSessionId);
-    if (currentOwner?.isShuttingDown()) throw new QuickAskError("Session is shutting down", 409);
-    const completionOwnership = currentOwner?.isAlive() ? undefined : acquireSessionRuntimeOwnership(sessionFile);
-    try {
-      const currentSource = currentOwner?.isAlive() ? currentOwner.inner.sessionManager : SessionManager.open(sessionFile);
-      if (currentSource.getSessionId() !== sourceSessionId || currentSource.getSessionFile() !== sessionFile) {
-        throw new QuickAskError("Side Ask source identity changed", 409);
-      }
-      // No await between owner selection and these appends: a later startup must
-      // open after both records, while an admitted runtime retains its own leaf.
-      if (currentOwner?.isAlive()) currentOwner.recordQuickAskTransfer(scope, result);
-      else {
-        currentSource.appendCustomEntry(QUICK_ASK_TRANSFER_PENDING, { ...scope, result });
-        currentSource.appendCustomEntry(QUICK_ASK_TRANSFER, { ...scope, result });
-        invalidateSessionReadCache(sessionFile);
-      }
-    } finally { completionOwnership?.release(); }
-  }
-  invalidateSessionListCache();
-  return result;
-}
 
 export async function inheritSubprojectAssignment(sourceSessionId: string, targetSessionId: string, cwd: string): Promise<boolean> {
   try {
@@ -894,9 +819,6 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
-  private sideAskRuntime: QuickAskRuntime | undefined;
-  private sideAskTailOpen = false;
-  private sideAskWriteFailed = false;
   private disposed = false;
   private destroyCallbackInvoked = false;
   private shutdownEventEmitted = false;
@@ -954,11 +876,8 @@ export class AgentSessionWrapper {
   private managedSettingPending = false;
   private readonly liveEventRecords: LiveAgentEventRecord[] = [];
   private readonly strictToolAllowlist: boolean;
+  private readonly exactSystemPrompt?: () => string;
   readonly agentDir?: string;
-  readonly protectedSessionId?: string;
-  readonly sideAskGuard?: InlineExtension;
-  readonly sideAskControl?: InlineExtension;
-  readonly sideAskPeerOwnership?: SideAskPeerOwnership;
   private preserveUnattendedStateOnShutdown = false;
   private readonly runtimeOwnership?: SessionRuntimeOwnership;
   private bashExecution?: Promise<unknown>;
@@ -966,8 +885,6 @@ export class AgentSessionWrapper {
   private stopAllPromise: ReturnType<typeof stopSessionExecution> | null = null;
   private stopAllRequested = false;
   private readonly stopBackgroundRun?: (runId: string) => Promise<void>;
-  private readonly createQuickAskAgent: (input: QuickAskAgentInput) => Promise<QuickAskAgentSession>;
-  private sideAskUiGeneration = 0;
   private projectTrusted?: boolean;
   private restoreStoppedCustomMessageAdmission: (() => void) | null = null;
 
@@ -975,25 +892,17 @@ export class AgentSessionWrapper {
     mcpHost?: Pick<McpHost, "prepareForPrompt" | "dispose">;
     remoteClaudeHost?: RemoteClaudeHostBinding;
     strictToolAllowlist?: boolean;
+    exactSystemPrompt?: () => string;
     skillRuntimeContext?: RuntimeSkillPolicyContext;
     stopBackgroundRun?: (runId: string) => Promise<void>;
     runtimeOwnership?: SessionRuntimeOwnership;
     agentDir?: string;
-    createQuickAskAgent?: (input: QuickAskAgentInput) => Promise<QuickAskAgentSession>;
     projectTrusted?: boolean;
-    protectedSessionId?: string;
-    sideAskGuard?: InlineExtension;
-    sideAskControl?: InlineExtension;
-    sideAskPeerOwnership?: SideAskPeerOwnership;
   } = {}) {
     this.agentDir = mcpOptions.agentDir;
-    this.sideAskPeerOwnership = mcpOptions.sideAskPeerOwnership;
-    this.protectedSessionId = mcpOptions.protectedSessionId;
-    this.sideAskGuard = mcpOptions.sideAskGuard;
-    this.sideAskControl = mcpOptions.sideAskControl;
+    this.exactSystemPrompt = mcpOptions.exactSystemPrompt;
     this.runtimeOwnership = mcpOptions.runtimeOwnership;
     this.projectTrusted = mcpOptions.projectTrusted;
-    this.createQuickAskAgent = mcpOptions.createQuickAskAgent ?? ((input) => this.createIsolatedQuickAskAgent(input));
     const persistedCompaction = readSessionAutoCompaction(inner.sessionManager?.getEntries?.() ?? []);
     if (persistedCompaction !== undefined) this.setAutoCompactionEnabledRuntimeOnly(persistedCompaction);
     this.projectSkillRuntime = projectSkillRuntime;
@@ -1053,375 +962,10 @@ export class AgentSessionWrapper {
     return this.inner.sessionManager.getCwd();
   }
 
-  peekQuickAskRuntime(): QuickAskRuntime | undefined {
-    return this.sideAskRuntime;
-  }
-
-  /** Side Asks are not main-session execution: Stop All leaves them running and only closing the session ends them. */
-  hasActiveSideAsk(): boolean {
-    return this.sideAskRuntime?.hasActiveRun() === true;
-  }
-
-  private async createIsolatedQuickAskAgent(input: QuickAskAgentInput): Promise<QuickAskAgentSession> {
-    const cwd = this.cwd;
-    const agentDir = this.agentDir ?? getAgentDir();
-    const trust = getProjectTrustStatus(cwd, agentDir);
-    if (this.projectTrusted !== undefined && trust.trusted !== this.projectTrusted) {
-      throw new QuickAskError("Project trust changed; reload the source session before starting a Side Ask", 409);
-    }
-    const parent = this.inner as unknown as Pick<AgentSession, "getCallableToolNames" | "getAllTools">;
-    if (typeof parent.getCallableToolNames !== "function") throw new QuickAskError("Side Ask tool scope is unavailable", 503);
-    const activeTools = [...this.inner.getActiveToolNames()];
-    const activeSet = new Set(activeTools);
-    const requiredNamespaces = new Set(parent.getAllTools().flatMap((tool) =>
-      activeSet.has(tool.name) && isMcpTool(tool) && tool.namespace?.name ? [tool.namespace.name] : []));
-    const allowedTools = new Set([...activeTools, ...parent.getCallableToolNames()]);
-    const peerOwnership: SideAskPeerOwnership = { version: 1, sourceSessionId: this.sessionId,
-      activeTools, callableTools: [...allowedTools] };
-    const sideAskControl = createSessionControlExtension({ protectedSessionId: this.sessionId,
-      createSession: (request) => createDurableRpcSession(request, { agentDir, sideAskPeerOwnership: peerOwnership }) });
-    const sourcePaths = new Set(this.inner.resourceLoader.getExtensions().extensions.map((extension) => extension.path));
-    const resources = readValidSubagentResources(this.inner.sessionManager.getEntries() as unknown as SessionEntry[]);
-    const needsBuiltins = [...sourcePaths].some((path) => path.startsWith("builtin:") || path === "<inline:pi-web-mcp-host>");
-    const builtinResources = needsBuiltins ? await createPiWebBuiltinExtensions({ agentDir }) : undefined;
-    const sideStopBridge = createSubagentStopBridge();
-    let services: Awaited<ReturnType<typeof createReaderAgentSessionServices>> | undefined;
-    let child: AgentSession | undefined;
-    let remote: RemoteClaudeHostBinding | undefined;
-    let host: HostSession | undefined;
-    let disposed = false;
-    const work = new Set<Promise<unknown>>();
-    const backgroundIds = new Set<string>();
-    const track = (promise: Promise<unknown>) => {
-      work.add(promise);
-      void promise.then(() => work.delete(promise), () => work.delete(promise));
-    };
-    const trackExecution = (execution: SubagentExecution) => {
-      if (execution.run.runInBackground) {
-        backgroundIds.add(execution.run.sessionId);
-        track(execution.completion);
-        void execution.completion.then(() => backgroundIds.delete(execution.run.sessionId), () => backgroundIds.delete(execution.run.sessionId));
-        if (input.signal.aborted) abortBackground();
-      }
-      return execution;
-    };
-    const abortBackground = () => {
-      for (const id of backgroundIds) void SUBAGENT_CONTROLLER.abort(id, child as never).catch(() => undefined);
-    };
-    const waitForOwnedWork = async () => {
-      while (work.size) {
-        await Promise.allSettled([...work]);
-        await Promise.resolve();
-      }
-    };
-    const recordSideAskChild = (sessionId: string, sessionPath: string) => {
-      if (!child) throw new Error("Side Ask child owner is unavailable");
-      const reference = sideAskChildReference(sessionId, sessionPath, this.sessionFile);
-      this.appendSideAskRecord(SIDE_ASK_CHILD, reference, true);
-      child.sessionManager.appendCustomEntry(SIDE_ASK_NATIVE_CHILD, reference);
-    };
-    const sideSubagents: SubagentExtensionRuntime = { ...SUBAGENT_CONTROLLER.extensionRuntime,
-      start: async (request) => {
-        const execution = await SUBAGENT_CONTROLLER.extensionRuntime.start(request);
-        try {
-          const wrapper = getRpcSession(execution.run.sessionId);
-          if (!wrapper) throw new Error("Side Ask child runtime is unavailable");
-          await wrapper.waitUntilReady();
-          const releaseUi = wrapper.bindSideAskUiContext(this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }));
-          void execution.completion.then(releaseUi, releaseUi);
-        } catch (error) {
-          await SUBAGENT_CONTROLLER.abort(execution.run.sessionId, child as never).catch(() => undefined);
-          await execution.completion;
-          throw error;
-        }
-        return trackExecution(execution);
-      },
-      resume: async (request) => {
-        const existing = getRpcSession(request.sessionId);
-        if (!existing?.isAlive() || !existing.inner.resourceLoader.getExtensions().extensions.some((extension) => extension.path === "<inline:pi-web-side-ask-control-guard>")) {
-          throw new Error("Side Ask can resume only a live child with its isolated permission guard");
-        }
-        const previous = await SUBAGENT_CONTROLLER.get(request.sessionId, request.parentContext);
-        if (!previous || previous.parentSessionId !== request.parentContext.sessionManager.getSessionId() || existing.isRunning()) {
-          throw new Error("Side Ask child is not idle or belongs to another topic");
-        }
-        await existing.waitUntilReady();
-        const releaseUi = existing.bindSideAskUiContext(this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }));
-        try {
-          const execution = await SUBAGENT_CONTROLLER.extensionRuntime.resume(request);
-          void execution.completion.then(releaseUi, releaseUi);
-          return trackExecution(execution);
-        } catch (error) { releaseUi(); throw error; }
-      },
-      notifyParent: (run) => {
-        const pending = SUBAGENT_CONTROLLER.extensionRuntime.notifyParent(run);
-        track(pending);
-        return pending;
-      },
-    };
-    input.signal.addEventListener("abort", abortBackground);
-    const dispose = async () => {
-      if (disposed) return;
-      disposed = true;
-      abortBackground();
-      await waitForOwnedWork();
-      input.signal.removeEventListener("abort", abortBackground);
-      if (child && host && SIDE_ASK_SUBAGENT_HOSTS.get(child.sessionId) === host) SIDE_ASK_SUBAGENT_HOSTS.delete(child.sessionId);
-      revokeRemoteClaudeHost(remote);
-      try { builtinResources?.mcpHost?.dispose(); }
-      finally {
-        if (child) {
-          try { await child.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
-          finally { child.dispose(); }
-        } else services?.resourceLoader.getExtensions().runtime.invalidate();
-      }
-    };
-    try {
-      if (input.signal.aborted) throw new QuickAskError("Side Ask was stopped", 499);
-      const baseSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: trust.trusted });
-      const pluginSettings = createProjectPluginSettingsManager(baseSettings, { cwd, agentDir });
-      const resolvedEntries = await resolveGlobalSkillStateEntries(cwd, agentDir, baseSettings, pluginSettings);
-      const entries = structuredClone((this.skillRuntimeContext?.entries ?? resolvedEntries) as typeof resolvedEntries);
-      const projectRuntime = this.projectSkillRuntime
-        ? { entries, states: { ...this.projectSkillRuntime.states } } satisfies ProjectSkillRuntime : undefined;
-      const skillContext: RuntimeSkillPolicyContext = { ...this.skillRuntimeContext, entries,
-        ...(this.skillRuntimeContext?.states ? { states: { ...this.skillRuntimeContext.states } } : {}),
-        ...(this.skillRuntimeContext?.catalogSkills ? { catalogSkills: [...this.skillRuntimeContext.catalogSkills] } : {}) };
-      const settings = projectRuntime
-        ? createProjectSkillSettingsManager(pluginSettings, projectRuntime, { cwd, agentDir }) : pluginSettings;
-      // Side Ask keeps the source session's normal compaction and retry policy.
-      const skillBinding = resources ? createSubagentSkillsBinding({ loadSkills: resources.loadSkills,
-        skills: permittedSubagentSkillNames(resources.skills, skillContext), exactSystemPrompt: resources.exactSystemPrompt }) : undefined;
-      const originalSkills = skillBinding?.loaderOptions.skillsOverride;
-      const childSkills = resources?.loadSkills && skillBinding
-        ? ((base: Parameters<NonNullable<typeof originalSkills>>[0]) => {
-            const projected = originalSkills ? originalSkills(base) : base;
-            return { ...projected, skills: filterRuntimeSkills(projected.skills as RuntimeSkillLike[], skillContext) as typeof projected.skills };
-          }) : undefined;
-      const childRef: { current?: AgentSessionLike } = {};
-      const builtinNames = new Set<string>([...(resources?.codemode ? ["codemode"] : []),
-        ...(resources?.mcp ? ["tool-search", "mcp", "pi-web-mcp-host"] : [])]);
-      const policy = { name: "pi-web-side-ask-policy", hidden: true, factory: (pi: ExtensionAPI) => {
-        pi.on("tool_call", (event, ctx) => {
-          if (event.toolName === "session_control" && isProtectedSideAskControl(event.input, ctx.sessionManager.getSessionId(), this.sessionId)) {
-            return { block: true, reason: "Cannot control the source session or approve its Side Ask requests" };
-          }
-          const current = new Set([...this.inner.getActiveToolNames(), ...parent.getCallableToolNames()]);
-          if (input.signal.aborted || !allowedTools.has(event.toolName) || !current.has(event.toolName)) {
-            return { block: true, reason: "Tool is outside the source session's current Side Ask scope" };
-          }
-          const parentTool = parent.getAllTools().find((tool) => tool.name === event.toolName);
-          const childTool = pi.getAllTools().find((tool) => tool.name === event.toolName);
-          if ((parentTool && isMcpTool(parentTool)) || (childTool && isMcpTool(childTool))) {
-            const selection = readSessionToolSelection(this.inner.sessionManager.getEntries() as unknown as SessionEntry[]);
-            if (isReadOnlySelection(selection)
-              && (parentTool?.annotations?.readOnlyHint !== true || childTool?.annotations?.readOnlyHint !== true)) {
-              return { block: true, reason: readOnlyMcpBlockReason(event.toolName) };
-            }
-          }
-        });
-      } };
-      const sideResourceOptions = resources ? subagentExtensionLoaderOptions(resources) : undefined;
-      services = await createReaderAgentSessionServices({ cwd, agentDir, settingsManager: settings, modelRuntimeSignal: input.signal,
-        resourceLoaderOptions: resources ? {
-          ...sideResourceOptions, ...(skillBinding?.loaderOptions ?? {}),
-          ...(resources.loadExtensions && allowedTools.has("session_control") ? { extensionsOverride: (base) =>
-            preferSideAskSessionControl(sideResourceOptions?.extensionsOverride?.(base) ?? base) } : {}),
-          ...(childSkills ? { skillsOverride: childSkills } : {}), noPromptTemplates: true, noThemes: true, noContextFiles: true,
-          appendSystemPrompt: resources.appendSystemPrompt,
-          extensionFactories: [createCompactionModelExtension(settings),
-            ...(resources.loadExtensions && allowedTools.has("session_control") ? [sideAskControl] : []),
-            ...(sourcePaths.has("<inline:pi-web-image-generation-output>") ? [createImageGenerationOutputExtension()] : []),
-            ...(builtinResources?.extensions.filter((extension) => builtinNames.has(extension.name)) ?? []),
-            ...(skillBinding?.loaderOptions.extensionFactories ?? []), createRemoteClaudeHostGuardExtension(),
-            ...(resources.mcp ? [createSubagentMcpPolicyExtension(() => ({
-              tools: childRef.current?.getActiveToolNames() ?? resources.tools,
-              ...(resources.allExtensionTools ? { allExtensionTools: true } : {}),
-            }))] : []), policy],
-        } : this.strictToolAllowlist ? {
-          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-          extensionFactories: [createCompactionModelExtension(settings), policy],
-        } : {
-          skillsOverride: (base) => {
-            const applied = applySkillInvocationOverrides(base.skills, entries, projectRuntime?.states ?? {},
-              projectRuntime ? "project" : "global", new Map(base.skills.map((skill) => [resolve(skill.filePath), true])));
-            return { ...base, skills: filterRuntimeSkills(applied as RuntimeSkillLike[], skillContext) as typeof base.skills };
-          },
-          extensionFactories: [createCompactionModelExtension(settings), createImageGenerationOutputExtension(),
-            ...(builtinResources?.extensions.filter((extension) => sourcePaths.has(`builtin:${extension.name}`)
-              || sourcePaths.has(`<inline:${extension.name}>`)) ?? []), createReadOnlyMcpPolicyExtension(() =>
-              readSessionToolSelection(this.inner.sessionManager.getEntries() as unknown as SessionEntry[])), createFastModeExtension({ mode: this.fastModeState.mode }),
-            createProjectCommandBashExtension({ cwd, settings }), sideAskControl, sideStopBridge.extension,
-            createSubagentExtension(sideSubagents, () => listSubagentProfiles(cwd, agentDir),
-              () => isBuiltInSubagentsEnabled(getSubagentSettingsPath(agentDir))),
-            createRemoteClaudeHostGuardExtension(), policy],
-          extensionsOverride: (base) => preferSideAskSessionControl(preferUserBashExtension(preferPiWebSubagentExtension(base))),
-        }, ...(projectTrustReloadOptions(cwd, agentDir) ? { resourceLoaderReloadOptions: projectTrustReloadOptions(cwd, agentDir) } : {}) });
-      const loaded = services.resourceLoader.getExtensions();
-      const paths = new Set(loaded.extensions.map((extension) => extension.path));
-      const mismatch = [...sourcePaths].filter((path) => !paths.has(path));
-      const unexpected = [...paths].filter((path) => !sourcePaths.has(path)
-        && path !== "<inline:pi-web-side-ask-policy>" && path !== "<inline:pi-web-remote-claude-host-guard>"
-        && !(resources?.loadExtensions && allowedTools.has("session_control") && path === "<inline:pi-web-session-control>"));
-      if (loaded.errors.length || services.diagnostics.some((diagnostic) => diagnostic.type === "error") || mismatch.length || unexpected.length) {
-        const details = { missing: mismatch, unexpected, failed: loaded.errors.map((error) => error.path),
-          providerErrors: services.diagnostics.filter((diagnostic) => diagnostic.type === "error").length };
-        throw new QuickAskError(`Side Ask extensions differ from the source session; reload the source session: ${JSON.stringify(details)}`, 503);
-      }
-      const model = services.modelRuntime.getModel(input.model.provider, input.model.id);
-      if (!model) throw new QuickAskError("Model not found for this Side Ask", 404);
-      const created = await createAgentSessionFromServices({ services, sessionManager: input.memory, model,
-        ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
-        ...(resources ? subagentToolOptions(resources) : this.strictToolAllowlist || activeTools.length === 0 ? { tools: activeTools } : {}) });
-      child = created.session;
-      childRef.current = child;
-      skillBinding?.setActiveToolsGetter(() => child?.getActiveToolNames() ?? []);
-      const session = child;
-      if (getRpcSession(session.sessionId) || SIDE_ASK_SUBAGENT_HOSTS.has(session.sessionId)) {
-        throw new QuickAskError("Side Ask execution identity is already in use", 409);
-      }
-      host = { protectedSessionId: this.sessionId, sideAskUiContext: this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }),
-        sideAskGuard: policy, sideAskPeerOwnership: peerOwnership,
-        ...(allowedTools.has("session_control") ? { sideAskControl } : {}), recordSideAskChild,
-        inner: session as unknown as AgentSessionLike, sessionFile: this.sessionFile, cwd,
-        isAlive: () => !disposed && !input.signal.aborted && this.isAlive(),
-        isRunning: () => session.isStreaming, waitUntilReady: async () => undefined,
-        agentDir };
-      SIDE_ASK_SUBAGENT_HOSTS.set(session.sessionId, host);
-      return { session, waitForOwnedWork,
-        prepare: async () => {
-          const summaryNamespaces = model.provider === "openai-codex" && model.api === "openai-codex-responses"
-            ? quickAskCachedMcpSummaries(input.memory.buildSessionContext().messages) : undefined;
-          await builtinResources?.mcpHost?.prepareForPrompt(input.signal, { summaryNamespaces, requiredNamespaces });
-          if (input.signal.aborted) throw new QuickAskError("Side Ask was stopped", 499);
-          session.setActiveToolsByName(activeTools);
-          const actual = new Set(session.getActiveToolNames());
-          const missingTools = activeTools.filter((name) => !actual.has(name));
-          if (missingTools.length) throw new QuickAskError(`Side Ask tools differ from the source session: ${JSON.stringify(missingTools)}`, 503);
-          if (model.provider === REMOTE_CLAUDE_PROVIDER_ID) {
-            if (!this.remoteClaudeHost || resolveRemoteClaudeHost(session.sessionId)) {
-              throw new QuickAskError("Remote Claude Side Ask parent scope is unavailable", 503);
-            }
-            remote = (await installRemoteClaudeHost({ hostIdentity: session, sessionManager: session.sessionManager,
-              sessionId: session.sessionId, cwd, agentDir, activeTools, modelRuntime: services!.modelRuntime,
-              builtInEnabled: isBuiltInSubagentsEnabled(), parent: this.remoteClaudeHost, allowWorktree: true,
-              allowInheritedContext: true, allowCancellation: true, readOnlyRoots: [await readerRuntimeProjectRoot(cwd)] })) ?? undefined;
-            if (!remote) throw new QuickAskError("Remote Claude Side Ask host scope is unavailable", 503);
-          }
-        },
-        associateProvider: (providerSessionId, selectedModel) => remote
-          ? associateRemoteClaudeProviderHostSession({ providerSessionId, hostIdentity: session,
-              sessionManager: session.sessionManager, model: selectedModel }) : undefined,
-        dispose,
-      };
-    } catch (error) {
-      await dispose();
-      throw error;
-    }
-  }
-
-  getQuickAskRuntime(): QuickAskRuntime {
-    this.assertSessionWriteAllowed();
-    if (!this.sideAskRuntime) {
-      if (!this.sessionFile) throw new QuickAskError("Side Ask source session file is unavailable", 409);
-      this.sideAskRuntime = new QuickAskRuntime({
-        sessionId: this.sessionId, sessionFile: this.sessionFile, manager: this.inner.sessionManager,
-        assertWritable: () => this.assertSessionWriteAllowed(),
-        assertTailWritable: () => this.assertSideAskTailWritable(),
-        isMainRunning: () => this.isRunning(),
-        currentModel: () => this.inner.model,
-        sourceSystem: () => {
-          const active = new Set(this.inner.getActiveToolNames());
-          const tools = this.inner.getAllTools().filter((tool) => active.has(tool.name)).map((tool) => ({
-            name: tool.name, description: tool.description,
-            parameters: tool.parameters as import("@earendil-works/pi-ai").Tool["parameters"],
-          }));
-          return createInitialSystemMessage(this.currentSystemPrompt(), tools);
-        },
-        transformContext: async (messages) => {
-          const runner = this.inner.extensionRunner as typeof this.inner.extensionRunner & {
-            emitContext?: (messages: import("@earendil-works/pi-agent-core").AgentMessage[]) => Promise<import("@earendil-works/pi-agent-core").AgentMessage[]>;
-          };
-          if (!runner?.emitContext) throw new QuickAskError("Live Pi context extension runner is unavailable");
-          return runner.emitContext(messages);
-        },
-        createAgentSession: async (input: QuickAskAgentInput) => {
-          const owned = await this.createQuickAskAgent(input);
-          try {
-            let bindError: string | undefined;
-            await owned.session.bindExtensions({
-              uiContext: this.createExtensionUiContext({ signal: input.signal, runId: input.runId, label: input.label }) as unknown as Parameters<typeof owned.session.bindExtensions>[0]["uiContext"],
-              mode: "rpc",
-              shutdownHandler: () => this.emit({ type: "extension_ui_request", id: randomUUID(), method: "notify",
-                notifyType: "warning", message: "Side Ask extension requested shutdown.", sideAskRunId: input.runId } as AgentEvent),
-              onError: (error) => {
-                bindError ??= `${error.extensionPath}: ${error.error}`;
-                this.emit({ type: "extension_error", ...error, sideAskRunId: input.runId } as AgentEvent);
-              },
-            });
-            if (bindError) throw new QuickAskError(`Side Ask extension startup failed: ${bindError}`, 503);
-            return owned;
-          } catch (error) {
-            await owned.dispose();
-            throw error;
-          }
-        },
-        append: (customType, data) => this.appendSideAskRecord(customType, data, true),
-        associateProvider: (providerSessionId, model) => {
-          if (model.provider !== REMOTE_CLAUDE_PROVIDER_ID) return undefined;
-          const liveModel = this.inner.model;
-          if (!liveModel || liveModel.provider !== model.provider || liveModel.id !== model.id) {
-            throw new QuickAskError("Remote Claude host model changed; choose its current model for this Side Ask", 503);
-          }
-          return associateRemoteClaudeProviderHostSession({ providerSessionId, hostIdentity: this.inner,
-            sessionManager: this.inner.sessionManager, model: liveModel });
-        },
-        materialized: async (result) => {
-          cacheSessionPath(result.newSessionId, result.newSessionPath);
-          const inherited = await inheritSubprojectAssignment(this.sessionId, result.newSessionId, this.cwd);
-          invalidateSessionListCache();
-          return inherited ? {} : { subprojectAssignmentFailed: true };
-        },
-      });
-    }
-    return this.sideAskRuntime;
-  }
-
-  private appendSideAskRecord(customType: string, data: unknown, allowTail = false): PiSessionEntry {
-    if (allowTail) this.assertSideAskTailWritable();
-    else this.assertSessionWriteAllowed();
-    // Serialization and cache failures are not evidence of an uncertain SDK append.
-    JSON.stringify(data);
-    let id: string;
-    try {
-      this.persistSessionFileNow(true);
-      id = this.inner.sessionManager.appendCustomEntry(customType, data);
-    } catch (error) {
-      // SDK append mutates its index before writing. Quarantine only this uncertain
-      // persistence state; ordinary Side Ask preparation/provider failures stay isolated.
-      this.sideAskWriteFailed = true;
-      this.sideAskRuntime?.close();
-      try { void this.inner.abort().catch(() => undefined); } catch { /* Teardown remains fail closed. */ }
-      this.emitShutdownEvent();
-      void this.shutdown().catch(() => undefined);
-      throw error;
-    }
-    const entry = this.inner.sessionManager.getEntry(id);
-    if (!entry) throw new Error("SDK did not retain the appended Side Ask record");
-    invalidateSessionReadCache(this.sessionFile);
-    invalidateSessionListCache();
-    return entry;
-  }
-
-  recordQuickAskTransfer(scope: QuickAskScope, result: QuickAskForkResult): void {
-    this.appendSideAskRecord(QUICK_ASK_TRANSFER_PENDING, { ...scope, result });
-    this.appendSideAskRecord(QUICK_ASK_TRANSFER, { ...scope, result });
-  }
-
   private currentSystemPrompt(): string {
-    return this.forceEmptySystemPrompt
+    return this.exactSystemPrompt?.() ?? (this.forceEmptySystemPrompt
       ? ""
-      : this.inner.agent.state?.systemPrompt || this.inner.systemPrompt || "";
+      : this.inner.agent.state?.systemPrompt || this.inner.systemPrompt || "");
   }
 
   get remoteClaudeHostBinding(): RemoteClaudeHostBinding | undefined {
@@ -2446,21 +1990,8 @@ export class AgentSessionWrapper {
 
   assertSessionWriteAllowed(): void {
     assertSessionFileExecutable(this.sessionFile);
-    if (this.sideAskWriteFailed) throw new Error("Session persistence failed; reopen the session before writing again");
     if (!this._alive) throw new Error("Session is no longer available");
     if (this.shuttingDown) throw new Error("Session is shutting down");
-  }
-
-  private assertSideAskTailWritable(): void {
-    if (this._alive && !this.shuttingDown) return this.assertSessionWriteAllowed();
-    assertSessionFileExecutable(this.sessionFile);
-    if (this.sideAskWriteFailed || !this.sideAskTailOpen) throw new Error("Side Ask tail persistence is closed");
-  }
-
-  private closeSideAskRuntime(): void {
-    if (!this.sideAskRuntime) return;
-    if (this.sideAskRuntime.hasActiveRun()) this.sideAskTailOpen = true;
-    this.sideAskRuntime.close();
   }
 
   private assertWriteOpen(): void {
@@ -3320,7 +2851,6 @@ export class AgentSessionWrapper {
 
   setForceEmptySystemPrompt(force: boolean): void {
     this.forceEmptySystemPrompt = force;
-    this.applyForcedEmptySystemPrompt();
   }
 
   isChatOnly(): boolean {
@@ -3373,21 +2903,6 @@ export class AgentSessionWrapper {
     return this.suppressCompletionNotifications;
   }
 
-  recordSideAskChild(sessionId: string, sessionPath: string): void {
-    if (!this.sideAskPeerOwnership) return;
-    this.appendSideAskRecord(SIDE_ASK_CHILD, sideAskChildReference(sessionId, sessionPath, this.sessionFile));
-  }
-
-  bindSideAskUiContext(context: ExtensionUiContextLike): () => void {
-    const setUi = this.inner.extensionRunner.setUIContext?.bind(this.inner.extensionRunner);
-    if (!setUi || !this.isAlive()) throw new Error("Side Ask child UI is unavailable");
-    const generation = ++this.sideAskUiGeneration;
-    setUi(context, "rpc");
-    return () => {
-      if (this.sideAskUiGeneration === generation && this.isAlive()) setUi(this.createExtensionUiContext(), "rpc");
-    };
-  }
-
   beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
     void this.ensureExtensionsBound(options).catch((err) => {
       console.error("[pi-web] failed to dispatch session_start to extensions:", err instanceof Error ? err.message : err);
@@ -3426,10 +2941,7 @@ export class AgentSessionWrapper {
 
   private ensureExtensionsBound(options: ExtensionBindingOptions = {}): Promise<void> {
     if (options.forceEmptySystemPrompt) this.forceEmptySystemPrompt = true;
-    if (this.extensionsBound) {
-      this.applyForcedEmptySystemPrompt();
-      return Promise.resolve();
-    }
+    if (this.extensionsBound) return Promise.resolve();
     if (this.extensionBindingPromise) return this.extensionBindingPromise;
 
     this.extensionBindingError = null;
@@ -3465,8 +2977,10 @@ export class AgentSessionWrapper {
       } else {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
+      // A session_start handler may change the startup model after a dialog;
+      // get_state remains readable while that dialog is visible.
+      await options.afterSessionStart?.();
       this.extensionsBound = true;
-      this.applyForcedEmptySystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       this.extensionBindingError = err;
@@ -3533,20 +3047,6 @@ export class AgentSessionWrapper {
     } else if (outcome.status === "failed") {
       await this.shutdown();
       throw outcome.error;
-    }
-  }
-
-  private applyForcedEmptySystemPrompt(): void {
-    if (this.forceEmptySystemPrompt && this.inner.agent.state) {
-      try {
-        Object.defineProperty(this.inner.agent.state, "systemPrompt", {
-          value: "",
-          configurable: true,
-          writable: true,
-        });
-      } catch {
-        // Ignore if state is non-extensible.
-      }
     }
   }
 
@@ -5235,9 +4735,7 @@ export class AgentSessionWrapper {
         const contextUsage = this.inner.getContextUsage();
         let promptState: { systemPrompt: string; runtimeInspection: ReturnType<typeof buildRuntimeInspection> } | undefined;
         if (command.systemPrompt !== false) {
-          const systemPrompt = this.inner.agent.state?.systemPrompt ?? "";
-          // Before the first run, the rendered prompt is exposed through inner.systemPrompt.
-          const liveSystemPrompt = this.forceEmptySystemPrompt ? "" : systemPrompt || this.inner.systemPrompt || "";
+          const liveSystemPrompt = this.currentSystemPrompt();
           const skillRuntimeEvidence = this.skillRuntimeTracker.snapshot(liveSystemPrompt);
           const runtimeInspection = buildRuntimeInspection(this.inner, undefined, liveSystemPrompt, skillRuntimeEvidence);
           const estimatedInputCost = await this.estimateSystemPromptCost(
@@ -5718,7 +5216,6 @@ export class AgentSessionWrapper {
         appendSessionToolSelection(this.inner.sessionManager, toolNames, {
           strict: this.strictToolAllowlist,
         });
-        this.applyForcedEmptySystemPrompt();
         return null;
       }
 
@@ -5829,11 +5326,16 @@ export class AgentSessionWrapper {
     this.emit({ type: "session_shutdown", reason: "quit" });
   }
 
+  /** Cancel every dialog/custom UI so session_start cannot hold shutdown forever. */
+  private cancelExtensionUi(): void {
+    for (const pending of this.pendingUiResponses.values()) pending.cancel();
+    for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
+  }
+
   /** Dispose all wrapper-owned state exactly once, after extension shutdown has been attempted. */
   private disposeNow(): void {
     if (this.disposed) return;
     for (const controller of this.questionTaskControllers) controller.abort();
-    this.closeSideAskRuntime();
     this.disposed = true;
     this.shuttingDown = true;
     this._alive = false;
@@ -5862,8 +5364,7 @@ export class AgentSessionWrapper {
     this.unsubscribe?.();
     this.extensionWidgetAdapter.clear(false);
     this.extensionWidgets.clear();
-    for (const pending of this.pendingUiResponses.values()) pending.cancel();
-    for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
+    this.cancelExtensionUi();
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
     this.notifyUiRequests();
@@ -5901,6 +5402,7 @@ export class AgentSessionWrapper {
     // extension handlers. A handler may never return, but the session must
     // still become disposable and stop advertising those connections.
     this.disposeMcpHost();
+    this.cancelExtensionUi();
     const extensionShutdown = (async () => {
       try {
         await this.waitForExtensionsBound();
@@ -5913,7 +5415,6 @@ export class AgentSessionWrapper {
       await this.inner.extensionRunner?.emit?.({ type: "session_shutdown", reason: "quit" });
     })();
     const subagentExecution = this.subagentExecution;
-    const sideAskSettlement = this.sideAskRuntime?.whenIdle();
     const cancelReaderWrites = Promise.resolve().then(() => {
       subagentExecution?.cancel();
       if (this.inner.isBashRunning) this.inner.abortBash();
@@ -5922,10 +5423,9 @@ export class AgentSessionWrapper {
     let writersSettled = false;
     const writerShutdown = Promise.allSettled([extensionShutdown,
       Promise.resolve().then(() => this.runtimeOwnership ? this.inner.abort?.() : undefined),
-      cancelReaderWrites, this.bashExecution, subagentExecution?.completion, sideAskSettlement,
+      cancelReaderWrites, this.bashExecution, subagentExecution?.completion,
     ]).then((results) => {
-      writersSettled = results[1].status === "fulfilled" && results[2].status === "fulfilled" && results[5].status === "fulfilled";
-      if (writersSettled) this.sideAskTailOpen = false;
+      writersSettled = results[1].status === "fulfilled" && results[2].status === "fulfilled" && results[4].status === "fulfilled";
       if (!writersSettled) console.error("[pi-web] SDK abort or Reader cancellation failed; retaining runtime ownership until process exit");
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -5963,7 +5463,6 @@ export class AgentSessionWrapper {
 
   destroy(): void {
     if (this.disposed || this.shutdownPromise) return;
-    this.closeSideAskRuntime();
     // Direct destruction is used by process/route cleanup. It still closes the
     // event stream and gives extensions their shutdown hook, but never lets a
     // rejected hook escape into a synchronous caller.
@@ -5981,7 +5480,6 @@ export class AgentSessionWrapper {
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     if (this.disposed) return;
-    this.closeSideAskRuntime();
 
     // Close the write admission gate before awaiting extension shutdown. This
     // prevents a simultaneous recap/prompt/config write from landing after
@@ -6257,7 +5755,6 @@ export class AgentSessionWrapper {
       id,
       method: "custom",
       lines,
-      ...(custom.sideAskRunId ? { sideAskRunId: custom.sideAskRunId, sideAskLabel: custom.sideAskLabel } : {}),
     } as AgentEvent;
     this.pendingUiRequests.set(id, event);
     this.notifyUiRequests();
@@ -6308,11 +5805,10 @@ export class AgentSessionWrapper {
   private requestExtensionCustomUi<T>(
     factory: unknown,
     options?: unknown,
-    owner?: SideAskUiOwner,
   ): Promise<T> {
     if (typeof factory !== "function") return Promise.resolve(undefined as T);
 
-    const stopSignal = owner?.signal ?? this.extensionUiAbortController.signal;
+    const stopSignal = this.extensionUiAbortController.signal;
     if (stopSignal.aborted) return Promise.reject(stopSignal.reason);
 
     const id = randomUUID();
@@ -6364,7 +5860,6 @@ export class AgentSessionWrapper {
             width,
             resolve: (value) => finish(value as T),
             settled: false,
-            ...(owner ? { sideAskRunId: owner.runId, sideAskLabel: owner.label } : {}),
           };
           this.activeCustomUis.set(id, custom);
           this.emitCustomUiRender(id, custom);
@@ -6388,10 +5883,9 @@ export class AgentSessionWrapper {
     parseResponse: (response: ExtensionUiResponse) => T,
     timeout?: number,
     signal?: AbortSignal,
-    owner?: SideAskUiOwner,
   ): Promise<T> {
     if (signal?.aborted) return Promise.resolve(defaultValue);
-    const stopSignal = owner?.signal ?? this.extensionUiAbortController.signal;
+    const stopSignal = this.extensionUiAbortController.signal;
     if (stopSignal.aborted) return Promise.reject(stopSignal.reason);
     const abortSignal = signal ? AbortSignal.any([signal, stopSignal]) : stopSignal;
 
@@ -6402,7 +5896,6 @@ export class AgentSessionWrapper {
       ...request,
       runtimeGeneration: this.liveEventBootId,
       responseSchema: uiResponseSchema(request),
-      ...(owner ? { sideAskRunId: owner.runId, sideAskLabel: owner.label } : {}),
       createdAt: Date.now(),
       ...(timeout ? { timeout, expiresAt: Date.now() + timeout } : {}),
     };
@@ -6452,7 +5945,7 @@ export class AgentSessionWrapper {
     });
   }
 
-  private createExtensionUiContext(owner?: SideAskUiOwner): ExtensionUiContextLike {
+  private createExtensionUiContext(): ExtensionUiContextLike {
     return {
       select: (title, options, opts) => this.requestExtensionUi(
         { method: "select", title, options, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6460,7 +5953,6 @@ export class AgentSessionWrapper {
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
-        owner,
       ),
       confirm: (title, message, opts) => this.requestExtensionUi(
         { method: "confirm", title, message, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6468,7 +5960,6 @@ export class AgentSessionWrapper {
         (response) => "confirmed" in response ? response.confirmed : false,
         opts?.timeout,
         opts?.signal,
-        owner,
       ),
       input: (title, placeholder, opts) => this.requestExtensionUi(
         { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6476,7 +5967,6 @@ export class AgentSessionWrapper {
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
-        owner,
       ),
       editor: (title, prefill, opts) => this.requestExtensionUi(
         { method: "editor", title, ...(prefill !== undefined ? { prefill } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
@@ -6484,7 +5974,6 @@ export class AgentSessionWrapper {
         (response) => "value" in response ? response.value : undefined,
         opts?.timeout,
         opts?.signal,
-        owner,
       ),
       notify: (message, type) => {
         this.emit({
@@ -6493,12 +5982,10 @@ export class AgentSessionWrapper {
           method: "notify",
           message,
           notifyType: type,
-          ...(owner ? { sideAskRunId: owner.runId, sideAskLabel: owner.label } : {}),
         } as AgentEvent);
       },
       onTerminalInput: () => () => {},
       setStatus: (key, text) => {
-        if (owner) return;
         if (text === undefined) this.extensionStatuses.delete(key);
         else this.extensionStatuses.set(key, text);
         this.emit({
@@ -6510,7 +5997,6 @@ export class AgentSessionWrapper {
         } as AgentEvent);
       },
       setExtensionUsage: (key, usage) => {
-        if (owner) return;
         if (usage === undefined) this.extensionUsages.delete(key);
         else this.extensionUsages.set(key, { key, ...usage });
         this.emit({
@@ -6526,7 +6012,7 @@ export class AgentSessionWrapper {
       setWorkingIndicator: () => {},
       setHiddenThinkingLabel: () => {},
       setWidget: (key, content, options) => {
-        if (owner || !this._alive || this.extensionWidgetsResetting) return;
+        if (!this._alive || this.extensionWidgetsResetting) return;
         if (typeof content === "function") {
           this.setExtensionWidgetFactory(
             key,
@@ -6561,7 +6047,6 @@ export class AgentSessionWrapper {
       setFooter: () => {},
       setHeader: () => {},
       setTitle: (title) => {
-        if (owner) return;
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -6569,9 +6054,8 @@ export class AgentSessionWrapper {
           title,
         } as AgentEvent);
       },
-      custom: <T = unknown>(factory: unknown, options?: unknown) => this.requestExtensionCustomUi<T>(factory, options, owner),
+      custom: <T = unknown>(factory: unknown, options?: unknown) => this.requestExtensionCustomUi<T>(factory, options),
       pasteToEditor: (text) => {
-        if (owner) return;
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -6580,7 +6064,6 @@ export class AgentSessionWrapper {
         } as AgentEvent);
       },
       setEditorText: (text) => {
-        if (owner) return;
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -6589,7 +6072,6 @@ export class AgentSessionWrapper {
         } as AgentEvent);
       },
       setEditorSuggestion: (text) => {
-        if (owner) return;
         this.editorSuggestion = text?.trim() ? text : null;
         this.emit({
           type: "extension_ui_request",
@@ -6639,7 +6121,6 @@ export class AgentSessionWrapper {
     invalidateModelRuntimeWithExtensions();
     this.setActiveToolSelection(activeToolNames);
     await this.refreshRemoteClaudeHostBinding();
-    this.applyForcedEmptySystemPrompt();
     this.applyRuntimeAutoCompactionOverride();
     invalidateModelsCache();
     if (getProjectTrustStatus(this.cwd, this.agentDir ?? getAgentDir()).trusted !== reloadTrust) {
@@ -6929,72 +6410,26 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return globalThis.__piSessions?.get(sessionId);
 }
 
-/** Same-process Reader bridge entrypoint for a provider alias turn. */
-export function associateRemoteClaudeProviderSession(
-  input: Parameters<typeof associateRemoteClaudeProviderHostSession>[0],
-) {
-  return associateRemoteClaudeProviderHostSession(input);
-}
-
-function createSideAskPeerGuard(ownership: SideAskPeerOwnership) {
-  const allowed = new Set(ownership.callableTools);
-  return { name: "pi-web-side-ask-peer-guard", hidden: true, factory: (pi: ExtensionAPI) => {
-    pi.on("tool_call", (event, ctx) => {
-      if (event.toolName === "session_control"
-        && isProtectedSideAskControl(event.input, ctx.sessionManager.getSessionId(), ownership.sourceSessionId)) {
-        return { block: true, reason: "Cannot control the source session or approve its Side Ask requests" };
-      }
-      const source = getRpcSession(ownership.sourceSessionId);
-      const parent = source?.inner as unknown as Pick<AgentSession, "getCallableToolNames" | "getAllTools"> | undefined;
-      const current = source && parent && typeof parent.getCallableToolNames === "function"
-        ? new Set([...source.inner.getActiveToolNames(), ...parent.getCallableToolNames()]) : new Set<string>();
-      if (!source?.isAlive() || !allowed.has(event.toolName) || !current.has(event.toolName)) {
-        return { block: true, reason: "Tool is outside the source session's current Side Ask scope" };
-      }
-      const parentTool = parent?.getAllTools().find((tool) => tool.name === event.toolName);
-      const childTool = pi.getAllTools().find((tool) => tool.name === event.toolName);
-      if ((parentTool && isMcpTool(parentTool)) || (childTool && isMcpTool(childTool))) {
-        const selection = readSessionToolSelection(source.inner.sessionManager.getEntries() as unknown as SessionEntry[]);
-        if (isReadOnlySelection(selection)
-          && (parentTool?.annotations?.readOnlyHint !== true || childTool?.annotations?.readOnlyHint !== true)) {
-          return { block: true, reason: readOnlyMcpBlockReason(event.toolName) };
-        }
-      }
-    });
-  } };
-}
-
-function assertSideAskPeerOwnership(manager: SessionManager, expected?: SideAskPeerOwnership): void {
-  if (!expected) return;
-  const actual = readSideAskPeerOwnership(manager.getEntries() as unknown as SessionEntry[]);
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("Side Ask peer ownership does not match the existing session");
-}
-
-const SIDE_ASK_SUBAGENT_HOSTS = new Map<string, HostSession>();
 const SUBAGENT_CONTROLLER = createSubagentController({
-  getSession: (sessionId) => getRpcSession(sessionId) ?? SIDE_ASK_SUBAGENT_HOSTS.get(sessionId),
-  getSessionAgentDir: (sessionId) => (getRpcSession(sessionId) ?? SIDE_ASK_SUBAGENT_HOSTS.get(sessionId))?.agentDir,
+  getSession: (sessionId) => getRpcSession(sessionId),
+  getSessionAgentDir: (sessionId) => getRpcSession(sessionId)?.agentDir,
   registerSession: (inner, options) => {
     let wrapper: AgentSessionWrapper | undefined;
     try {
       wrapper = new AgentSessionWrapper(inner, undefined, { mode: "default" }, {
         ...(options?.mcpHost ? { mcpHost: options.mcpHost } : {}),
+        ...(options?.exactSystemPrompt ? { exactSystemPrompt: options.exactSystemPrompt } : {}),
         ...(options?.remoteHost ? { remoteClaudeHost: options.remoteHost } : {}),
         ...(options?.skillRuntimeContext ? { skillRuntimeContext: options.skillRuntimeContext } : {}),
         ...(options?.projectTrusted !== undefined ? { projectTrusted: options.projectTrusted } : {}),
         ...(options?.runtimeOwnership ? { runtimeOwnership: options.runtimeOwnership } : {}),
         ...(options?.agentDir ? { agentDir: options.agentDir } : {}),
-        ...(options?.protectedSessionId ? { protectedSessionId: options.protectedSessionId } : {}),
-        ...(options?.sideAskGuard ? { sideAskGuard: options.sideAskGuard } : {}),
-        ...(options?.sideAskControl ? { sideAskControl: options.sideAskControl } : {}),
-        ...(options?.sideAskPeerOwnership ? { sideAskPeerOwnership: options.sideAskPeerOwnership } : {}),
       });
       const subagentPolicy = { suppressCompletionNotifications: true };
       if (subagentPolicy.suppressCompletionNotifications) wrapper.setSuppressCompletionNotifications(true);
       if (options?.chatOnly) wrapper.setForceEmptySystemPrompt(true);
       registerRpcSession(wrapper);
-      wrapper.beginExtensionBinding(options?.sideAskUiContext
-        ? { uiContext: options.sideAskUiContext as ExtensionUiContextLike } : {});
+      wrapper.beginExtensionBinding();
       return wrapper;
     } catch (error) {
       if (wrapper) wrapper.destroy();
@@ -7006,9 +6441,7 @@ const SUBAGENT_CONTROLLER = createSubagentController({
     }
   },
   reopenSession: async (sessionId, sessionFile, parentSessionId) => {
-    const parent = parentSessionId
-      ? getRpcSession(parentSessionId) ?? SIDE_ASK_SUBAGENT_HOSTS.get(parentSessionId)
-      : undefined;
+    const parent = parentSessionId ? getRpcSession(parentSessionId) : undefined;
     return (await startRpcSession(sessionId, sessionFile, undefined, {
       ...(parent?.agentDir ? { agentDir: parent.agentDir } : {}),
       ...(parent?.inner.model?.provider === REMOTE_CLAUDE_PROVIDER_ID
@@ -7242,6 +6675,7 @@ export function getRpcSessionInfos(): SessionInfo[] {
       { type: string; timestamp: string } | SessionMessageEntry
     >;
     const messages = entries.filter((entry): entry is SessionMessageEntry => entry.type === "message");
+    const side = readSideRelation(entries as unknown as SessionEntry[]);
     const firstUserMessage = messages.find((entry) => entry.message.role === "user");
     const displayInputs = sessionDisplayInputs(entries);
     const sessionFile = manager.getSessionFile() ?? session.sessionFile;
@@ -7277,6 +6711,7 @@ export function getRpcSessionInfos(): SessionInfo[] {
       firstMessage: firstUserMessage
         ? displayInputs.get(firstUserMessage.id) ?? (runtimeMessageText(firstUserMessage) || "(no messages)")
         : firstSessionControlDisplayText(entries) ?? "(no messages)",
+      ...(side ? { parentSessionId: side.parentSessionId, relation: { kind: "side" as const, parentSessionId: side.parentSessionId } } : {}),
       transient: !persisted,
     });
   }
@@ -7486,7 +6921,6 @@ async function withDurableSessionAdmissionLock(
 async function findExistingDurableRpcSession(
   request: DurableSessionCreateRequest,
   isolatedSessionDir?: string,
-  sideAskPeerOwnership?: SideAskPeerOwnership,
 ): Promise<DurableSessionObservation | undefined> {
   const targetCwd = normalizeRpcCwd(request.scope.cwd);
   for (const session of globalThis.__piSessions?.values() ?? []) {
@@ -7494,7 +6928,6 @@ async function findExistingDurableRpcSession(
     if (isolatedSessionDir && resolve(session.inner.sessionManager.getSessionDir()) !== resolve(isolatedSessionDir)) continue;
     const selected = durableRecordForManager(session.inner.sessionManager, request);
     if (!selected?.record) continue;
-    assertSideAskPeerOwnership(session.inner.sessionManager, sideAskPeerOwnership);
     const facts = await durableSessionFacts(
       request.scope.cwd,
       session.inner.sessionManager.getSessionDir(),
@@ -7523,7 +6956,6 @@ async function findExistingDurableRpcSession(
       const manager = SessionManager.open(info.path, isolatedSessionDir);
       const selected = durableRecordForManager(manager, request);
       if (!selected?.record) continue;
-      assertSideAskPeerOwnership(manager, sideAskPeerOwnership);
       const sessionFile = manager.getSessionFile() || info.path;
       const facts = await durableSessionFacts(
         request.scope.cwd,
@@ -7543,7 +6975,6 @@ async function findExistingDurableRpcSession(
         nativeRecordValid: selected.nativeRecordValid,
       };
     } catch (error) {
-      if (error instanceof Error && error.message.includes("Side Ask peer ownership")) throw error;
       // An unrelated malformed transcript must not prevent a keyed create.
     }
   }
@@ -7554,7 +6985,6 @@ async function createNativeDurableRpcSession(
   request: DurableSessionCreateRequest,
   isolatedSessionDir: string | undefined,
   lease: DurableSessionAdmissionLease,
-  sideAskPeerOwnership?: SideAskPeerOwnership,
   agentDir?: string,
 ): Promise<DurableSessionResult> {
   const cwd = normalizeRpcCwd(request.scope.cwd);
@@ -7577,7 +7007,6 @@ async function createNativeDurableRpcSession(
     // native marker/custom-message appends are now persisted by the SDK.
     lease.assert();
     appendDurableSessionCreate(manager, request);
-    if (sideAskPeerOwnership) manager.appendCustomEntry(SIDE_ASK_PEER_OWNERSHIP, sideAskPeerOwnership);
     // A compromised lease may be reported by the heartbeat immediately after
     // the native append. The surrounding catch records the actual facts.
     lease.assert();
@@ -7753,7 +7182,7 @@ async function recoverDurableRpcSession(
 /** Host adapter for the first-party durable session-control protocol. */
 export function createDurableRpcSession(
   request: DurableSessionCreateRequest,
-  options: { sessionDir?: string; sideAskPeerOwnership?: SideAskPeerOwnership; agentDir?: string } = {},
+  options: { sessionDir?: string; agentDir?: string } = {},
 ): Promise<DurableSessionResult> {
   const scopedRequest: DurableSessionCreateRequest = {
     ...request,
@@ -7761,8 +7190,8 @@ export function createDurableRpcSession(
   };
   return createOrReuseDurableSession(scopedRequest, {
     withAdmissionLock: (candidate, operation) => withDurableSessionAdmissionLock(candidate, options.sessionDir, operation),
-    findExisting: (candidate) => findExistingDurableRpcSession(candidate, options.sessionDir, options.sideAskPeerOwnership),
-    create: (candidate, lease) => createNativeDurableRpcSession(candidate, options.sessionDir, lease, options.sideAskPeerOwnership, options.agentDir),
+    findExisting: (candidate) => findExistingDurableRpcSession(candidate, options.sessionDir),
+    create: (candidate, lease) => createNativeDurableRpcSession(candidate, options.sessionDir, lease, options.agentDir),
     recover: (facts, candidate, lease) => recoverDurableRpcSession(facts, candidate, lease, options.agentDir),
   });
 }
@@ -8107,12 +7536,8 @@ export async function startRpcSession(
     const runtimeProjectRoot = await readerRuntimeProjectRoot(sessionCwd);
     const startupEntries = sessionManager.getEntries() as unknown as SessionEntry[];
     const agentDir = requestedAgentDir ?? getAgentDir();
-    const sideAskPeerOwnership = readSideAskPeerOwnership(startupEntries);
-    const sideAskPeerGuard = sideAskPeerOwnership ? createSideAskPeerGuard(sideAskPeerOwnership) : undefined;
-    const sideAskPeerControl = sideAskPeerOwnership ? createSessionControlExtension({
-      protectedSessionId: sideAskPeerOwnership.sourceSessionId,
-      createSession: (request) => createDurableRpcSession(request, { agentDir, sideAskPeerOwnership }),
-    }) : undefined;
+    const sideRelation = readSideRelation(startupEntries);
+    const promptCacheLineage = readPromptCacheLineage(sessionManager.getHeader());
     const subagentResources = sessionFile
       ? readValidSubagentResources(startupEntries)
       : null;
@@ -8126,8 +7551,11 @@ export async function startRpcSession(
       ? undefined
       : readSessionToolSelectionPolicy(sessionManager.getEntries() as unknown as SessionEntry[]);
     const persistedToolNames = persistedToolPolicy?.tools;
-    const effectiveToolNames = subagentResources?.tools ?? (sideAskPeerOwnership
-      ? (toolNames ?? persistedToolNames ?? sideAskPeerOwnership.activeTools).filter((name) => sideAskPeerOwnership.activeTools.includes(name))
+    const sideToolNamesForSession = sideRelation
+      ? sideToolNames(persistedToolNames, sessionManager.buildSessionContext().messages as never)
+      : undefined;
+    const effectiveToolNames = subagentResources?.tools ?? (sideRelation
+      ? sideToolNamesForSession
       : toolNames ?? persistedToolNames);
     if (!subagentResources && strictToolAllowlist === true) {
       if (toolNames === undefined) {
@@ -8136,6 +7564,7 @@ export async function startRpcSession(
       validateSessionToolSelection(toolNames);
     }
     const strictToolAllowlistEnabled = !subagentResources
+      && !sideRelation
       && (strictToolAllowlist ?? persistedToolPolicy?.strict ?? false)
       && effectiveToolNames !== undefined;
     const explicitStrictPolicyNeedsPersist = strictToolAllowlist !== undefined
@@ -8169,7 +7598,7 @@ export async function startRpcSession(
       // tool registry — so they were unavailable in Pi Web sessions even though the
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
-      toolsOption = effectiveToolNames.length === 0 || strictToolAllowlistEnabled
+      toolsOption = effectiveToolNames.length === 0 || strictToolAllowlistEnabled || sideRelation
         ? effectiveToolNames
         : undefined;
     }
@@ -8180,7 +7609,7 @@ export async function startRpcSession(
     const builtinResources = subagentResources && (subagentResources.codemode || subagentResources.mcp)
       ? await createPiWebBuiltinExtensions({ agentDir })
       : undefined;
-    const builtins = subagentResources || chatOnly || strictToolAllowlistEnabled
+    const builtins = subagentResources || chatOnly || strictToolAllowlistEnabled || sideRelation
       ? undefined
       : await createPiWebBuiltinExtensions({ agentDir });
 
@@ -8271,7 +7700,7 @@ export async function startRpcSession(
       ? createSubagentSkillsBinding({
           loadSkills: subagentResources.loadSkills,
           skills: subagentSkillNames,
-          exactSystemPrompt: subagentResources.exactSystemPrompt,
+          exactSystemPrompt: getSubagentExactSystemPrompt(subagentResources),
         })
       : undefined;
     const subagentOriginalSkillsOverride = subagentSkillsBinding?.loaderOptions.skillsOverride;
@@ -8300,6 +7729,7 @@ export async function startRpcSession(
     ]);
     const subagentBuiltinFactories = builtinResources?.extensions.filter((extension) => subagentBuiltinNames.has(extension.name)) ?? [];
     const subagentStopBridge = createSubagentStopBridge();
+    const exactSystemPromptRef: { current?: () => string } = {};
     const services = await createReaderAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -8309,21 +7739,18 @@ export async function startRpcSession(
             ...subagentLoaderOptions,
             ...(subagentSkillsBinding?.loaderOptions ?? {}),
             ...(subagentRuntimeSkillsOverride ? { skillsOverride: subagentRuntimeSkillsOverride } : {}),
-            ...(sideAskPeerControl && subagentResources.loadExtensions && sideAskPeerOwnership?.callableTools.includes("session_control")
-              ? { extensionsOverride: (base) => preferSideAskSessionControl(subagentLoaderOptions?.extensionsOverride?.(base) ?? base) } : {}),
+            extensionsOverride: (base) => preferUserPowerShellExtension(subagentLoaderOptions?.extensionsOverride?.(base) ?? base),
             noPromptTemplates: true,
             noThemes: true,
             noContextFiles: true,
             appendSystemPrompt: subagentResources.appendSystemPrompt,
             extensionFactories: [
               createCompactionModelExtension(settingsManager),
+              ...(subagentResources.tools.includes("powershell") ? [createProjectCommandPowerShellExtension({ cwd: sessionCwd })] : []),
               createImageGenerationOutputExtension(),
-              ...(sideAskPeerControl && subagentResources.loadExtensions && sideAskPeerOwnership?.callableTools.includes("session_control")
-                ? [sideAskPeerControl] : []),
               ...subagentBuiltinFactories,
               ...(subagentSkillsBinding?.loaderOptions.extensionFactories ?? []),
               createRemoteClaudeHostGuardExtension(),
-              ...(sideAskPeerGuard ? [sideAskPeerGuard] : []),
               ...(subagentResources.mcp && subagentMcpScope
                 ? [createSubagentMcpPolicyExtension(() => ({
                     tools: subagentInnerRef.current?.getActiveToolNames() ?? subagentMcpScope.tools,
@@ -8332,6 +7759,27 @@ export async function startRpcSession(
                 : []),
             ],
           }
+        : chatOnly
+          ? {
+              ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
+              extensionFactories: [createExactSystemPromptExtension(() => exactSystemPromptRef.current?.()),
+                createCompactionModelExtension(settingsManager),
+                createPromptCacheLineageExtension(promptCacheLineage)],
+            }
+        : sideRelation
+          ? {
+              noPromptTemplates: true,
+              noThemes: true,
+              extensionFactories: [
+                createCompactionModelExtension(settingsManager),
+                createPromptCacheLineageExtension(promptCacheLineage),
+                ...(effectiveToolNames?.includes("bash") ? [createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager })] : []),
+                ...(effectiveToolNames?.includes("powershell") ? [createProjectCommandPowerShellExtension({ cwd: sessionCwd })] : []),
+                createImageGenerationOutputExtension(),
+                createRemoteClaudeHostGuardExtension(),
+              ],
+              extensionsOverride: (base) => preferUserPowerShellExtension(preferUserBashExtension(preferPiWebSubagentExtension(base))),
+            }
         : strictToolAllowlistEnabled
           ? {
               noExtensions: true,
@@ -8339,7 +7787,9 @@ export async function startRpcSession(
               noPromptTemplates: true,
               noThemes: true,
               noContextFiles: true,
-              extensionFactories: [createCompactionModelExtension(settingsManager), ...(sideAskPeerGuard ? [sideAskPeerGuard] : [])],
+              extensionFactories: [createCompactionModelExtension(settingsManager),
+                createPromptCacheLineageExtension(promptCacheLineage),
+                createProjectCommandPowerShellExtension({ cwd: sessionCwd })],
             }
           : {
             // Keep SKILL.md immutable: panel state is applied to the SDK resource
@@ -8361,6 +7811,7 @@ export async function startRpcSession(
             },
             extensionFactories: [
               createCompactionModelExtension(settingsManager),
+              createPromptCacheLineageExtension(promptCacheLineage),
               createImageGenerationOutputExtension(),
               ...(builtins?.extensions ?? []),
               createReadOnlyMcpPolicyExtension(),
@@ -8369,10 +7820,10 @@ export async function startRpcSession(
                 cwd: sessionCwd,
                 settings: settingsManager,
               }),
-              sideAskPeerControl ?? createSessionControlExtension({
+              createProjectCommandPowerShellExtension({ cwd: sessionCwd }),
+              createSessionControlExtension({
                 createSession: (request) => createDurableRpcSession(request, { agentDir }),
               }),
-              ...(sideAskPeerGuard ? [sideAskPeerGuard] : []),
               subagentStopBridge.extension,
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,
@@ -8381,8 +7832,8 @@ export async function startRpcSession(
               ),
             ],
             extensionsOverride: (base) => {
-              const scoped = preferUserBashExtension(preferPiWebSubagentExtension(base));
-              return sideAskPeerOwnership ? preferSideAskSessionControl(scoped) : scoped;
+              const scoped = preferUserPowerShellExtension(preferUserBashExtension(preferPiWebSubagentExtension(base)));
+              return scoped;
             },
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
@@ -8395,31 +7846,44 @@ export async function startRpcSession(
     // wait for the post-registration availability snapshot before enforcing an
     // enabledModels scope or restoring an explicitly requested model.
     await services.modelRuntime.refresh({ allowNetwork: false });
-    const scope = await resolveVisibleModels(
+    const modelsConfig = readModelsConfig();
+    const scope = orderModelScope(await resolveVisibleModels(
       services.modelRuntime,
       services.settingsManager.getEnabledModels(),
-    );
-    const thinkingLevelDefaults = getModelThinkingDefaults(readModelsConfig());
+    ), modelsConfig);
+    const thinkingLevelDefaults = getModelThinkingDefaults(modelsConfig);
     const defaultProvider = services.settingsManager.getDefaultProvider();
     const defaultModelId = services.settingsManager.getDefaultModel();
-    const hasExistingMessages = sessionManager.getBranch().some((entry) => entry.type === "message");
+    const branch = sessionManager.getBranch();
+    const hasExistingMessages = branch.some((entry) => entry.type === "message");
+    const savedModel = hasExistingMessages ? sessionManager.buildSessionContext().model : null;
+    const lastModelChange = branch.findLast((entry) => entry.type === "model_change");
+    const virtualSelection = lastModelChange?.type === "model_change"
+      && services.modelRuntime.getModel(lastModelChange.provider, lastModelChange.modelId)?.api === "pi-virtual";
+    if (!initialModel && savedModel && isLegacyOpenAIProvider(savedModel.provider) && !virtualSelection
+      && !services.modelRuntime.getModel(savedModel.provider, savedModel.modelId)) {
+      throw new Error(`The saved provider ${savedModel.provider} is retired. Select a model before continuing this session.`);
+    }
     const persistedThinkingLevel = readSessionThinkingLevel(sessionManager);
     if (thinkingLevel === undefined && persistedThinkingLevel !== undefined) {
       thinkingLevel = persistedThinkingLevel;
     }
-    const initial = hasExistingMessages
+    const initial: InitialModelScopeResult = hasExistingMessages && !initialModel
       ? {
           scopedModels: [...scope.scopedModels],
           ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
         }
       : selectInitialModelScope(scope, {
         ...(initialModel ? { requestedModel: initialModel } : {}),
-        ...(defaultProvider && defaultModelId
-          ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
+        ...(defaultProvider
+          ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId ?? "" } }
           : {}),
         thinkingLevelDefaults,
         ...(thinkingLevel ? { thinkingLevel } : {}),
       });
+    if (initial.requiresModelSelection) {
+      throw new Error(`The saved provider ${defaultProvider} is retired. Select a model before starting a session.`);
+    }
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
@@ -8435,6 +7899,10 @@ export async function startRpcSession(
     if (subagentSkillsBinding) {
       subagentSkillsBinding.setActiveToolsGetter(() => inner.getActiveToolNames());
     }
+    const exactSystemPrompt = subagentResources
+      ? subagentSkillsBinding?.getExactSystemPrompt
+      : chatOnly ? () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles) : undefined;
+    exactSystemPromptRef.current = exactSystemPrompt;
     if (!hasExistingMessages && !initial.thinkingLevel && inner.model) {
       // If SDK selected the model because no saved model existed, apply the
       // same strongest-level default used by explicit model selection.
@@ -8449,7 +7917,7 @@ export async function startRpcSession(
       throw new Error("Fast mode is not available for this model");
     }
 
-    if (initialModel) {
+    if (initialModel && !sessionFile) {
       const persistedPreferences = await persistExplicitStartupPreferences(
         services.settingsManager,
         { model: initialModel },
@@ -8471,8 +7939,9 @@ export async function startRpcSession(
         effectiveToolNames ?? initialToolNames,
         strictToolAllowlistEnabled ? [] : initialToolNames,
       );
-      inner.setActiveToolsByName(sideAskPeerOwnership
-        ? selectedTools.filter((name) => sideAskPeerOwnership.activeTools.includes(name)) : selectedTools);
+      inner.setActiveToolsByName(sideRelation
+        ? selectedTools.filter((name) => effectiveToolNames?.includes(name))
+        : selectedTools);
     }
 
     let remoteClaudeHost: RemoteClaudeHostBinding | undefined;
@@ -8502,16 +7971,13 @@ export async function startRpcSession(
       }
       const wrapper = new AgentSessionWrapper(inner, projectSkillRuntime, fastModeState, {
         agentDir,
+        ...(exactSystemPrompt ? { exactSystemPrompt } : {}),
         ...((builtinResources?.mcpHost ?? builtins?.mcpHost) ? { mcpHost: builtinResources?.mcpHost ?? builtins?.mcpHost } : {}),
         ...(remoteClaudeHost ? { remoteClaudeHost } : {}),
         ...(strictToolAllowlistEnabled ? { strictToolAllowlist: true } : {}),
         skillRuntimeContext,
         projectTrusted: projectTrust.trusted,
         runtimeOwnership,
-        ...(sideAskPeerOwnership && sideAskPeerGuard ? { sideAskPeerOwnership, protectedSessionId: sideAskPeerOwnership.sourceSessionId,
-          sideAskGuard: sideAskPeerGuard,
-          ...(sideAskPeerControl && sideAskPeerOwnership.callableTools.includes("session_control") ? { sideAskControl: sideAskPeerControl } : {}),
-        } : {}),
         stopBackgroundRun: subagentStopBridge.stop,
       });
       startingWrapper = wrapper;
@@ -8525,9 +7991,6 @@ export async function startRpcSession(
         // otherwise the first user message/name/bash event promotes the draft.
         appendSessionFastMode(inner.sessionManager, fastMode);
       }
-      // When all tools are disabled, clear the system prompt entirely.
-      // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
-      // keep this forced after extension resource discovery and reloads as well.
       if (effectiveToolNames?.length === 0) {
         wrapper.setForceEmptySystemPrompt(true);
       }

@@ -354,6 +354,35 @@ test("external runtime PATCH is rejected without changing the package file", asy
   assert.equal(await readFile(packagePath, "utf8"), before);
 });
 
+test("untrusted project and workspace profiles remain visible but cannot override an executable global profile", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-trust-"));
+  t.after(async () => {
+    await DELETE(jsonRequest("DELETE", { cwd, scope: "global", name: "trusted-agent" }));
+    await rm(cwd, { recursive: true, force: true });
+  });
+  await mkdir(join(cwd, ".pi"), { recursive: true });
+  await mkdir(join(cwd, ".pi", "agents"), { recursive: true });
+  await mkdir(join(cwd, ".agents", "agents"), { recursive: true });
+  await writeFile(join(cwd, ".pi", "settings.json"), "{}\n");
+  await writeFile(join(cwd, ".pi", "agents", "trusted-agent.md"), "---\nname: trusted-agent\ndescription: Untrusted project\n---\nProject prompt.\n");
+  await writeFile(join(cwd, ".agents", "agents", "workspace-agent.md"), "---\nname: workspace-agent\ndescription: Untrusted workspace\n---\nWorkspace prompt.\n");
+  const globalResponse = await PUT(jsonRequest("PUT", { cwd, scope: "global", profile: profile({ name: "trusted-agent", description: "Trusted global" }) }));
+  assert.equal(globalResponse.status, 200);
+
+  const response = await GET(getRequest(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  assert.equal(response.status, 200);
+  const profiles = (await response.json()).profiles;
+  const project = profiles.find((item) => item.scope === "project" && item.name === "trusted-agent");
+  const workspace = profiles.find((item) => item.scope === "workspace" && item.name === "workspace-agent");
+  const global = profiles.find((item) => item.scope === "global" && item.name === "trusted-agent");
+  assert.equal(project.executionAllowed, false);
+  assert.equal(project.trustRequired, true);
+  assert.equal(workspace.executionAllowed, false);
+  assert.equal(workspace.trustRequired, true);
+  assert.equal(global.executionAllowed, true);
+  assert.equal(resolveSubagentProfile(cwd, "trusted-agent").scope, "global");
+});
+
 test("GET rejects untrusted API requests before reading parameters", async () => {
   const response = await GET(new Request("http://attacker.example.com/api/subagents/profiles?cwd=/tmp"));
   assert.equal(response.status, 403);

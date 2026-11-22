@@ -3,6 +3,7 @@ import { join, sep } from "path";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getGlobalSettingsPath, readGlobalSettings, updateGlobalSettings } from "./global-settings-file";
+import { getProjectTrustStatus } from "./project-trust";
 import {
   getAgentDir,
   resolveModelScopeWithDiagnostics,
@@ -189,11 +190,23 @@ export function buildEnabledModelsView({
   };
 }
 
+/** Create the same trust-scoped manager used by Pi sessions for model settings. */
+export function createEnabledModelsSettingsManager(cwd: string, agentDir: string): SettingsManager {
+  return SettingsManager.create(cwd, agentDir, {
+    projectTrusted: getProjectTrustStatus(cwd, agentDir).trusted,
+  });
+}
+
 /** Read both settings layers asynchronously without blocking another writer's lock release. */
 export async function loadEnabledModelsSettings(paths: { cwd: string; agentDir: string }): Promise<SettingsManager> {
+  // Settings › Models must use the same trust decision as a live session. An
+  // untrusted project file cannot shadow the global enabledModels value.
+  const projectTrusted = getProjectTrustStatus(paths.cwd, paths.agentDir).trusted;
   const [global, project] = await Promise.all([
     readGlobalSettings(getGlobalSettingsPath(paths.agentDir), (settings) => JSON.stringify(settings)),
-    readGlobalSettings(join(paths.cwd, ".pi", "settings.json"), (settings) => JSON.stringify(settings)),
+    projectTrusted
+      ? readGlobalSettings(join(paths.cwd, ".pi", "settings.json"), (settings) => JSON.stringify(settings))
+      : Promise.resolve("{}"),
   ]);
   return SettingsManager.fromStorage({
     withLock(scope, read) {
@@ -201,7 +214,7 @@ export async function loadEnabledModelsSettings(paths: { cwd: string; agentDir: 
         throw new Error("Enabled model settings snapshot is read-only");
       }
     },
-  });
+  }, { projectTrusted });
 }
 
 export interface EnabledModelsSettings {

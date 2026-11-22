@@ -1,19 +1,19 @@
 import { createReadStream, existsSync, type Stats } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { readCompactionModel } from "./compaction-model";
-import { lstat, open, readdir, realpath, stat } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { SIDE_ASK_CHILD, SIDE_ASK_NATIVE_CHILD } from "./side-ask-ownership";
 import { spawn } from "node:child_process";
 import type { ExtensionCostSummary, SessionCostSummary, SessionUsageTotals } from "./pi-types";
 import { discoverLegacyExtensionUsage, extensionAccountingRevision, EXTENSION_USAGE_ENTRY, readExtensionAccounting } from "./extension-usage-accounting";
 import type { SessionCompactionCost } from "./session-cost";
 import { isSessionRecapUsageEntry } from "./session-recap";
+import { SIDE_META_TYPE } from "./side-session";
 import { imageGenerationOutputFromTask, imageGenerationOutputFromTool, readImageGenerationBilling, readImageGenerationOutput, readProviderCharge, providerCharge, type ImageGenerationBilling, type ImageGenerationCost, type ImageGenerationOutput, type ProviderCharge } from "./image-generation-cost";
 import { officialImageOutputTokenEstimate, officialImageProviderForModel } from "./official-image-pricing";
-import { canonicalOpenAIProviderId } from "./openai-provider-aliases";
+import { canonicalHistoricalOpenAIProvider } from "./openai-provider-aliases";
 import { billingScriptCandidates } from "../packages/reader-usage-pricing/index";
 import { observedResponseServiceTier } from "../packages/reader-usage-pricing/discovery";
 
@@ -436,7 +436,7 @@ function isGatewayProvider(provider: string | undefined): boolean {
 function pricingInput(input: BillingUsageInput): BillingUsageInput {
   const gateway = isGatewayProvider(input.provider);
   const officialProvider = officialImageProviderForModel(input.provider, input.model);
-  const canonicalProvider = canonicalOpenAIProviderId(input.provider);
+  const canonicalProvider = canonicalHistoricalOpenAIProvider(input.provider);
   const pricedInput = officialProvider
     ? { ...input, provider: officialProvider }
     : canonicalProvider !== input.provider
@@ -615,39 +615,8 @@ async function isCanonicalSessionFile(filePath: string): Promise<boolean> {
   }
 }
 
-type SideAskChildReference = { childPath: string; sessionId: string; parentSessionPath: string };
-const sideAskReferenceCache = new Map<string, { signature: string; references: SideAskChildReference[] }>();
-
 function fileSignature(info: Stats): string {
   return `${info.dev}\0${info.ino}\0${info.ctimeMs}\0${info.mtimeMs}\0${info.size}`;
-}
-
-async function sideAskChildReferences(filePath: string): Promise<SideAskChildReference[]> {
-  const signature = fileSignature(await stat(filePath));
-  const cached = sideAskReferenceCache.get(filePath);
-  if (cached?.signature === signature) {
-    sideAskReferenceCache.delete(filePath);
-    sideAskReferenceCache.set(filePath, cached);
-    return cached.references;
-  }
-  const references: SideAskChildReference[] = [];
-  for await (const packet of readAccountingEntries(filePath)) {
-    if (packet.kind !== "entry") continue;
-    const entry = packet.value;
-    if (entry.type !== "custom" || (entry.customType !== SIDE_ASK_CHILD && entry.customType !== SIDE_ASK_NATIVE_CHILD)
-      || !isRecord(entry.data)) continue;
-    const { version, childPath, sessionId, parentSessionPath } = entry.data;
-    if (version === 1 && typeof childPath === "string" && childPath && !isAbsolute(childPath)
-      && typeof sessionId === "string" && sessionId && typeof parentSessionPath === "string") {
-      references.push({ childPath, sessionId, parentSessionPath });
-    }
-  }
-  if (signature === fileSignature(await stat(filePath))) {
-    sideAskReferenceCache.delete(filePath);
-    sideAskReferenceCache.set(filePath, { signature, references });
-    if (sideAskReferenceCache.size > 500) sideAskReferenceCache.delete(sideAskReferenceCache.keys().next().value!);
-  }
-  return references;
 }
 
 export async function findChildSessionPaths(filePath: string): Promise<string[]> {
@@ -676,33 +645,6 @@ export async function findChildSessionPaths(filePath: string): Promise<string[]>
     }
   };
   for (const root of roots) await walk(root);
-  // Native Side Ask children live in the SDK session directory, not under the
-  // parent's transcript. Only follow recorded, header-verified session links.
-  const sessionRoot = await realpath(join(getAgentDir(), "sessions")).catch(() => null);
-  if (!sessionRoot) return result.sort();
-  const parentPath = resolve(filePath);
-  const found = new Set([parentPath, ...result]);
-  const pending = [parentPath];
-  while (pending.length) {
-    const source = pending.pop()!;
-    try {
-      for (const { childPath, sessionId, parentSessionPath } of await sideAskChildReferences(source)) {
-        const path = resolve(sessionRoot, childPath);
-        const within = relative(sessionRoot, path);
-        if (!within || isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`) || !path.endsWith(".jsonl") || found.has(path)) continue;
-        const info = await lstat(path).catch(() => null);
-        if (!info?.isFile()) continue;
-        const actual = await realpath(path).catch(() => null);
-        if (!actual || actual !== path) continue;
-        const header = await sessionHeader(path, info);
-        if (header?.id !== sessionId || header.parentSessionPath !== parentSessionPath || seenSessionIds.has(header.id)) continue;
-        seenSessionIds.add(header.id);
-        found.add(path);
-        result.push(path);
-        pending.push(path);
-      }
-    } catch { /* Missing source transcripts have no verifiable links. */ }
-  }
   return result.sort();
 }
 
@@ -892,34 +834,19 @@ function billingServiceTier(...sources: unknown[]): string {
   return observedResponseServiceTier(...sources);
 }
 
-type AccountingEntry = { kind: "entry"; value: Record<string, unknown> } | { kind: "enter" } | { kind: "leave" };
-
-/** Side Ask wrappers carry the original SDK accounting records, not an additional aggregate charge. */
-async function* readAccountingEntries(filePath: string): AsyncGenerator<AccountingEntry> {
-  const wrappers = new Set(["quick_ask", "quick_ask_step", "quick_ask_outcome", "reader.side_ask_outcome"]);
+async function* readAccountingEntries(filePath: string): AsyncGenerator<Record<string, unknown>> {
+  const entries: Record<string, unknown>[] = [];
   for await (const line of readJsonlLines(filePath)) {
     if (!line.trim()) continue;
-    let value: unknown;
-    try { value = JSON.parse(line) as unknown; } catch { continue; }
-    if (!isRecord(value)) continue;
-    const data = isRecord(value.data) ? value.data : undefined;
-    if (value.type !== "custom" || typeof value.customType !== "string" || !wrappers.has(value.customType)
-      || !Array.isArray(data?.nativeEntries)) {
-      yield { kind: "entry", value };
-      continue;
-    }
-    const native = data.nativeEntries.filter(isRecord);
-    const assistants = native.filter((entry) => entry.type === "message" && isRecord(entry.message)
-      && entry.message.role === "assistant" && isRecord(entry.message.usage));
-    if (!assistants.length) yield { kind: "entry", value };
-    yield { kind: "enter" };
-    for (const entry of native) {
-      if (assistants.length === 1 && entry === assistants[0] && isRecord(entry.message)
-        && !isRecord(entry.message.usageEvent) && isRecord(data.usageEvent)) {
-        yield { kind: "entry", value: { ...entry, message: { ...entry.message, usageEvent: data.usageEvent } } };
-      } else yield { kind: "entry", value: entry };
-    }
-    yield { kind: "leave" };
+    try {
+      const value = JSON.parse(line) as unknown;
+      if (isRecord(value)) entries.push(value);
+    } catch { /* Ignore torn or invalid JSONL records. */ }
+  }
+  const metadata = entries.find((entry) => entry.type === "custom" && entry.customType === SIDE_META_TYPE);
+  const createdAt = isRecord(metadata?.data) && typeof metadata.data.createdAt === "string" ? metadata.data.createdAt : undefined;
+  for (const entry of entries) {
+    if (!createdAt || entry.type === "session" || (typeof entry.timestamp === "string" && entry.timestamp > createdAt)) yield entry;
   }
 }
 
@@ -938,16 +865,7 @@ export async function extractReaderUsageRecords(filePath: string): Promise<Reade
   let currentProvider = "";
   let currentModel = "";
   let firstRecord = true;
-  const scopes: Array<{ provider: string; model: string }> = [];
-
-  for await (const packet of readAccountingEntries(filePath)) {
-    if (packet.kind === "enter") { scopes.push({ provider: currentProvider, model: currentModel }); continue; }
-    if (packet.kind === "leave") {
-      const previous = scopes.pop();
-      if (previous) { currentProvider = previous.provider; currentModel = previous.model; }
-      continue;
-    }
-    const entry = packet.value;
+  for await (const entry of readAccountingEntries(filePath)) {
     if (firstRecord) {
       firstRecord = false;
       if (entry.type !== "session" || typeof entry.id !== "string" || !entry.id.trim()) {

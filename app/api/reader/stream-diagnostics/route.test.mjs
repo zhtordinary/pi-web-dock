@@ -17,7 +17,7 @@ function fixture(readDiagnostics) {
     "@/lib/activity-peers": { localDeviceId: () => "fixture-device", readActivityConfig: () => ({}) },
     "@/lib/reader-event-stream": {
       listReaderStreamDiagnostics: () => { reads += 1; return readDiagnostics(); },
-      READER_STREAM_KINDS: ["agent", "reader-events", "activity", "terminal", "file-watch", "ui-requests", "quick-ask", "provider-login"],
+      READER_STREAM_KINDS: ["agent", "reader-events", "activity", "terminal", "file-watch", "ui-requests", "provider-login"],
     },
   };
   const testModule = { exports: {} };
@@ -51,7 +51,7 @@ test("returns only bounded connection counters", async () => {
   assert.deepEqual(body.counts, { agent: 1 });
   assert.deepEqual(body.coverage.excludes, ["ip", "userAgent", "requestMetadata", "eventContent"]);
   assert.deepEqual(body.coverage.streamKinds, {
-    included: ["agent", "reader-events", "activity", "terminal", "file-watch", "ui-requests", "quick-ask", "provider-login"],
+    included: ["agent", "reader-events", "activity", "terminal", "file-watch", "ui-requests", "provider-login"],
     excluded: [],
   });
   assert.equal(body.coverage.complete, true);

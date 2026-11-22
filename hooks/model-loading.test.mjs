@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Script } from "node:vm";
 import ts from "typescript";
+import { missingCwdFromBody } from "../lib/missing-cwd.ts";
 
 const sourceText = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
 const source = ts.createSourceFile("useAgentSession.ts", sourceText, ts.ScriptTarget.Latest, true);
@@ -51,7 +52,9 @@ function makeState(fetchImpl) {
     asConcreteThinkingLevel: (value) => (!value || value === "auto" ? null : value),
     resolveDefaultThinkingLevel: (levels, preferred, pin) => preferred && levels?.includes(preferred)
       ? preferred : pin ?? levels?.at(-1) ?? null,
+    missingCwdFromBody,
     fetch: fetchImpl,
+    setModelsMissingCwd: (value) => writes.push(["modelsMissingCwd", value]),
     setModelNames: (value) => writes.push(["modelNames", value]),
     setModelError: (value) => writes.push(["modelError", value]),
     setModelScopeWarnings: (value) => writes.push(["modelScopeWarnings", value]),
@@ -144,6 +147,8 @@ function setup(fetchImpl) {
     asConcreteThinkingLevel: (value) => (!value || value === "auto" ? null : value),
     resolveDefaultThinkingLevel: (levels, preferred, pin) => preferred && levels?.includes(preferred)
       ? preferred : pin ?? levels?.at(-1) ?? null,
+    missingCwdFromBody,
+    setModelsMissingCwd: (value) => writes.push(["ModelsMissingCwd", value]),
 
     asConcreteThinkingLevel: (value) => (!value || value === "auto" ? null : value),
     fetch: fetchImpl,

@@ -78,6 +78,17 @@ export function validateSessionToolSelection(tools: unknown): string[] {
   return parsed.tools;
 }
 
+export function createSessionToolSelectionEntry(tools: readonly string[], id: string, parentId: string | null = null) {
+  return {
+    type: "custom",
+    customType: TOOL_SELECTION_TYPE,
+    data: { version: 1, tools: [...tools] } satisfies SessionToolSelectionData,
+    id,
+    parentId,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 export function appendSessionToolSelection(
   sessionManager: SessionManager,
   tools: readonly string[],

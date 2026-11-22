@@ -100,11 +100,6 @@ export async function GET(
       };
       const send = (data: unknown) => {
         if (closed) return false;
-        if ((controller.desiredSize ?? 0) <= 0) {
-          diagnostic.droppedEvents += 1;
-          cleanup("error");
-          return false;
-        }
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
           const now = Date.now();

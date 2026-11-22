@@ -5,12 +5,12 @@ import {
   initTheme,
   SessionManager,
   SettingsManager,
-  type InlineExtension,
   type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { createPiWebBuiltinExtensions } from "./builtin-extensions";
 import { createReaderAgentSessionServices } from "./model-runtime";
 import { createCompactionModelExtension } from "./compaction-model-extension";
+import { createProjectCommandPowerShellExtension, preferUserPowerShellExtension } from "./project-command-env";
 import { acquireSessionRuntimeOwnership, type SessionRuntimeOwnership } from "./session-runtime-ownership";
 import type { McpHost } from "./mcp-host";
 import type { AgentSessionLike } from "./pi-types";
@@ -44,11 +44,8 @@ import type { SessionEntry } from "./types";
 import { buildSubagentPromptPlan } from "./subagent-prompt";
 import { createSubagentSkillsBinding } from "./subagent-skills";
 import { appendSubagentInputFiles, loadSubagentInputFiles, subagentInputLimits } from "./subagent-input";
-import { projectTrustReloadOptions } from "./project-trust";
 import { getProjectTrustStatus } from "./project-trust";
 import { createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
-import { createSideAskControlGuard } from "./session-control";
-import { SIDE_ASK_PEER_OWNERSHIP, preferSideAskSessionControl, type SideAskPeerOwnership } from "./side-ask-ownership";
 import { resolveShellTools } from "./powershell-settings";
 import {
   filterRuntimeSkills,
@@ -75,12 +72,6 @@ import {
 
 export interface HostSession {
   readonly agentDir?: string;
-  readonly protectedSessionId?: string;
-  readonly sideAskUiContext?: unknown;
-  readonly sideAskGuard?: InlineExtension;
-  readonly sideAskControl?: InlineExtension;
-  readonly sideAskPeerOwnership?: SideAskPeerOwnership;
-  recordSideAskChild?(sessionId: string, sessionPath: string): void;
   readonly inner: AgentSessionLike;
   readonly sessionFile: string;
   readonly cwd: string;
@@ -100,18 +91,13 @@ export interface SubagentRuntimeDependencies {
   registerSession(
     inner: AgentSessionLike,
     options?: {
-      exactSystemPrompt?: string;
+      exactSystemPrompt?: () => string;
       chatOnly?: boolean;
       remoteHost?: RemoteClaudeHostBinding;
       mcpHost?: McpHost;
       skillRuntimeContext?: RuntimeSkillPolicyContext;
       projectTrusted?: boolean;
       runtimeOwnership?: SessionRuntimeOwnership;
-      sideAskUiContext?: unknown;
-      protectedSessionId?: string;
-      sideAskGuard?: InlineExtension;
-      sideAskControl?: InlineExtension;
-      sideAskPeerOwnership?: SideAskPeerOwnership;
       agentDir?: string;
     },
   ): HostSession | void;
@@ -134,6 +120,8 @@ type StoredSubagentExecution = {
   abortRequested: boolean;
   /** Set once the turn limit closes the run; later steering must not reopen it. */
   turnLimitReached?: boolean;
+  /** Once max_turns is consumed, background reports must not buy another turn. */
+  turnsUsed?: boolean;
   cancelQueued?: () => boolean;
   remoteHost?: RemoteClaudeHostBinding;
   mcpWait?: AbortController;
@@ -179,38 +167,54 @@ function lastAssistantStop(sessionManager: { getEntries?: () => unknown }): { ab
   return undefined;
 }
 
-function assistantTextFromEntries(entries: readonly unknown[]): string | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index] as { type?: unknown; message?: { role?: unknown; content?: unknown } };
-    if (entry?.type !== "message" || entry.message?.role !== "assistant") continue;
-    const content = entry.message.content;
-    const text = typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content
-          .filter((block): block is { type?: unknown; text?: unknown } => typeof block === "object" && block !== null)
-          .filter((block) => block.type === "text" && typeof block.text === "string")
-          .map((block) => block.text as string)
-          .join("")
-        : "";
-    if (text.trim()) return text.trim();
-  }
-  return undefined;
+type RunMessage = { role?: unknown; stopReason?: unknown; content?: unknown };
+type RunEntry = {
+  type?: unknown;
+  id?: unknown;
+  targetId?: unknown;
+  replacement?: { content?: unknown } | null;
+  message?: RunMessage;
+};
+
+function runMessageText(message: RunMessage): string {
+  if (typeof message.content === "string") return message.content.trim();
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .map((block: { type?: unknown; text?: unknown }) => block?.type === "text" && typeof block.text === "string" ? block.text : "")
+    .join("")
+    .trim();
 }
 
-function assistantTextForRun(
-  inner: AgentSessionLike,
-  sessionManager: { getEntries?: () => unknown },
-  baselineEntryCount: number,
-  previousText?: string,
-): string | undefined {
+/** Read only this run's assistant output through Pi's context-edit projection. */
+function runResultText(sessionManager: { getEntries?: () => unknown }, from: number): string | undefined {
   const entries = sessionManager.getEntries?.();
-  if (Array.isArray(entries)) {
-    const appended = assistantTextFromEntries(entries.slice(baselineEntryCount));
-    if (appended) return appended;
+  if (!Array.isArray(entries)) return undefined;
+  // SAFETY: SessionManager returns the persisted SessionEntry wire shape; this local view only reads
+  // the fields needed to project assistant messages and context_edit replacements.
+  const runEntries = entries.slice(from) as RunEntry[];
+  const edits = new Map<unknown, RunEntry["replacement"]>();
+  for (const entry of runEntries) if (entry?.type === "context_edit") edits.set(entry.targetId, entry.replacement);
+  const messages = runEntries.flatMap((entry): RunMessage[] => {
+    if (entry?.type !== "message" || entry.message?.role !== "assistant") return [];
+    if (!edits.has(entry.id)) return [entry.message];
+    const replacement = edits.get(entry.id);
+    if (!replacement) return [];
+    const content = typeof replacement.content === "string" ? [{ type: "text", text: replacement.content }] : replacement.content;
+    return [{ ...entry.message, content }];
+  });
+  let last = messages.length - 1;
+  while (last >= 0) {
+    const message = messages[last];
+    if (!message || message.stopReason !== "aborted" || !Array.isArray(message.content) || message.content.length !== 0) break;
+    last -= 1;
   }
-  const current = inner.getLastAssistantText?.()?.trim();
-  return current && current !== previousText?.trim() ? current : undefined;
+  const texts = messages.flatMap((message, index) => {
+    const complete = index === last || (message.stopReason !== "error" && message.stopReason !== "aborted"
+      && !(Array.isArray(message.content) && message.content.some((block: { type?: unknown }) => block?.type === "toolCall")));
+    const text = complete ? runMessageText(message) : "";
+    return text ? [text] : [];
+  });
+  return texts.length ? texts.join("\n\n") : undefined;
 }
 
 function turnLimitError(turnLimit: number, undelivered: readonly string[]): string {
@@ -263,6 +267,7 @@ function installTurnLimitGuard(
     const needsAnotherTurn = toolsContinue || decision?.action === "continue" || turnLimitAgent.hasQueuedMessages?.() === true;
     if (!needsAnotherTurn) return decision;
     turnCount += 1;
+    if (turnCount >= turnLimit) stored.turnsUsed = true;
     if (turnCount < turnLimit) return decision;
     if (turnCount > turnLimit) {
       hardLimitReached = true;
@@ -346,7 +351,10 @@ function settleOrphanedRun(run: SubagentRunInfo): SubagentRunInfo {
 
 function findSubagentModel(runtime: ModelRuntime, reference: string) {
   const slash = reference.indexOf("/");
-  if (slash > 0) return runtime.getModel(reference.slice(0, slash), reference.slice(slash + 1));
+  // A slash may belong to the model ID itself; provider/modelId is tried first,
+  // then the full reference is matched as a bare ID.
+  const named = slash > 0 ? runtime.getModel(reference.slice(0, slash), reference.slice(slash + 1)) : undefined;
+  if (named) return named;
   const matches = runtime.getModels().filter((model) => model.id === reference);
   if (matches.length > 1) throw new Error(`Subagent model is ambiguous; use provider/modelId: ${reference}`);
   return matches[0];
@@ -523,7 +531,6 @@ export function createSubagentController(
     const parent = dependencies.getSession(parentSessionId);
     if (!parent?.isAlive()) throw new Error("Parent session is no longer available");
     if (!parent.sessionFile) throw new Error("Parent session must be persisted before starting a subagent");
-    if (parent.protectedSessionId && !parent.sideAskPeerOwnership) throw new Error("Side Ask child ownership is unavailable");
 
     let isolatedWorktree: { path: string; branch: string } | undefined;
     let childRemoteHost: RemoteClaudeHostBinding | undefined;
@@ -589,16 +596,18 @@ export function createSubagentController(
       const childProjectRoot = await readerRuntimeProjectRoot(childCwd);
 
       const agentDir = parent.agentDir ?? parentAgentDir ?? getAgentDir();
-      const childProjectTrust = getProjectTrustStatus(childCwd, agentDir);
-      const settingsManager = SettingsManager.create(childCwd, agentDir, {
-        projectTrusted: childProjectTrust.trusted,
-      });
+      // A child uses the live parent's trust decision in memory. An isolated worktree has no
+      // decision of its own and must not silently become trusted or write trust.json.
+      const projectTrusted = typeof parent.inner.settingsManager?.isProjectTrusted === "function"
+        ? parent.inner.settingsManager.isProjectTrusted()
+        : getProjectTrustStatus(parent.cwd, agentDir).trusted;
+      const settingsManager = SettingsManager.create(childCwd, agentDir, { projectTrusted });
       const childSkillRuntimeContext = await createSubagentSkillRuntimeContext({
         cwd: childCwd,
         agentDir,
         settingsManager,
         loadSkills: profile.loadSkills,
-        projectTrusted: childProjectTrust.trusted,
+        projectTrusted,
       });
       const inheritedParentContext = inheritContext
         ? `The following is the active conversation context from the parent session. Use it only as background for the delegated task:\n${parentContextText(parent)}`
@@ -659,9 +668,8 @@ export function createSubagentController(
       if (!chatOnly) initTheme();
       const childExtensionFactories = [
         createCompactionModelExtension(settingsManager),
-        ...(parent.protectedSessionId ? [createSideAskControlGuard(parent.protectedSessionId)] : []),
-        ...(parent.sideAskGuard ? [parent.sideAskGuard] : []),
-        ...(profile.loadExtensions && parent.sideAskControl ? [parent.sideAskControl] : []),
+        ...(resolveShellTools(effectiveProfileTools, settingsManager.getDefaultTools()).includes("powershell")
+          ? [createProjectCommandPowerShellExtension({ cwd: childCwd })] : []),
         ...childBuiltinFactories,
         ...(subagentSkillsBinding.loaderOptions.extensionFactories ?? []),
         ...(parentRemoteHost ? [createRemoteClaudeHostGuardExtension()] : []),
@@ -678,9 +686,10 @@ export function createSubagentController(
         settingsManager,
         resourceLoaderOptions: {
           ...childExtensionOptions,
-          ...(profile.loadExtensions && parent.sideAskControl ? { extensionsOverride: (base) => {
-            return preferSideAskSessionControl(childExtensionOptions.extensionsOverride?.(base) ?? base);
-          } } : {}),
+          extensionsOverride: (base) => {
+            const scoped = preferUserPowerShellExtension(childExtensionOptions.extensionsOverride?.(base) ?? base);
+            return scoped;
+          },
           ...childSkillLoaderOptions,
           noPromptTemplates: true,
           noThemes: true,
@@ -695,7 +704,7 @@ export function createSubagentController(
           extensionFactories: childExtensionFactories,
         },
         ...((profile.loadExtensions || profile.loadSkills || codemodeEnabled || mcpEnabled)
-          ? { resourceLoaderReloadOptions: projectTrustReloadOptions(childCwd, agentDir) }
+          ? { resourceLoaderReloadOptions: { resolveProjectTrust: async () => projectTrusted } }
           : {}),
       });
 
@@ -755,7 +764,6 @@ export function createSubagentController(
         ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
       };
       sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, metadata);
-      if (parent.sideAskPeerOwnership) sessionManager.appendCustomEntry(SIDE_ASK_PEER_OWNERSHIP, parent.sideAskPeerOwnership);
       sessionManager.appendSessionInfo(metadata.description);
 
       const parentModel = parent.inner.model as ReturnType<ModelRuntime["getModel"]>;
@@ -800,26 +808,20 @@ export function createSubagentController(
         if (!childRemoteHost) throw new Error("capability-unavailable: Reader host scope could not be installed for child session");
       }
       persistChildSession(sessionManager);
-      parent.recordSideAskChild?.(inner.sessionId, inner.sessionFile ?? sessionManager.getSessionFile() ?? "");
       const childOwnership = runtimeOwnership;
       // Registration owns cleanup even if wrapper setup fails after it starts extension teardown.
       runtimeOwnership = undefined;
       unregisteredInner = undefined;
       const childSession = dependencies.registerSession(inner, {
-        ...(promptPlan.exactSystemPrompt !== undefined
-          ? { exactSystemPrompt: promptPlan.exactSystemPrompt }
+        ...(subagentSkillsBinding.getExactSystemPrompt
+          ? { exactSystemPrompt: subagentSkillsBinding.getExactSystemPrompt }
           : {}),
         chatOnly,
         ...(childRemoteHost ? { remoteHost: childRemoteHost } : {}),
         ...(builtinResources?.mcpHost ? { mcpHost: builtinResources.mcpHost } : {}),
         skillRuntimeContext: childSkillRuntimeContext,
-        projectTrusted: childProjectTrust.trusted,
+        projectTrusted,
         runtimeOwnership: childOwnership,
-        ...(parent.sideAskUiContext ? { sideAskUiContext: parent.sideAskUiContext } : {}),
-        ...(parent.protectedSessionId ? { protectedSessionId: parent.protectedSessionId } : {}),
-        ...(parent.sideAskGuard ? { sideAskGuard: parent.sideAskGuard } : {}),
-        ...(parent.sideAskControl ? { sideAskControl: parent.sideAskControl } : {}),
-        ...(parent.sideAskPeerOwnership ? { sideAskPeerOwnership: parent.sideAskPeerOwnership } : {}),
         agentDir,
       });
       if (!childSession) runtimeOwnership = childOwnership;
@@ -859,20 +861,18 @@ export function createSubagentController(
       }
       if (!runInBackground) request.signal?.addEventListener("abort", handleParentAbort, { once: true });
 
-      const runBaselineEntries = sessionManager.getEntries();
-      const runBaselineEntryCount = runBaselineEntries.length;
-      const previousAssistantText = assistantTextFromEntries(runBaselineEntries);
+      const runBaselineEntryCount = sessionManager.getEntries().length;
       const execute = async (): Promise<SubagentRunInfo> => {
         if (stored.abortRequested) {
           const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
-          sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, { version: 1, status: "aborted", completedAt: result.completedAt });
-          await cleanupWorktree(parent.cwd, isolatedWorktree);
-          stored.run = result;
-          request.onUpdate?.(result);
+          const cleanupError = await cleanupWorktree(parent.cwd, isolatedWorktree);
+          const finalResult = recordResult(sessionManager, cleanupError ? { ...result, worktreeCleanupError: cleanupError } : result);
+          stored.run = finalResult;
+          request.onUpdate?.(finalResult);
           getSubagentRuns().delete(initialRun.sessionId);
           revokeRemoteClaudeHost(resolveRemoteClaudeHost(inner.sessionId) ?? childRemoteHost);
           dependencies.invalidateSessionList();
-          return result;
+          return finalResult;
         }
         stored.run = { ...stored.run, status: "running" };
         sessionManager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
@@ -884,7 +884,7 @@ export function createSubagentController(
           await prepareChildMcp(childSession, stored);
           if (stored.abortRequested) throw new Error("Stopped before subagent prompt");
           await inner.prompt(delegatedTask, { source: "rpc" });
-          const text = assistantTextForRun(inner, sessionManager, runBaselineEntryCount, previousAssistantText);
+          const text = runResultText(sessionManager, runBaselineEntryCount);
           const stop = stored.abortRequested ? undefined : lastAssistantStop(sessionManager);
           const aborted = stored.abortRequested || stop?.aborted === true;
           const errorMessage = aborted ? undefined : stop?.error
@@ -897,7 +897,7 @@ export function createSubagentController(
             ...(errorMessage ? { error: errorMessage } : {}),
           };
         } catch (error) {
-          const text = assistantTextForRun(inner, sessionManager, runBaselineEntryCount, previousAssistantText);
+          const text = runResultText(sessionManager, runBaselineEntryCount);
           const aborted = stored.abortRequested || request.signal?.aborted;
           const errorMessage = aborted ? undefined : turnLimitGuard.reached() && turnLimit
             ? turnLimitError(turnLimit, turnLimitGuard.undelivered())
@@ -929,8 +929,7 @@ export function createSubagentController(
         if (stored.run.status !== "queued") return;
         const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
         const cleanupError = await cleanupWorktree(parent.cwd, isolatedWorktree);
-        const finalResult = cleanupError ? { ...result, worktreeCleanupError: cleanupError } : result;
-        sessionManager.appendCustomEntry(SUBAGENT_RESULT_TYPE, { version: 1, status: "aborted", completedAt: finalResult.completedAt, ...(cleanupError ? { worktreeCleanupError: cleanupError } : {}) });
+        const finalResult = recordResult(sessionManager, cleanupError ? { ...result, worktreeCleanupError: cleanupError } : result);
         stored.run = finalResult;
         request.onUpdate?.(finalResult);
         getSubagentRuns().delete(initialRun.sessionId);
@@ -957,7 +956,8 @@ export function createSubagentController(
       runtimeOwnership = undefined;
       // Queue settlement includes cancellation cleanup and the final result append.
       void queued.promise.then((run) => resolveCompletion(run ?? stored.run), (error) => {
-        resolveCompletion({ ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
+        const failed = recordResult(sessionManager, { ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
+        resolveCompletion(failed);
       }).finally(() => unhostedOwnership?.release());
 
       return { run: stored.run, completion: stored.completion };
@@ -1049,6 +1049,12 @@ export function createSubagentController(
     }
 
     const runInBackground = request.runInBackground ?? existing.runInBackground;
+    const manager = wrapper.inner.sessionManager;
+    const resumedDescription = request.description.trim();
+    const currentName = typeof manager.getSessionName === "function" ? manager.getSessionName() : undefined;
+    if (resumedDescription && resumedDescription !== currentName && typeof wrapper.inner.setSessionName === "function") {
+      wrapper.inner.setSessionName(resumedDescription);
+    }
     const initialRun: SubagentRunInfo = {
       ...existing,
       parentToolCallId: request.parentToolCallId,
@@ -1061,10 +1067,7 @@ export function createSubagentController(
       error: undefined,
       resumed: true,
     };
-    const manager = wrapper.inner.sessionManager;
-    const runBaselineEntries = manager.getEntries();
-    const runBaselineEntryCount = runBaselineEntries.length;
-    const previousAssistantText = assistantTextFromEntries(runBaselineEntries);
+    const runBaselineEntryCount = manager.getEntries().length;
     let resolveCompletion!: (run: SubagentRunInfo) => void;
     const completion = new Promise<SubagentRunInfo>((resolve) => { resolveCompletion = resolve; });
       const stored: StoredSubagentExecution = {
@@ -1088,11 +1091,11 @@ export function createSubagentController(
     const execute = async (): Promise<SubagentRunInfo> => {
       if (stored.abortRequested) {
         const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
-        manager.appendCustomEntry(SUBAGENT_RESULT_TYPE, { version: 1, status: "aborted", completedAt: result.completedAt });
-        stored.run = result;
+        const finalResult = recordResult(manager, result);
+        stored.run = finalResult;
         getSubagentRuns().delete(request.sessionId);
         revokeRemoteClaudeHost(resolveRemoteClaudeHost(request.sessionId) ?? resumedRemoteHost);
-        return result;
+        return finalResult;
       }
       stored.run = { ...stored.run, status: "running" };
       manager.appendCustomEntry(SUBAGENT_STATUS_TYPE, { version: 1, status: "running" });
@@ -1103,7 +1106,7 @@ export function createSubagentController(
         await prepareChildMcp(wrapper, stored);
         if (stored.abortRequested) throw new Error("Stopped before subagent prompt");
         await wrapper!.inner.prompt(request.task, { source: "rpc" });
-        const text = assistantTextForRun(wrapper!.inner, manager, runBaselineEntryCount, previousAssistantText);
+        const text = runResultText(manager, runBaselineEntryCount);
         const stop = stored.abortRequested ? undefined : lastAssistantStop(manager);
         const aborted = stored.abortRequested || stop?.aborted === true;
         const providerError = aborted ? undefined : stop?.error;
@@ -1117,7 +1120,7 @@ export function createSubagentController(
           ...(errorMessage ? { error: errorMessage } : {}),
         };
       } catch (error) {
-        const text = assistantTextForRun(wrapper!.inner, manager, runBaselineEntryCount, previousAssistantText);
+        const text = runResultText(manager, runBaselineEntryCount);
         const aborted = stored.abortRequested || request.signal?.aborted;
         const errorMessage = aborted ? undefined : turnLimitGuard.reached() && resumeTurnLimit
           ? turnLimitError(resumeTurnLimit, turnLimitGuard.undelivered())
@@ -1133,13 +1136,7 @@ export function createSubagentController(
         turnLimitGuard.dispose();
         request.signal?.removeEventListener("abort", handleParentAbort);
       }
-      manager.appendCustomEntry(SUBAGENT_RESULT_TYPE, {
-        version: 1,
-        status: result.status as "completed" | "failed" | "aborted",
-        completedAt: result.completedAt!,
-        ...(result.result ? { result: result.result } : {}),
-        ...(result.error ? { error: result.error } : {}),
-      });
+      result = recordResult(manager, result);
       stored.run = result;
       request.onUpdate?.(result);
       getSubagentRuns().delete(request.sessionId);
@@ -1150,9 +1147,9 @@ export function createSubagentController(
     const finishQueuedAbort = () => {
       if (stored.run.status !== "queued") return;
       const result: SubagentRunInfo = { ...initialRun, status: "aborted", completedAt: new Date().toISOString() };
-      manager.appendCustomEntry(SUBAGENT_RESULT_TYPE, { version: 1, status: "aborted", completedAt: result.completedAt });
-      stored.run = result;
-      request.onUpdate?.(result);
+      const finalResult = recordResult(manager, result);
+      stored.run = finalResult;
+      request.onUpdate?.(finalResult);
       getSubagentRuns().delete(request.sessionId);
       revokeRemoteClaudeHost(resolveRemoteClaudeHost(request.sessionId) ?? resumedRemoteHost);
       dependencies.invalidateSessionList();
@@ -1165,7 +1162,9 @@ export function createSubagentController(
     }, finishQueuedAbort);
     stored.cancelQueued = queued.cancel;
     if (stored.abortRequested) queued.cancel();
-    void queued.promise.then((run) => resolveCompletion(run ?? stored.run), (error) => resolveCompletion({ ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) }));
+    void queued.promise.then((run) => resolveCompletion(run ?? stored.run), (error) => {
+      resolveCompletion(recordResult(manager, { ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) }));
+    });
     return { run: stored.run, completion };
   }
 
@@ -1185,7 +1184,7 @@ export function createSubagentController(
     if (!parentHost) throw new Error("capability-unavailable: remote Claude parent host binding is unavailable");
     // Validate the child entry too: its parent generation may have become
     // stale even while the parent session itself remains registered.
-    assertRemoteClaudeHost(childHost, "side-ask");
+    assertRemoteClaudeHost(childHost, "get-result", { readerMarker: childHost.readerMarker });
     const parentId = parentContext?.sessionManager.getSessionId();
     if (parentId !== run.parentSessionId) throw new Error("parent-not-owner: subagent belongs to another parent session");
     assertRemoteClaudeHost(parentHost, operation, {
@@ -1239,6 +1238,54 @@ export function createSubagentController(
     await wrapper.inner.steer(message.trim());
   }
 
+  const PARENT_NOTIFICATION_TYPE = "pi-web:subagent-notification";
+  const parentNotificationMessage = (run: SubagentRunInfo) => ({
+    customType: PARENT_NOTIFICATION_TYPE,
+    content: subagentNotificationText(run),
+    display: true,
+    details: subagentToolDetails(run),
+  });
+
+  function canSteerAfterTurn(parent: HostSession, run: SubagentRunInfo, message: unknown): boolean {
+    const stopReason = (message as { stopReason?: unknown } | undefined)?.stopReason;
+    // SAFETY: AgentSessionLike's reduced agent view still exposes the SDK queue and abort state.
+    const agent = parent.inner.agent as unknown as { signal?: AbortSignal; hasQueuedMessages?: () => boolean };
+    if (stopReason === "error" || stopReason === "aborted" || agent.signal?.aborted) return false;
+    if (parent.isStopRequested?.() || agent.hasQueuedMessages?.()) return false;
+    const stored = getSubagentRuns().get(run.parentSessionId);
+    return stored?.turnLimitReached !== true && stored?.turnsUsed !== true;
+  }
+
+  function steerIntoRun(parent: HostSession, run: SubagentRunInfo): Promise<"delivered" | "consumed" | "idle"> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let sending = false;
+      let idleCheck: ReturnType<typeof setInterval> | undefined;
+      const finish = (outcome: "delivered" | "consumed" | "idle") => {
+        if (settled) return;
+        settled = true;
+        if (idleCheck) clearInterval(idleCheck);
+        queueMicrotask(unsubscribe);
+        resolve(outcome);
+      };
+      const unsubscribe = parent.inner.subscribe?.((event) => {
+        if (settled || sending) return;
+        if (event.type !== "turn_end") return;
+        if (takeResultConsumed(run)) return finish("consumed");
+        if (!canSteerAfterTurn(parent, run, event.message)) return;
+        sending = true;
+        void parent.inner.sendCustomMessage(parentNotificationMessage(run), { deliverAs: "steer", triggerTurn: false })
+          .then(() => finish("delivered"), (error) => {
+            sending = false;
+            console.error("[pi-web] failed to steer subagent completion:", error instanceof Error ? error.message : error);
+          });
+      }) ?? (() => finish("idle"));
+      idleCheck = setInterval(() => {
+        if (!parent.isAlive() || !parent.isRunning()) finish("idle");
+      }, PARENT_IDLE_POLL_MS);
+    });
+  }
+
   async function notifyParent(run: SubagentRunInfo): Promise<void> {
     if (takeResultConsumed(run)) return;
     let parent = dependencies.getSession(run.parentSessionId);
@@ -1248,22 +1295,20 @@ export function createSubagentController(
       parent = await dependencies.reopenSession(run.parentSessionId, sessionFile);
     }
     await parent.waitUntilReady();
-    // The parent may still be inside the `get_subagent_result` call that collects this result,
-    // and `deliverAs: "followUp"` would only queue the message until that turn ends anyway.
-    // Hold the notification until the parent is idle and re-check the mark, so a result the
-    // parent already consumed never triggers a duplicate turn.
+    // A running parent receives the report at its next turn boundary as a steer;
+    // an idle parent receives the normal follow-up. Recheck the consumed mark at
+    // the boundary so manual collection wins without a duplicate notification.
     while (parent.isAlive() && parent.isRunning()) {
-      if (takeResultConsumed(run)) return;
-      await new Promise<void>((resolve) => { setTimeout(resolve, PARENT_IDLE_POLL_MS); });
+      const outcome = await steerIntoRun(parent, run);
+      if (outcome === "consumed" || takeResultConsumed(run)) return;
+      if (outcome === "delivered") return;
     }
     if (takeResultConsumed(run)) return;
     if (!parent.isAlive()) throw new Error(`Parent session is no longer available: ${run.parentSessionId}`);
-    await parent.inner.sendCustomMessage({
-      customType: "pi-web:subagent-notification",
-      content: subagentNotificationText(run),
-      display: true,
-      details: subagentToolDetails(run),
-    }, parent.isStopRequested?.() ? { triggerTurn: false } : { deliverAs: "followUp", triggerTurn: true });
+    await parent.inner.sendCustomMessage(
+      parentNotificationMessage(run),
+      parent.isStopRequested?.() ? { triggerTurn: false } : { deliverAs: "followUp", triggerTurn: true },
+    );
   }
 
   async function abort(sessionId: string, parentContext?: StartSubagentRequest["parentContext"]): Promise<void> {

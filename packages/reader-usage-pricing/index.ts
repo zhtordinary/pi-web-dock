@@ -1,5 +1,5 @@
+import { spawn } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -128,7 +128,21 @@ export type PricingEngine = {
   }): PricingResult;
 };
 
-const requireFromExtension = createRequire(import.meta.url);
+const PRICING_PROCESS_TIMEOUT_MS = 5_000;
+const PRICING_PROCESS_MAX_OUTPUT = 256 * 1024;
+const PRICING_WORKER_SOURCE = `
+process.stdin.setEncoding("utf8");
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const engine = require(process.argv[1]);
+    process.stdout.write(JSON.stringify(engine.priceJsonRecord(JSON.parse(input))));
+  } catch {
+    process.exitCode = 1;
+  }
+});
+`;
 
 function numberOrZero(value: unknown): number {
   const number = Number(value);
@@ -144,25 +158,57 @@ function timestampOrUndefined(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function loadPricingEngine(): PricingEngine | undefined {
-  for (const candidate of pricingEngineCandidates()) {
-    try {
-      const loaded = requireFromExtension(candidate) as Partial<PricingEngine>;
-      if (typeof loaded.isGatewayProvider === "function" && typeof loaded.priceJsonRecord === "function") {
-        return loaded as PricingEngine;
+function priceJsonRecordInFreshProcess(
+  enginePath: string,
+  input: Parameters<PricingEngine["priceJsonRecord"]>[0],
+): Promise<PricingResult | undefined> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ["-e", PRICING_WORKER_SOURCE, enginePath], {
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    let output = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(undefined);
+    }, PRICING_PROCESS_TIMEOUT_MS);
+    const finish = (value: PricingResult | undefined): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      output += chunk;
+      if (Buffer.byteLength(output, "utf8") > PRICING_PROCESS_MAX_OUTPUT) {
+        child.kill("SIGKILL");
+        finish(undefined);
       }
-    } catch {
-      // Pricing is optional metadata; an unavailable engine must not fail the model request.
-    }
-  }
-  return undefined;
+    });
+    child.once("error", () => finish(undefined));
+    child.once("close", (code, signal) => {
+      if (code !== 0 || signal || settled) {
+        finish(undefined);
+        return;
+      }
+      try {
+        finish(JSON.parse(output) as PricingResult);
+      } catch {
+        finish(undefined);
+      }
+    });
+    child.stdin.once("error", () => finish(undefined));
+    child.stdin.end(JSON.stringify(input));
+  });
 }
 
 /** Add native message-level cost metadata without changing Reader's aggregate billing source. */
-export function repriceAssistantMessage(
+export async function repriceAssistantMessage(
   message: AssistantMessageLike,
   pricingEngine?: PricingEngine,
-): AssistantMessageLike | undefined {
+): Promise<AssistantMessageLike | undefined> {
   if (message.role !== "assistant" || !message.provider || !message.model || !message.usage) return undefined;
 
   const usage = message.usage;
@@ -187,24 +233,29 @@ export function repriceAssistantMessage(
   const timestamp = timestampOrUndefined(message.timestamp);
   if (timestamp === undefined) return undefined;
 
-  const engine = pricingEngine ?? loadPricingEngine();
-  if (!engine || engine.isGatewayProvider(message.provider)) return undefined;
-
   const responseTier = observedResponseServiceTier(message);
-  let priced: PricingResult;
+  const pricingInput = {
+    model: message.model,
+    provider: message.provider,
+    timestamp,
+    inputIncludesCache: false,
+    usage: normalizedUsage,
+    ...(responseTier ? { response_service_tier: responseTier } : {}),
+  };
+  let priced: PricingResult | undefined;
   try {
-    priced = engine.priceJsonRecord({
-      model: message.model,
-      provider: message.provider,
-      timestamp,
-      inputIncludesCache: false,
-      usage: normalizedUsage,
-      ...(responseTier ? { response_service_tier: responseTier } : {}),
-    });
+    if (pricingEngine) {
+      if (pricingEngine.isGatewayProvider(message.provider)) return undefined;
+      priced = pricingEngine.priceJsonRecord(pricingInput);
+    } else {
+      const enginePath = pricingEngineCandidates()[0];
+      if (!enginePath) return undefined;
+      priced = await priceJsonRecordInFreshProcess(enginePath, pricingInput);
+    }
   } catch {
     return undefined;
   }
-  if (!priced.configured || priced.status !== "calculated" || !priced.cost) return undefined;
+  if (!priced?.configured || priced.status !== "calculated" || !priced.cost) return undefined;
 
   return {
     ...message,
@@ -218,8 +269,8 @@ export function repriceAssistantMessage(
 /** Required by Reader-owned native pi-subagents children for their usage aggregation. */
 export default function readerUsagePricing(pi: ExtensionAPI): void {
   observeResponseServiceTier(pi);
-  pi.on("message_end", (event) => {
-    const repriced = repriceAssistantMessage(event.message as AssistantMessageLike);
+  pi.on("message_end", async (event) => {
+    const repriced = await repriceAssistantMessage(event.message as AssistantMessageLike);
     return repriced ? { message: repriced as typeof event.message } : undefined;
   });
   pi.events.emit("subagent:acknowledge-extension", { id: READER_USAGE_PRICING_EXTENSION_ID });

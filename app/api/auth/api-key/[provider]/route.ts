@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { removeProviderEnabledModels } from "@/lib/enabled-models-runtime";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { annotateOpenAIProviderCredential } from "@/lib/openai-provider-aliases";
 import { removeStoredCredentialIfType, storeProviderCredential } from "@/lib/provider-credential-store";
 import { createModelRuntimeWithExtensions, disposeModelRuntime } from "@/lib/model-runtime";
 
@@ -43,10 +42,7 @@ export async function POST(req: Request, { params }: Params) {
       // ModelRuntime.login() persists the credential and then performs an
       // unbounded network catalog refresh. Store the returned credential
       // directly so a slow catalog cannot leave the save request hanging.
-      // `openai-api` is reserved for the API key issued with ChatGPT subscription quota.
-      // Keep the provenance beside the credential without storing any additional secret.
-      const storedCredential = annotateOpenAIProviderCredential(provider, credential);
-      await storeProviderCredential(provider, storedCredential);
+      await storeProviderCredential(provider, credential);
       invalidateModelsCache();
       return NextResponse.json({ success: true });
     } finally {

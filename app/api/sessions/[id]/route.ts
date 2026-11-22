@@ -19,6 +19,9 @@ import {
   getQuestionDraftViewsForBranch,
   readSessionHeader,
   attachSessionProjectInfo,
+  readSideRelation,
+  sideFirstMessageEntryId,
+  sideUserMessageCount,
 } from "@/lib/session-reader";
 import {
   getSessionReadSnapshot,
@@ -159,6 +162,7 @@ export async function GET(
     const parentSessionId = header?.parentSession
       ? await resolveSessionIdByPath(header.parentSession)
       : undefined;
+    const sideRelation = readSideRelation(entries as never);
     const info = header ? {
       path: filePath,
       id: header.id,
@@ -175,6 +179,11 @@ export async function GET(
           })()
         : firstSessionControlDisplayText(getSessionBranchEntries(entries as never, leafId)) ?? "(no messages)",
       parentSessionId,
+      ...(sideRelation ? {
+        relation: { kind: "side" as const, parentSessionId: sideRelation.parentSessionId },
+        sideFirstEntryId: sideFirstMessageEntryId(entries as never),
+        sideMessageCount: sideUserMessageCount(entries as never),
+      } : {}),
       // SAFETY: header may include Reader-specific extension fields
       contextSourceSessionId: (header as unknown as ReaderSessionHeader | null)?.contextSourceSessionId,
       transient: !filePath || !existsSync(filePath),

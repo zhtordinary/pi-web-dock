@@ -1,5 +1,5 @@
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
-import type { McpOAuthCredentialStore, McpOAuthServerStore, PiSdkInternals } from "./pi-sdk-internals";
+import type { McpOAuthCredentialStore, McpOAuthRefreshLock, McpOAuthServerStore, PiSdkInternals } from "./pi-sdk-internals";
 
 // What a sign-out of an MCP server bars (ADR 0006, Settings › MCP sign-in):
 // every connection Pi Web opened for the server before the sign-out, a
@@ -115,7 +115,10 @@ export function guardedCredentialStore(
           guard();
           return store.save(state);
         },
-        withRefreshLock: (fn) => store.withRefreshLock(fn),
+        withRefreshLock: <T>(fn: () => Promise<T>) => {
+          const withLock = (store as McpOAuthServerStore & { withRefreshLock?: McpOAuthRefreshLock }).withRefreshLock;
+          return withLock ? withLock.call(store, fn) as Promise<T> : fn();
+        },
       };
     }
   }

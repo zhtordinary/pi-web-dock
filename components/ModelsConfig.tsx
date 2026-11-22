@@ -76,6 +76,7 @@ import {
   type SystemPromptRoleSelection,
 } from "./models-config-helpers";
 import { normalizeHiddenModelReferences, toggleHiddenModelReference } from "@/lib/model-visibility";
+import { isLegacyOpenAIProvider } from "@/lib/openai-provider-aliases";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface OAuthProvider {
@@ -2236,7 +2237,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
         const normalized = d.providers ? d : { ...d, providers: {} };
         savedProvidersRef.current = JSON.parse(JSON.stringify(normalized.providers ?? {}));
         setConfig({ ...normalized, hiddenModels: normalizeHiddenModelReferences(d.hiddenModels) });
-        const keys = Object.keys(normalized.providers ?? {});
+        const keys = Object.keys(normalized.providers ?? {}).filter((name) => !isLegacyOpenAIProvider(name));
         if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
       .catch((cause) => {
@@ -2688,7 +2689,10 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
     };
   }, [controllerRef, isDirty, saveAll, discardAll]);
 
+  // Retired OpenAI IDs stay in the raw draft for historical/settings compatibility,
+  // but they must not appear as current Provider identities in this editor.
   const providers = Object.entries(config.providers ?? {}).filter(([id, entry]) => {
+    if (isLegacyOpenAIProvider(id)) return false;
     if (!isOverridesOnly(entry)) return true;
     const managed = oauthProviders.some((provider) => provider.id === id) || apiKeyProviders.some((provider) => provider.id === id);
     return !managed;

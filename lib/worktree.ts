@@ -6,6 +6,7 @@ import { promisify } from "util";
 import { samePath, toNativePath } from "./paths";
 import { isPathWithinRoots } from "./path-security";
 import { getGitRemoteUrls } from "./git-changes";
+import { projectGitEnvironment } from "./git-environment.ts";
 import { selectGitHubRepository } from "./git-github";
 import {
   attachDirtySummaryProjection,
@@ -102,7 +103,7 @@ async function git(cwd: string, args: string[], timeoutMs = 10_000): Promise<str
     maxBuffer: 8 * 1024 * 1024,
     // Pin the message locale so error-text matching (e.g. the dirty-worktree
     // detection in the DELETE route) works regardless of system language.
-    env: { ...process.env, LC_ALL: "C" },
+    env: projectGitEnvironment(),
   });
   return stdout.trim();
 }
@@ -112,7 +113,7 @@ async function gitRaw(cwd: string, args: string[], timeoutMs = 10_000): Promise<
   const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
     timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, LC_ALL: "C" },
+    env: projectGitEnvironment(),
   });
   return stdout;
 }

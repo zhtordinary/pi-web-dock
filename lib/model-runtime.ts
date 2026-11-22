@@ -7,11 +7,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { installCpaTransport } from "./cpa-responses-transport";
 import { serializeByKey } from "./key-serializer";
-import { createOpenAIProviderChildExtension } from "./openai-provider-child-extension";
-import { installOpenAIProviderAliases } from "./openai-provider-aliases";
 import { createReaderChildExtensions } from "./reader-child-extensions";
 
-/** The common SDK boundary for Reader sessions, including Side Ask and children. */
+/** The common SDK boundary for Reader sessions and child runtimes. */
 export async function createReaderAgentSessionServices(options: Parameters<typeof createAgentSessionServices>[0]) {
   const resourceLoaderOptions = options.resourceLoaderOptions ?? {};
   const services = await createAgentSessionServices({
@@ -20,16 +18,11 @@ export async function createReaderAgentSessionServices(options: Parameters<typeo
       ...resourceLoaderOptions,
       extensionFactories: [
         ...(resourceLoaderOptions.extensionFactories ?? []),
-        createOpenAIProviderChildExtension(),
         createReaderChildExtensions(options.agentDir ?? getAgentDir()),
       ],
     },
   });
-  const aliasesInstalled = installOpenAIProviderAliases(services.modelRuntime);
   installCpaTransport(services.modelRuntime);
-  if (aliasesInstalled && typeof services.modelRuntime.refresh === "function") {
-    await services.modelRuntime.refresh({ allowNetwork: false });
-  }
   return services;
 }
 

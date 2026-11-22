@@ -11,6 +11,7 @@ import { gt, maxSatisfying, rcompare, valid, validRange } from "semver";
 import type { PluginScope, PluginUpdateResult } from "@/lib/api-types";
 import { nodeCliInvocation } from "./node-cli";
 import { parseNpmSource } from "./npm-source";
+import { sanitizeProjectCommandEnvironment } from "./project-command-env";
 import { getProjectTrustStatus } from "./project-trust";
 
 const execFileAsync = promisify(execFile);
@@ -77,6 +78,13 @@ function result(
   };
 }
 
+export function updateCheckEnvironment(
+  overrides?: NodeJS.ProcessEnv,
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return sanitizeProjectCommandEnvironment(overrides ? { ...base, ...overrides } : base);
+}
+
 async function runCommand(
   command: string,
   args: string[],
@@ -87,7 +95,7 @@ async function runCommand(
   const invocation = command === "npm" ? nodeCliInvocation("npm", args) : { command, args };
   const { stdout } = await execFileAsync(invocation.command, invocation.args, {
     cwd: options.cwd,
-    env: options.env ? { ...process.env, ...options.env } : process.env,
+    env: updateCheckEnvironment(options.env),
     encoding: "utf8",
     timeout: 10_000,
   });

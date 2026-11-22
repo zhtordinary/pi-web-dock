@@ -317,29 +317,6 @@ test("POST forwards method and body", async () => {
   }
 });
 
-test("POST forwards Quick Ask image payload unchanged", async () => {
-  let captured = {};
-  const mock = mockFetch((url, init) => {
-    captured = { url, init };
-    return jsonResponse({ ok: true });
-  });
-  try {
-    const body = JSON.stringify({
-      question: "inspect this",
-      images: [{ data: "AAAA", mimeType: "image/png" }],
-    });
-    const res = await POST(new Request("http://x/api/remote/sessions/abc/quick-ask?peer=debian", { method: "POST", body }), {
-      params: Promise.resolve({ path: ["sessions", "abc", "quick-ask"] }),
-    });
-    assert.equal(res.status, 200);
-    assert.equal(captured.url, "http://debian.local:30141/api/sessions/abc/quick-ask");
-    const sent = await new Response(captured.init && captured.init.body).text();
-    assert.deepEqual(JSON.parse(sent), JSON.parse(body));
-  } finally {
-    mock.restore();
-  }
-});
-
 test("PUT forwards method and body", async () => {
   let captured = {};
   const mock = mockFetch((url, init) => {

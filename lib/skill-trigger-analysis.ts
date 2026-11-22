@@ -17,9 +17,10 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import type { SkillAnalysisFailure, SkillInfo, SkillTriggerMetadata, SkillTriggerMode } from "@/lib/api-types";
 import { extractAssistantText } from "@/lib/question-analysis";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { orderModelScope, resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { createReaderAgentSessionServices } from "@/lib/model-runtime";
+import { readModelsConfig } from "@/lib/models-config-store";
 
 const STORE_VERSION = 2;
 const STORE_FILE_NAME = "skill-trigger-modes.json";
@@ -420,12 +421,16 @@ async function resolveAnalysisModelUnbounded(cwd: string, agentDir: string): Pro
     agentDir,
     ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
   });
-  const scope = await resolveVisibleModels(services.modelRuntime, services.settingsManager.getEnabledModels());
+  const scope = orderModelScope(
+    await resolveVisibleModels(services.modelRuntime, services.settingsManager.getEnabledModels()),
+    readModelsConfig(),
+  );
   const defaultProvider = services.settingsManager.getDefaultProvider();
   const defaultModel = services.settingsManager.getDefaultModel();
   const selected = selectInitialModelScope(scope, {
-    ...(defaultProvider && defaultModel ? { defaultModel: { provider: defaultProvider, modelId: defaultModel } } : {}),
+    ...(defaultProvider ? { defaultModel: { provider: defaultProvider, modelId: defaultModel ?? "" } } : {}),
   });
+  if (selected.requiresModelSelection) throw new Error("The saved OpenAI provider is retired. Select a new default model before analyzing a skill.");
   if (!selected.model) throw new Error("No model is configured for skill trigger analysis");
   // SAFETY: ModelRuntime implements completeSimple and conforms to CompletionRuntime at runtime.
   const runtime = services.modelRuntime as unknown as CompletionRuntime;

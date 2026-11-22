@@ -18,7 +18,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseSettings(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {};
-  const content = readFileSync(path, "utf8");
+  // Match Pi's SettingsManager: a leading BOM is ignored and an empty file is
+  // an empty settings object, so read-modify-write does not reject Pi-valid files.
+  const content = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
+  if (!content) return {};
   let parsed: unknown;
   try { parsed = JSON.parse(content); }
   catch { throw new SyntaxError(`Invalid settings.json at ${path}: invalid JSON`); }

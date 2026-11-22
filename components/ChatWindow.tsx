@@ -19,9 +19,10 @@ import { ProcessDetailsGroup } from "./ProcessDetailsGroup";
 import { isSubagentWakeMessage } from "@/lib/session-hover-preview";
 import { summarizeTurnResources, type TurnResources } from "@/lib/turn-resources";
 import { buildActivePath, findLatestLeafId, formatSideBranchTitle } from "./BranchNavigator";
+import { isHiddenRelation } from "@/lib/session-family";
 import { SIDEKICK_RIGHT_PANEL_TARGET_ID, SidekickDrawer } from "./SidekickDrawer";
-import { flushSideAskPromotions, queueSideAskPromotion } from "@/lib/side-ask-promotion";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { DirectoryPicker } from "./DirectoryPicker";
 import { sessionDraftKey } from "@/lib/draft-store";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
@@ -91,6 +92,10 @@ interface Props {
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey: string) => void;
   background?: boolean;
+  /** Render as a secondary side-session panel instead of the main workspace chat. */
+  panel?: boolean;
+  initialPrompt?: string | null;
+  onInitialPromptConsumed?: () => void;
   onSessionReady?: (busy: boolean) => void;
   onSessionForked?: (result: SessionForkResult) => void;
   restoreMessage?: UserMessage | null;
@@ -598,7 +603,7 @@ function HistorySearchContent({ content, match, label }: { content: HistoryConte
   );
 }
 
-export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionSubprojectId, newSessionContextSourceId, newSessionWorktreeBinding, newSessionPrefill, newSessionDraftKey, onAgentEnd, onAgentError, onAttentionNeeded, onSessionCreated, onSessionForked, restoreMessage, onRestoreMessageApplied, modelsRefreshKey, chatInputRef, onChatInputReady, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onRuntimeInspectionChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, sessionStatsRefreshRef, onOpenSettings, onContextUsageChange, onOpenFile, renderProbe, background = false, onSessionReady, highlightTerm = null, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, canPlaySound: canPlaySoundProp = () => false, unlockAudio, remotePeer, deviceName, statusSoundOwner = "chat", suppressStatusSounds = false, sidekickOpen, sidekickRightPanelOpen = false, onToggleSidekick, onCloseSidekickRightPanel, onSidekickCountChange, quoteSelectionEnabled: quoteSelectionEnabledProp, onSelectionToolbarChange }: Props) {
+export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionSubprojectId, newSessionContextSourceId, newSessionWorktreeBinding, newSessionPrefill, newSessionDraftKey, onAgentEnd, onAgentError, onAttentionNeeded, onSessionCreated, onSessionForked, restoreMessage, onRestoreMessageApplied, modelsRefreshKey, chatInputRef, onChatInputReady, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onRuntimeInspectionChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, sessionStatsRefreshRef, onOpenSettings, onContextUsageChange, onOpenFile, renderProbe, background = false, panel = false, initialPrompt, onInitialPromptConsumed, onSessionReady, highlightTerm = null, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, canPlaySound: canPlaySoundProp = () => false, unlockAudio, remotePeer, deviceName, statusSoundOwner = "chat", suppressStatusSounds = false, sidekickOpen, sidekickRightPanelOpen = false, onToggleSidekick, onCloseSidekickRightPanel, onSidekickCountChange, quoteSelectionEnabled: quoteSelectionEnabledProp, onSelectionToolbarChange }: Props) {
   renderProbe?.("ChatWindow");
   const { t } = useI18n();
   useChatAppearance();
@@ -680,7 +685,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
   const {
     data, activeLeafId, loading, error, history, reader, retrySessionRead, questionAnalysisJobs, questionDraftViews, streamingStore,
     systemTools,
-    agentRunning, sessionStatePending, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel, fastMode,
+    agentRunning, sessionStatePending, bashRunning, pendingBash, modelNames, modelList, modelError, missingCwd, canForkMissingCwd, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel, fastMode,
     handleFastModeChange,
     retryInfo, contextUsage, forkingEntryId,
     continueUi, unattended, toggleUnattended, triggerContinue, stopAutoRetry,
@@ -697,7 +702,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     isNew,
     sessionIdRef, scrollContainerRef,
     lastUserMsgRef, promptAnchorActive,
-    handleSend: handleSessionSend, handleFork, handleNavigate, handleLeafChange: handleSessionLeafChange, handleModelChange, ensureSession,
+    handleSend: handleSessionSend, handleFork, forkIntoCwd, handleNavigate, handleLeafChange: handleSessionLeafChange, handleModelChange, ensureSession,
     handleEditContent: handleSessionEditContent, restoreLegacyHistoryEdit, handleSetDefaultModel, handleSetDefaultThinkingLevel,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleAutoCompactionChange,
     handleRecallQueue,
@@ -722,6 +727,20 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     () => session?.id ? sessionDraftKey(session.id, remotePeer) : newSessionDraftKey ?? undefined,
     [session?.id, remotePeer, newSessionDraftKey],
   );
+  const [forkPickerOpen, setForkPickerOpen] = useState(false);
+  const [forkPickerBusy, setForkPickerBusy] = useState(false);
+  const [forkPickerError, setForkPickerError] = useState<string | null>(null);
+  const openForkPicker = useCallback(() => {
+    setForkPickerError(null);
+    setForkPickerOpen(true);
+  }, []);
+  const selectForkDirectory = useCallback(async (cwd: string) => {
+    setForkPickerBusy(true);
+    const error = await forkIntoCwd(cwd);
+    setForkPickerBusy(false);
+    if (error) setForkPickerError(error);
+    else setForkPickerOpen(false);
+  }, [forkIntoCwd]);
   historyControllerRef.current = reader;
   const historyScopeReady = Boolean(history.requestedScope?.sessionId);
   const transcript = history.transcript;
@@ -797,6 +816,17 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     return () => cancelAnimationFrame(frame);
   }, [chatInputRef, isNew, newSessionPrefill]);
 
+  const initialPromptSentRef = useRef(false);
+  useEffect(() => {
+    initialPromptSentRef.current = false;
+  }, [session?.id]);
+  useEffect(() => {
+    if (!panel || loading || error || sessionStatePending || agentRunning || bashRunning || !initialPrompt || initialPromptSentRef.current) return;
+    initialPromptSentRef.current = true;
+    onInitialPromptConsumed?.();
+    void handleSend(initialPrompt);
+  }, [agentRunning, bashRunning, error, handleSend, initialPrompt, loading, onInitialPromptConsumed, panel, sessionStatePending]);
+
 
   // Aggregate activity keeps the transcript tail live, while composer and
   // stop controls belong to the parent RPC. Bash supports stopping, while
@@ -838,21 +868,9 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     () => findLatestLeafId(data?.tree ?? []) ?? activeLeafId,
     [activeLeafId, data?.tree],
   );
-  // activeLeafId starts at null; expose it only after hydration so null stays an explicit root.
-  const sidekickParentId = loading || sessionStatePending ? undefined : activeLeafId;
   const [localSidekickOpen, setLocalSidekickOpen] = useState(false);
   const sidekickIsOpen = sidekickOpen ?? localSidekickOpen;
   const sidekickRightPanelIsOpen = sidekickRightPanelOpen && Boolean(session);
-  // Side Ask topics asked on a branch tab that has since become the main line are moved by the host; the drawer reloads once they are.
-  const [sidekickHistoryRevision, setSidekickHistoryRevision] = useState(0);
-  const settleSideAskPromotions = useCallback(async () => {
-    if (!session?.id) return;
-    let storage: Storage;
-    try { storage = localStorage; } catch { return; }
-    const moved = await flushSideAskPromotions({ storage, sessionId: session.id, remotePeer });
-    if (moved > 0) setSidekickHistoryRevision((revision) => revision + 1);
-  }, [remotePeer, session?.id]);
-  useEffect(() => { void settleSideAskPromotions(); }, [settleSideAskPromotions, sidekickIsOpen, sidekickRightPanelIsOpen]);
   const closeSidekick = useCallback(() => {
     if (sidekickRightPanelIsOpen && onCloseSidekickRightPanel) onCloseSidekickRightPanel();
     else if (sidekickOpen && onToggleSidekick) onToggleSidekick();
@@ -1041,9 +1059,6 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
     if (!activeTab || activeTab.anchorLeafId === activeLeafId) return;
 
     setActiveSideTabId("main");
-    // The tab is leaving, so its Side Ask topics follow it onto the main line.
-    try { queueSideAskPromotion(localStorage, session.id, activeSideTabId); } catch (error) { void error; }
-    void settleSideAskPromotions();
     setSideTabs((prev) => {
       const next = prev.filter((tab) => tab.tabId !== activeSideTabId);
       if (next.length === prev.length) return prev;
@@ -1052,7 +1067,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
       } catch (error) { void error; }
       return next;
     });
-  }, [activeLeafId, activeSideTabId, latestLeafId, session?.id, settleSideAskPromotions, sideTabs]);
+  }, [activeLeafId, activeSideTabId, latestLeafId, session?.id, sideTabs]);
 
   useEffect(() => {
     onBranchDataChange?.(data?.tree ?? [], activeLeafId, handleBranchLeafChange, sessionBusy);
@@ -2164,6 +2179,8 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
       modelNames={modelNames}
       modelList={modelList}
       modelError={modelError}
+      missingCwd={missingCwd}
+      onForkMissingCwd={canForkMissingCwd ? openForkPicker : undefined}
       modelScopeWarnings={modelScopeWarnings}
       onModelChange={handleModelChange}
       sessionId={session?.id ?? null}
@@ -2929,19 +2946,27 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
         )}
         {chatInputElement}
         <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} sessionId={session?.id} remotePeer={remotePeer} />
+        {forkPickerOpen && (
+          <DirectoryPicker
+            busy={forkPickerBusy}
+            error={forkPickerError}
+            remotePeer={remotePeer}
+            onCancel={() => {
+              setForkPickerOpen(false);
+              setForkPickerError(null);
+            }}
+            onSelect={(path) => void selectForkDirectory(path)}
+          />
+        )}
       </div>
       </>
       )}
-      {session && (
+      {session && !panel && !isHiddenRelation(session.relation) && (
         <SidekickDrawer
           sessionId={session.id}
           open={sidekickIsOpen || sidekickRightPanelIsOpen}
-          historyRevision={sidekickHistoryRevision}
           onClose={closeSidekick}
           onQuoteToComposer={(text) => chatInputRef?.current?.insertIfEmpty(text)}
-          mainBusy={sessionBusy}
-          activeBranchId={activeSideTabId}
-          activeParentId={sidekickParentId}
           remotePeer={remotePeer}
           onSessionForked={onSessionForked}
           onCountChange={onSidekickCountChange}
@@ -2951,7 +2976,6 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
           modelNames={modelNames}
           defaultModel={displayModelValue}
           modelThinkingLevels={modelThinkingLevels}
-          modelThinkingLevelMaps={modelThinkingLevelMaps}
           defaultThinkingLevel={thinkingLevel}
         />
       )}
@@ -3514,7 +3538,7 @@ function ExtensionDialog({
           }}
         >
           <span style={{ fontSize: 11, fontWeight: 650, color: "var(--accent)", flexShrink: 0 }}>
-            {t("chat.extensionPending")}{request.sideAskRunId ? ` · ${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}` : ""}
+            {t("chat.extensionPending")}
           </span>
           <span style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
             {parsedTitle.title}
@@ -3535,7 +3559,7 @@ function ExtensionDialog({
         ref={dialogSurfaceRef}
         role="dialog"
         aria-modal="true"
-        aria-label={`${request.sideAskRunId ? `${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}: ` : ""}${parsedTitle.title || request.title}`}
+        aria-label={parsedTitle.title || request.title}
         className="extension-dialog-surface"
         style={{
           position: "relative",
@@ -3578,7 +3602,7 @@ function ExtensionDialog({
             }}
           >
             <span style={{ fontSize: 12, fontWeight: 650, color: "var(--text-muted)" }}>
-              {t("chat.extensionRequest")}{request.sideAskRunId ? ` · ${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}` : ""}
+              {t("chat.extensionRequest")}
             </span>
             {parsedTitle.badge && (
               <span
@@ -4332,7 +4356,7 @@ function ExtensionCustomPanel({
           />
         )}
         <div className="extension-custom-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
-          <div className="extension-custom-header-title" style={{ minWidth: 0, color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat.extensionPanel")}{request.sideAskRunId ? ` · ${t("sidekick.title")}${request.sideAskLabel ? ` · ${request.sideAskLabel}` : ""}` : ""}</div>
+          <div className="extension-custom-header-title" style={{ minWidth: 0, color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat.extensionPanel")}</div>
           <div className="extension-custom-header-actions" style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <ExtensionWaitingCount count={waitingCount} />
             <div role="group" aria-label={t("chat.extensionNavigation")} style={{ display: "flex", alignItems: "center", gap: 4 }}>

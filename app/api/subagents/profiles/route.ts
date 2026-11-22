@@ -49,9 +49,9 @@ function overridePatchValue(value: unknown): string | false | null {
   return value as string;
 }
 
-function projectProfiles(cwd: string, parentProvider?: string): SubagentProfile[] {
+function projectProfiles(cwd: string, context: { parentProvider?: string; projectTrusted?: boolean } = {}): SubagentProfile[] {
   const disabled = disabledBuiltInSubagents();
-  return listSubagentProfiles(cwd, parentProvider ? { parentProvider } : {}).map((profile) =>
+  return listSubagentProfiles(cwd, context).map((profile) =>
     profile.scope === "builtin"
       ? { ...profile, enabled: profile.enabled && !disabled.has(profile.name.toLowerCase()) }
       : profile,
@@ -63,27 +63,34 @@ function findProfile(profiles: SubagentProfile[], scope: string, name: string): 
   return profiles.find((profile) => profile.scope === scope && profile.name.toLowerCase() === normalized);
 }
 
-async function verifiedParentProvider(cwd: string, rawSessionId: unknown): Promise<string | undefined> {
-  if (typeof rawSessionId !== "string" || !rawSessionId.trim()) return undefined;
+async function verifiedParentContext(cwd: string, rawSessionId: unknown): Promise<{ parentProvider?: string; projectTrusted?: boolean }> {
+  if (typeof rawSessionId !== "string" || !rawSessionId.trim()) return {};
   const session = getRpcSession(rawSessionId);
-  if (!session?.isAlive()) return undefined;
+  if (!session?.isAlive()) return {};
   try {
-    if (realpathSync(session.cwd) !== realpathSync(cwd)) return undefined;
+    if (realpathSync(session.cwd) !== realpathSync(cwd)) return {};
     const snapshot = await session.send({ type: "get_state" });
     const model = snapshot && typeof snapshot === "object" && "model" in snapshot
       ? (snapshot as { model?: unknown }).model
       : undefined;
-    if (!model || typeof model !== "object") return undefined;
-    const provider = (model as { provider?: unknown }).provider;
-    return typeof provider === "string" && provider.trim() ? provider.trim() : undefined;
+    const provider = model && typeof model === "object" && typeof (model as { provider?: unknown }).provider === "string"
+      ? (model as { provider: string }).provider.trim()
+      : undefined;
+    const projectTrusted = typeof session.inner.settingsManager?.isProjectTrusted === "function"
+      ? session.inner.settingsManager.isProjectTrusted()
+      : undefined;
+    return {
+      ...(provider ? { parentProvider: provider } : {}),
+      ...(projectTrusted !== undefined ? { projectTrusted } : {}),
+    };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
 async function profileAfterWrite(cwd: string, scope: string, name: string, sessionId?: unknown): Promise<SubagentProfile | undefined> {
-  const parentProvider = await verifiedParentProvider(cwd, sessionId);
-  return findProfile(projectProfiles(cwd, parentProvider), scope, name);
+  const context = await verifiedParentContext(cwd, sessionId);
+  return findProfile(projectProfiles(cwd, context), scope, name);
 }
 
 export async function GET(req: NextRequest) {
@@ -93,8 +100,8 @@ export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const cwd = await validateCwd(url.searchParams.get("cwd"));
-    const parentProvider = await verifiedParentProvider(cwd, url.searchParams.get("sessionId"));
-    return NextResponse.json({ profiles: orderSubagentProfiles(projectProfiles(cwd, parentProvider), readSubagentProfileOrder()) });
+    const context = await verifiedParentContext(cwd, url.searchParams.get("sessionId"));
+    return NextResponse.json({ profiles: orderSubagentProfiles(projectProfiles(cwd, context), readSubagentProfileOrder()) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });
@@ -185,8 +192,8 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: "enabled, model, or thinking is required" }, { status: 400 });
     }
 
-    const parentProvider = await verifiedParentProvider(cwd, body.sessionId);
-    const profiles = projectProfiles(cwd, parentProvider);
+    const context = await verifiedParentContext(cwd, body.sessionId);
+    const profiles = projectProfiles(cwd, context);
     const target = findProfile(profiles, scope, body.name);
     if (!target) {
       return NextResponse.json({ error: "Agent profile not found" }, { status: 404 });

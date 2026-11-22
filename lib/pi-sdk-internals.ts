@@ -62,9 +62,13 @@ export type McpOAuthCredentialStore = NonNullable<McpExtensionOptions["credentia
 
 /** One server's slice of the credential store. */
 export type McpOAuthServerStore = ReturnType<McpOAuthCredentialStore["forServer"]>;
+export type McpOAuthRefreshLock = <T>(fn: () => Promise<T>) => Promise<T>;
 
 /** pi-mcp's `McpOAuthStateStore`, which sign-in reads and writes. */
-export type McpOAuthStateStore = Pick<McpOAuthServerStore, "load" | "save">;
+export type McpOAuthStateStore = Pick<McpOAuthServerStore, "load" | "save"> & {
+  /** Pi 1.6 may use this around token refresh; older SDK stores do not expose it. */
+  withRefreshLock?: McpOAuthRefreshLock;
+};
 
 /** pi-mcp's `StdioTransportOptions`. */
 export interface StdioTransportOptions {
@@ -331,6 +335,19 @@ function sdkMembers(modules: LoadedModules): Record<string, unknown> | string {
   for (const [name, { module, kind }] of Object.entries(MEMBERS)) {
     const value = modules[module][name];
     if (kind === "class" ? !isClass(value) : typeof value !== "function") {
+      // Pi 1.6 no longer exports the cancellation class from its OAuth module,
+      // but its errors retain this stable name. Keep the adapter compatible and
+      // let mcp-sign-in's name check handle errors from either SDK shape.
+      if (name === "McpSignInCancelledError") {
+        class McpSignInCancelledError extends Error {
+          constructor() {
+            super("Sign-in cancelled");
+            this.name = "McpSignInCancelledError";
+          }
+        }
+        members[name] = McpSignInCancelledError;
+        continue;
+      }
       const path = module === "mcpClient" ? MCP_PACKAGE : SDK_MODULES[module];
       return `${path} does not export ${name} as a ${kind}`;
     }

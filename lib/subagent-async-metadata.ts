@@ -10,10 +10,16 @@ export interface AsyncModelMetadata {
   agent?: string;
 }
 
+export interface AsyncStatusMetadataProjection {
+  models: Record<string, AsyncModelMetadata>;
+  childRootToWorkflow: Record<string, string>;
+}
+
 type JsonRecord = Record<string, unknown>;
 const MAX_RUNS = 128;
 const MAX_IDS = 512;
 const MAX_TEXT = 160;
+const LIVE_ASYNC_STATES = new Set(["queued", "running"]);
 const NESTED_KEYS = ["children", "nestedChildren", "workflowChildren"] as const;
 
 function tempScopeId(): string {
@@ -67,6 +73,10 @@ function metadataFor(value: JsonRecord): AsyncModelMetadata | undefined {
     ...(thinking ? { thinking } : {}),
     ...(agent ? { agent } : {}),
   };
+}
+
+function statusSteps(status: JsonRecord): JsonRecord[] {
+  return Array.isArray(status.steps) ? status.steps.filter(record) : [];
 }
 
 function readJson(path: string): JsonRecord | undefined {
@@ -179,20 +189,22 @@ function projectStatus(
   return result;
 }
 
-export function readAsyncModelMetadata(sessionId: string, ids: readonly string[]): Record<string, AsyncModelMetadata> {
-  const requested = new Set(ids.map((id) => id.trim()).filter(Boolean).slice(0, MAX_IDS));
-  if (!sessionId.trim() || requested.size === 0) return {};
+function readSessionStatuses(sessionId: string): {
+  statuses: Array<{ runId: string; status: JsonRecord }>;
+  statusesByRunId: Map<string, JsonRecord>;
+} {
+  const statuses: Array<{ runId: string; status: JsonRecord }> = [];
+  const statusesByRunId = new Map<string, JsonRecord>();
+  if (!sessionId.trim()) return { statuses, statusesByRunId };
 
   let entries: Dirent[];
   try {
     entries = readdirSync(asyncRunRoot(), { withFileTypes: true });
   } catch {
-    return {};
+    return { statuses, statusesByRunId };
   }
 
   const root = asyncRunRoot();
-  const statuses: Array<{ runId: string; status: JsonRecord }> = [];
-  const statusesByRunId = new Map<string, JsonRecord>();
   for (const entry of entries.slice(0, MAX_RUNS)) {
     if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const statusPath = statusPathFor(root, entry);
@@ -202,6 +214,34 @@ export function readAsyncModelMetadata(sessionId: string, ids: readonly string[]
     statuses.push({ runId, status });
     statusesByRunId.set(runId, status);
   }
+  return { statuses, statusesByRunId };
+}
+
+function readChildRootToWorkflow(
+  statuses: readonly { runId: string; status: JsonRecord }[],
+  statusesByRunId: ReadonlyMap<string, JsonRecord>,
+): Record<string, string> {
+  const coverage = new Map<string, string>();
+  for (const { runId, status } of statuses) {
+    if (status.mode !== "workflow" || typeof status.state !== "string" || !LIVE_ASYNC_STATES.has(status.state)) continue;
+    for (const step of statusSteps(status)) {
+      const childRunId = text(step.runId);
+      const childStatus = childRunId ? statusesByRunId.get(childRunId) : undefined;
+      if (!childRunId || !childStatus || typeof childStatus.state !== "string" || !LIVE_ASYNC_STATES.has(childStatus.state)) continue;
+      coverage.set(childRunId, runId);
+    }
+  }
+  return Object.fromEntries(coverage);
+}
+
+export function readAsyncStatusMetadata(
+  sessionId: string,
+  ids: readonly string[],
+): AsyncStatusMetadataProjection {
+  const requested = new Set(ids.map((id) => id.trim()).filter(Boolean).slice(0, MAX_IDS));
+  const { statuses, statusesByRunId } = readSessionStatuses(sessionId);
+  const childRootToWorkflow = readChildRootToWorkflow(statuses, statusesByRunId);
+  if (!sessionId.trim() || requested.size === 0) return { models: {}, childRootToWorkflow };
 
   const result = new Map<string, AsyncModelMetadata>();
   for (const { runId, status } of statuses) {
@@ -210,5 +250,9 @@ export function readAsyncModelMetadata(sessionId: string, ids: readonly string[]
     }
     if (result.size >= requested.size && Array.from(requested).every((k) => Boolean(result.get(k)?.model && result.get(k)?.agent))) break;
   }
-  return Object.fromEntries(result);
+  return { models: Object.fromEntries(result), childRootToWorkflow };
+}
+
+export function readAsyncModelMetadata(sessionId: string, ids: readonly string[]): Record<string, AsyncModelMetadata> {
+  return readAsyncStatusMetadata(sessionId, ids).models;
 }

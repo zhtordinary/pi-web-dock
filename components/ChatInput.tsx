@@ -105,6 +105,9 @@ interface Props {
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string }[];
   modelError?: ModelErrorInfo | null;
+  /** The session's recorded folder no longer exists. */
+  missingCwd?: string | null;
+  onForkMissingCwd?: () => void;
   /** Diagnostics from resolving `enabledModels`, e.g. a pattern that matched nothing. */
   modelScopeWarnings?: string[];
   onModelChange?: (provider: string, modelId: string) => void;
@@ -1253,7 +1256,7 @@ function fileIndexRequestPath(cwd: string, query: string | undefined, hideGitIgn
 
 // The composer props remain stable while a token stream updates the reply.
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, canStop = isStreaming, stopping = false, readOnlyReason, statePending, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching, runtimeSettingsUpdating,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, canStop = isStreaming, stopping = false, readOnlyReason, statePending, model, isAutoModelSelection, modelNames, modelList, modelError, missingCwd, onForkMissingCwd, modelScopeWarnings, onModelChange, modelSwitching, runtimeSettingsUpdating,
   defaultModel, onSetDefaultModel,
   onCompact, onAbortCompaction, autoCompactionEnabled, runtimeSettingsRead, onRetryRuntimeSettings, onAutoCompactionChange, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
 
@@ -3717,16 +3720,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
   }, [slashMenuOpen, slashMenuQuery]);
 
-  // Build model options: prefer modelList (has provider info), fallback to modelNames
+  // The server supplies modelList in pi's selector order; keep it intact.
   const modelOptions: ModelOption[] = (() => {
     if (modelList && modelList.length > 0) {
-      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name })).sort(compareModelOptions);
+      return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }));
     }
     return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
       provider: model?.provider ?? "unknown",
       modelId,
       name,
-    })).sort(compareModelOptions);
+    }));
   })();
   const visibleModelOptions = filterModelOptionsByProvider(modelOptions, hiddenModelProviders, model);
   const filteredModelOptions = filterModelOptions(visibleModelOptions, modelFilter);
@@ -3876,6 +3879,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           />
         )}
         <ModelErrorBanner error={modelError} />
+        {missingCwd && (
+          <ModelNoticeBanner
+            tone="error"
+            title={t("chat.cwdMissingTitle")}
+            body={t("chat.cwdMissingBody", { cwd: missingCwd })}
+            details={onForkMissingCwd ? (
+              <button type="button" onClick={onForkMissingCwd} style={{ marginTop: 6, padding: "3px 8px", border: "1px solid currentColor", borderRadius: 5, background: "transparent", color: "inherit", cursor: "pointer", font: "inherit" }}>
+                {t("chat.cwdMissingFork")}
+              </button>
+            ) : undefined}
+          />
+        )}
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
         {hasLegacyDraft && legacyRecoveryKey !== dismissedLegacyDraft && (
           <div role="status" style={{ marginBottom: 8, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12 }}>

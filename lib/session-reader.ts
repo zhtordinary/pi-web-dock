@@ -26,6 +26,9 @@ import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-res
 import { getSessionReadSnapshot, invalidateSessionReadCache } from "./session-read-cache";
 import { sessionDisplayInputs, SESSION_DISPLAY_INPUT_CUSTOM_TYPE } from "./session-hover-preview";
 import { sessionControlDisplayText } from "./session-control-display";
+import { readSideRelation, sideFirstMessageEntryId, sideUserMessageCount } from "./side-session";
+
+export { readSideRelation, sideFirstMessageEntryId, sideUserMessageCount };
 
 export { getAgentDir };
 
@@ -353,6 +356,8 @@ async function loadAllSessionsFromSdk(projectSessionIds?: ReadonlySet<string>): 
     .map((s) => {
     cacheSessionPath(s.id, s.path);
     const displayInfo = sessionListDisplayInfo(s.path, s.firstMessage || "(no messages)");
+    const parentSessionId = s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined;
+    const relation = relationForListedSession(s.path, s.id, parentSessionId);
     return {
       path: s.path,
       id: s.id,
@@ -362,7 +367,8 @@ async function loadAllSessionsFromSdk(projectSessionIds?: ReadonlySet<string>): 
       modified: safeIsoDate(s.modified),
       messageCount: s.messageCount,
       firstMessage: displayInfo.message,
-      parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
+      ...(parentSessionId ? { parentSessionId } : {}),
+      ...(relation ? { relation } : {}),
       ...(displayInfo.contextSourceSessionId ? { contextSourceSessionId: displayInfo.contextSourceSessionId } : {}),
       transient: false,
     };
@@ -373,6 +379,28 @@ async function loadAllSessionsFromSdk(projectSessionIds?: ReadonlySet<string>): 
 function sessionDirectoryForCwd(cwd: string): string {
   const safePath = `--${resolvePath(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
   return join(getPiSessionRoots().sessionsDir, safePath);
+}
+
+function relationForListedSession(filePath: string, sessionId: string, parentSessionId?: string): SessionInfo["relation"] | undefined {
+  try {
+    const entries = readSessionRelationEntries(filePath);
+    const subagent = readSubagentRun(entries, sessionId, filePath);
+    if (subagent) {
+      return {
+        kind: "subagent",
+        parentSessionId: subagent.parentSessionId,
+        profile: subagent.profile,
+        description: subagent.description,
+        ...(subagent.model ? { model: subagent.model } : {}),
+        status: subagent.status,
+      };
+    }
+    const side = readSideRelation(entries);
+    if (side) return { kind: "side", ...side };
+    return parentSessionId ? { kind: "fork", originSessionId: parentSessionId } : undefined;
+  } catch {
+    return parentSessionId ? { kind: "fork", originSessionId: parentSessionId } : undefined;
+  }
 }
 
 export async function listProjectSessions(
@@ -407,6 +435,8 @@ export async function listProjectSessions(
     .map((session) => {
       cacheSessionPath(session.id, session.path);
       const displayInfo = sessionListDisplayInfo(session.path, session.firstMessage || "(no messages)");
+      const parentSessionId = session.parentSessionPath ? pathToId.get(sessionPathKey(session.parentSessionPath)) : undefined;
+      const relation = relationForListedSession(session.path, session.id, parentSessionId);
       return {
         path: session.path,
         id: session.id,
@@ -416,7 +446,8 @@ export async function listProjectSessions(
         modified: safeIsoDate(session.modified),
         messageCount: session.messageCount,
         firstMessage: displayInfo.message,
-        parentSessionId: session.parentSessionPath ? pathToId.get(sessionPathKey(session.parentSessionPath)) : undefined,
+        ...(parentSessionId ? { parentSessionId } : {}),
+        ...(relation ? { relation } : {}),
         ...(displayInfo.contextSourceSessionId ? { contextSourceSessionId: displayInfo.contextSourceSessionId } : {}),
         transient: false,
       };
@@ -470,8 +501,13 @@ function buildScannedSessionList(scanned: ScannedSessionInfo[], archived = false
     cacheSessionPath(item.id, item.path);
     const parentSessionId = item.parentSessionPath ? pathToId.get(sessionPathKey(item.parentSessionPath)) : undefined;
     let subagent: ScannedSubagent | null = null;
+    let side: { parentSessionId: string } | null = null;
     if (item.parentSessionPath) {
-      try { subagent = readSubagentRun(readSessionRelationEntries(item.path), item.id, item.path); } catch { /* Concurrent removal or malformed session. */ }
+      try {
+        const relationEntries = readSessionRelationEntries(item.path);
+        subagent = readSubagentRun(relationEntries, item.id, item.path);
+        side = subagent ? null : readSideRelation(relationEntries);
+      } catch { /* Concurrent removal or malformed session. */ }
     }
     const piSubagent = subagent ? undefined : piSubagentRelation(item, parentSessionId);
     return {
@@ -489,9 +525,11 @@ function buildScannedSessionList(scanned: ScannedSessionInfo[], archived = false
         ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, ...(subagent.model ? { model: subagent.model } : {}), status: subagent.status } }
         : piSubagent
           ? { relation: piSubagent }
-          : item.parentSessionPath
-            ? { relation: { kind: "fork" as const, ...(parentSessionId ? { originSessionId: parentSessionId } : {}) } }
-            : {}),
+          : side
+            ? { relation: { kind: "side" as const, ...side } }
+            : item.parentSessionPath
+              ? { relation: { kind: "fork" as const, ...(parentSessionId ? { originSessionId: parentSessionId } : {}) } }
+              : {}),
       transient: false,
       ...(archived ? { archived: true as const } : {}),
       ...(item.detailsPending ? { detailsPending: true } : {}),
@@ -611,6 +649,8 @@ async function loadArchivedSessionsFromSdk(projectSessionIds?: ReadonlySet<strin
     // can find archived sessions (view/rename/delete/unarchive all rely on it).
     cacheSessionPath(s.id, s.path);
     const displayInfo = sessionListDisplayInfo(s.path, s.firstMessage || "(no messages)");
+    const parentSessionId = s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined;
+    const relation = relationForListedSession(s.path, s.id, parentSessionId);
     return {
       path: s.path,
       id: s.id,
@@ -620,7 +660,8 @@ async function loadArchivedSessionsFromSdk(projectSessionIds?: ReadonlySet<strin
       modified: safeIsoDate(s.modified),
       messageCount: s.messageCount,
       firstMessage: displayInfo.message,
-      parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
+      ...(parentSessionId ? { parentSessionId } : {}),
+      ...(relation ? { relation } : {}),
       ...(displayInfo.contextSourceSessionId ? { contextSourceSessionId: displayInfo.contextSourceSessionId } : {}),
       transient: false,
       archived: true as const,

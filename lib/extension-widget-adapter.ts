@@ -7,12 +7,12 @@ import {
 import type { ExtensionWidgetItem } from "./types";
 
 type WidgetComponent = {
-  render: (width: number) => string[];
+  render: (width: number) => readonly string[];
   dispose?: () => void;
 };
 
 type WidgetFactory = (tui: HeadlessCustomUiTui, theme: Theme) => WidgetComponent;
-type WidgetContent = string[] | ((...args: never[]) => unknown) | undefined;
+type WidgetContent = readonly string[] | ((...args: never[]) => unknown) | undefined;
 type WidgetPlacement = ExtensionWidgetItem["placement"];
 
 type ActiveWidget = {
@@ -112,7 +112,7 @@ export class ExtensionWidgetAdapter {
     }
   }
 
-  private commit(key: string, lines: string[], placement: WidgetPlacement): void {
+  private commit(key: string, lines: readonly string[], placement: WidgetPlacement): void {
     const widget: ExtensionWidgetItem = {
       key,
       lines: [...lines],
@@ -141,7 +141,7 @@ export class ExtensionWidgetAdapter {
     this.onError(key, error instanceof Error ? error : new Error(String(error)));
   }
 
-  private isStringArray(value: unknown): value is string[] {
+  private isStringArray(value: unknown): value is readonly string[] {
     return Array.isArray(value) && value.every((line) => typeof line === "string");
   }
 }

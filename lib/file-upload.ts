@@ -153,3 +153,68 @@ export function writeUploadFileAtomicSync(
     }
   }
 }
+
+/**
+ * Async counterpart used by HTTP uploads. Disk I/O yields to the event loop;
+ * the final destination check and same-directory handoff stay synchronous.
+ */
+export async function writeUploadFileAtomic(
+  destination: string,
+  bytes: Uint8Array,
+  { replaceExisting = false }: AtomicUploadOptions = {},
+): Promise<void> {
+  const directory = path.dirname(destination);
+  const baseName = path.basename(destination);
+  let existing: fs.Stats | null = null;
+  try {
+    existing = await fs.promises.lstat(destination);
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error("Cannot replace a directory or symbolic link");
+    }
+    if (!replaceExisting) {
+      const error = new Error("A file with that name already exists") as NodeJS.ErrnoException;
+      error.code = "EEXIST";
+      throw error;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const stagingDirectory = await fs.promises.mkdtemp(path.join(directory, `.${baseName}-`));
+  const stagingFile = path.join(stagingDirectory, "upload");
+  let handedOff = false;
+  try {
+    const mode = existing ? existing.mode & 0o777 : 0o666;
+    await fs.promises.writeFile(stagingFile, bytes, { flag: "wx", mode });
+    await fs.promises.chmod(stagingFile, mode);
+    let current: fs.Stats | null = null;
+    try {
+      current = fs.lstatSync(destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (current && (current.isSymbolicLink() || !current.isFile())) {
+      throw new Error("Cannot replace a directory or symbolic link");
+    }
+    if (replaceExisting) {
+      fs.renameSync(stagingFile, destination);
+    } else {
+      if (current) {
+        const error = new Error("A file with that name already exists") as NodeJS.ErrnoException;
+        error.code = "EEXIST";
+        throw error;
+      }
+      // A new destination uses a link handoff so a concurrent creator wins
+      // rather than being silently replaced.
+      fs.linkSync(stagingFile, destination);
+      fs.unlinkSync(stagingFile);
+    }
+    handedOff = true;
+  } finally {
+    if (!handedOff) {
+      try { await fs.promises.rm(stagingDirectory, { recursive: true, force: true }); } catch { /* preserve original error */ }
+    } else {
+      try { await fs.promises.rm(stagingDirectory, { recursive: true, force: true }); } catch { /* handoff succeeded */ }
+    }
+  }
+}

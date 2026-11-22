@@ -5,24 +5,14 @@ import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-age
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { isFastModeDefault, isFastModeSupported } from "@/lib/fast-mode";
 import { loadModelsWithCache, withModelRuntimeError, type ModelErrorInfo, type ModelListEntry, type ModelsData } from "@/lib/models-cache";
-import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { orderModelScope, resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { filterHiddenModels, normalizeHiddenModelReferences } from "@/lib/model-visibility";
 import { getModelThinkingDefaults, readModelsConfig } from "@/lib/models-config-store";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { createReaderAgentSessionServices } from "@/lib/model-runtime";
+import { cwdMissingBody } from "@/lib/missing-cwd";
 
 export const dynamic = "force-dynamic";
-
-const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compareModelEntries(
-  a: ModelListEntry,
-  b: ModelListEntry
-): number {
-  return modelNameCollator.compare(a.name || a.id, b.name || b.id)
-    || modelNameCollator.compare(a.provider, b.provider)
-    || modelNameCollator.compare(a.id, b.id);
-}
 
 const MODEL_ERROR_LOG_ENV = "PI_WEB_MODEL_ERROR_LOG";
 const MAX_MODEL_ERROR_LENGTH = 2400;
@@ -103,7 +93,8 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   // Per-model hiding lives in models.json (three-way synced), so chat and
   // vision selectors agree without touching provider or model configuration.
   const shown = filterHiddenModels(visible, normalizeHiddenModelReferences(modelsConfig.hiddenModels));
-  modelList = shown.map((m) => ({
+  const shownScope = orderModelScope({ ...scope, visible: shown }, modelsConfig);
+  modelList = shownScope.visible.map((m) => ({
     id: m.id,
     name: m.name,
     provider: m.provider,
@@ -113,7 +104,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     fastModeSupported: isFastModeSupported(m),
     fastModeDefault: isFastModeDefault(m),
     input: m.input,
-  })).sort(compareModelEntries);
+  }));
   for (const m of shown) {
     const key = `${m.provider}:${m.id}`;
     nameMap.set(key, m.name);
@@ -124,14 +115,17 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   const defaultProvider = settings.getDefaultProvider();
   const defaultModelId = settings.getDefaultModel();
   const initial = selectInitialModelScope(
-    { ...scope, visible: shown },
+    shownScope,
     {
-      ...(defaultProvider && defaultModelId
-        ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
+      ...(defaultProvider
+        ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId ?? "" } }
         : {}),
       thinkingLevelDefaults,
     },
   );
+  if (initial.requiresModelSelection) {
+    warnings.push(`The saved provider ${defaultProvider} is retired. Select an available model before continuing.`);
+  }
   if (initial.model) {
     defaultModel = { provider: initial.model.provider, modelId: initial.model.id };
   }
@@ -185,7 +179,7 @@ export async function GET(req: Request) {
   try {
     cwdStat = await stat(cwd);
   } catch {
-    return Response.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
+    return Response.json(cwdMissingBody(cwd), { status: 400 });
   }
   if (!cwdStat.isDirectory()) {
     return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });

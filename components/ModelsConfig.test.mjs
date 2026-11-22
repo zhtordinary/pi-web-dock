@@ -23,6 +23,12 @@ test("provider search includes OAuth IDs and model rows display names without ch
   assert.match(readerSource, /type: "model", providerName: pName, index: i/);
 });
 
+test("hides retired OpenAI identities from current provider settings", () => {
+  assert.match(readerSource, /isLegacyOpenAIProvider/);
+  assert.match(readerSource, /if \(isLegacyOpenAIProvider\(id\)\) return false/);
+  assert.match(readerSource, /filter\(\(name\) => !isLegacyOpenAIProvider\(name\)\)/);
+});
+
 test("provider detail keeps the enable switch after the delete action", () => {
   const detail = readerSource.slice(
     readerSource.indexOf("function ProviderDetail"),

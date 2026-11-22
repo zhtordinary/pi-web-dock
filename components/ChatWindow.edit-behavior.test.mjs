@@ -55,3 +55,10 @@ test('keeps explicit fork controls blocked while a fork is pending and defers hi
   assert.doesNotMatch(source, /handleCreateSideBranch\(intent\.sideBranchAnchor/);
   assert.match(source, /onStartSideBranch=\{sessionBusy \|\| sideBranchPending \? undefined : handleCreateSideBranch\}/);
 });
+
+test('waits for the panel session state before sending an initial side prompt', () => {
+  const block = source.slice(source.indexOf('const initialPromptSentRef'), source.indexOf('// Aggregate activity'));
+  assert.match(block, /sessionStatePending \|\| agentRunning \|\| bashRunning/);
+  assert.match(block, /onInitialPromptConsumed\?\.\(\)/);
+  assert.match(block, /void handleSend\(initialPrompt\)/);
+});

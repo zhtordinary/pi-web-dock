@@ -33,6 +33,10 @@ export interface SubagentProfile {
   toolsExplicit?: boolean;
   enabled: boolean;
   scope: AgentScope;
+  /** False when a project/workspace source is visible for inspection but cannot execute under current trust. */
+  executionAllowed?: boolean;
+  /** True when the source needs a trust decision before it may affect execution. */
+  trustRequired?: boolean;
   builtinKind?: SubagentBuiltinKind;
   runtimeKind?: "native" | "external-cli" | "external-job";
   /** Effective model projection; absent when the resolver has only a bare ID or no model. */

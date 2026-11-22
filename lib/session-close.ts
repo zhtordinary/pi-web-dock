@@ -1,5 +1,4 @@
 import { getRpcSession, getRpcSessionTree } from "./rpc-manager";
-import { zhCNLocale } from "./i18n/messages/zh-CN.ts";
 import { getSessionBackgroundRunIds } from "./subagent-activity";
 import { acquireStateWriteLock } from "./state-file-transaction";
 
@@ -16,9 +15,6 @@ export async function closeIdleSession(sessionId: string, sessionFile: string): 
     const execution = rpc.getExecutionState();
     if (rpc.isRunning() || execution.active || execution.queuedCount > 0) {
       throw Object.assign(new Error("Session is busy; stop its execution and recall queued messages before archiving"), { code: "session_busy" });
-    }
-    if (rpc.hasActiveSideAsk()) {
-      throw Object.assign(new Error(zhCNLocale.messages["sessionActivity.sideAskPreventsArchive"]), { code: "session_busy" });
     }
   }
   for (const rpc of runtimes) {

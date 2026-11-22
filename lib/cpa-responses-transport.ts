@@ -291,7 +291,7 @@ export class CpaResponsesTransport {
           || options?.signal?.aborted || channel.failure) { channel.close(); return; }
         const grammar = createGrammarToolInputProperties(getDeclaredTools(context.messages), responseModel.compat?.supportsOpenAIGrammarTools ?? false);
         const reply = convertResponsesMessages(model, normalizeContext({ messages: [message] }), TOOL_CALL_PROVIDERS, {
-          includeSystemPrompt: false, grammarToolInputProperties: grammar,
+          grammarToolInputProperties: grammar,
           ...(message.providerThinkingLevel === undefined ? {} : { configurationUpdateEffort: message.providerThinkingLevel }),
         }).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
         if (message.providerThinkingLevel !== undefined) {

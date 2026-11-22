@@ -18,6 +18,7 @@ export interface SessionSearchResponse {
 }
 
 import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 /**
@@ -93,6 +94,59 @@ interface SearchAccumulator {
 
 const SEARCHABLE_MESSAGE_ROLE_RE = /"message"\s*:\s*\{\s*"role"\s*:\s*"(user|assistant)"/;
 const MAX_NON_SEARCHABLE_LINE_PARSE_CHARS = 64 * 1024;
+const SEARCH_CACHE_MAX_ENTRIES = 64;
+const SEARCH_CACHE_MAX_CHARS = 8 * 1024 * 1024;
+
+type SearchCacheEntry = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number; text: string };
+const searchCache = new Map<string, SearchCacheEntry>();
+let searchCacheChars = 0;
+
+/** Split terms without treating punctuation or regex operators specially. */
+export function parseSessionSearchTerms(query: string): string[] {
+  const terms: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const char of query.trim()) {
+    if (char === '"' && (quoted || !current)) {
+      if (quoted && current) terms.push(current);
+      if (quoted) current = "";
+      quoted = !quoted;
+    } else if (!quoted && /\s/u.test(char)) {
+      if (current) terms.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current) terms.push(current);
+  return [...new Set(terms)];
+}
+
+function emptySearchCount(): SessionSearchCount {
+  return { matchCount: 0, contentMatchCount: 0, titleMatchCount: 0, snippets: [] };
+}
+
+function mergeTermCounts(states: SearchAccumulator[], terms: string[]): SessionSearchCount {
+  if (states.length === 0) return emptySearchCount();
+  const contentComplete = states.every((state) => state.contentMatchCount > 0);
+  const titleComplete = states.every((state) => state.titleMatchCount > 0);
+  if (!contentComplete && !titleComplete) return emptySearchCount();
+  const useContent = contentComplete;
+  const counts = states.map((state) => useContent ? state.contentMatchCount : state.titleMatchCount);
+  const matchCount = Math.min(...counts);
+  const contentMatchCount = useContent ? matchCount : 0;
+  const titleMatchCount = useContent ? 0 : matchCount;
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+  for (const state of states) {
+    for (const snippet of state.snippets) {
+      if (snippets.length >= 3 || seen.has(snippet)) continue;
+      seen.add(snippet);
+      snippets.push(snippet);
+    }
+  }
+  return { matchCount, contentMatchCount, titleMatchCount, snippets };
+}
 
 function recordMatches(text: string, q: string, prefix: string, state: SearchAccumulator, source: "content" | "title"): void {
   if (!q) return;
@@ -162,26 +216,73 @@ function finishSearch(state: SearchAccumulator): SessionSearchCount {
 
 /** Count query occurrences within visible message and session-title text. */
 export function countQueryInSession(text: string, q: string): SessionSearchCount {
-  const query = q.trim().toLowerCase();
-  if (!query) return { matchCount: 0, contentMatchCount: 0, titleMatchCount: 0, snippets: [] };
-
-  const state: SearchAccumulator = { snippets: [], seen: new Set(), matchCount: 0, contentMatchCount: 0, titleMatchCount: 0 };
-  for (const line of text.split("\n")) countQueryInLine(line, query, state);
-  return finishSearch(state);
+  const query = q.trim();
+  if (!query) return emptySearchCount();
+  const terms = parseSessionSearchTerms(query);
+  // `""` is intentionally a literal query, matching the upstream search contract.
+  const effectiveTerms = terms.length > 0 ? terms : [query];
+  const states = effectiveTerms.map((): SearchAccumulator => ({
+    snippets: [], seen: new Set(), matchCount: 0, contentMatchCount: 0, titleMatchCount: 0,
+  }));
+  for (const line of text.split("\n")) {
+    effectiveTerms.forEach((term, index) => countQueryInLine(line, term.toLowerCase(), states[index]));
+  }
+  return effectiveTerms.length === 1 ? finishSearch(states[0]) : mergeTermCounts(states, effectiveTerms);
 }
 
-/** Stream a session file so search never retains the full JSONL body. */
-export async function countQueryInSessionFile(filePath: string, q: string): Promise<SessionSearchCount> {
-  const query = q.trim().toLowerCase();
-  if (!query) return { matchCount: 0, contentMatchCount: 0, titleMatchCount: 0, snippets: [] };
-  const state: SearchAccumulator = { snippets: [], seen: new Set(), matchCount: 0, contentMatchCount: 0, titleMatchCount: 0 };
+async function readSearchText(filePath: string): Promise<string> {
+  let stamp;
+  try {
+    const current = await stat(filePath);
+    stamp = { dev: current.dev, ino: current.ino, size: current.size, mtimeMs: current.mtimeMs, ctimeMs: current.ctimeMs };
+  } catch {
+    throw new Error("Session file is unavailable");
+  }
+  const cached = searchCache.get(filePath);
+  if (cached && Object.entries(stamp).every(([key, value]) => cached[key as keyof typeof stamp] === value)) {
+    return cached.text;
+  }
+  if (cached) {
+    searchCache.delete(filePath);
+    searchCacheChars -= cached.text.length;
+  }
+
+  const chunks: string[] = [];
   const input = createReadStream(filePath, { encoding: "utf8" });
   const lines = createInterface({ input, crlfDelay: Infinity });
   try {
-    for await (const line of lines) countQueryInLine(line, query, state);
+    for await (const line of lines) chunks.push(line);
   } finally {
     lines.close();
     input.destroy();
   }
-  return finishSearch(state);
+  const text = chunks.join("\n");
+  // Re-stat after reading: an append or atomic replacement during the scan is
+  // not stored under the earlier stamp and will be read fresh next time.
+  let after;
+  try {
+    const current = await stat(filePath);
+    after = { dev: current.dev, ino: current.ino, size: current.size, mtimeMs: current.mtimeMs, ctimeMs: current.ctimeMs };
+  } catch {
+    return text;
+  }
+  if (text.length <= SEARCH_CACHE_MAX_CHARS && Object.entries(stamp).every(([key, value]) => after[key as keyof typeof stamp] === value)) {
+    while (searchCache.size >= SEARCH_CACHE_MAX_ENTRIES || searchCacheChars + text.length > SEARCH_CACHE_MAX_CHARS) {
+      const oldest = searchCache.entries().next().value as [string, SearchCacheEntry] | undefined;
+      if (!oldest) break;
+      searchCache.delete(oldest[0]);
+      searchCacheChars -= oldest[1].text.length;
+    }
+    if (searchCache.size < SEARCH_CACHE_MAX_ENTRIES && searchCacheChars + text.length <= SEARCH_CACHE_MAX_CHARS) {
+      searchCache.set(filePath, { ...stamp, text });
+      searchCacheChars += text.length;
+    }
+  }
+  return text;
+}
+
+/** Stream a session file, reusing a bounded stamp-keyed text cache. */
+export async function countQueryInSessionFile(filePath: string, q: string): Promise<SessionSearchCount> {
+  if (!q.trim()) return emptySearchCount();
+  return countQueryInSession(await readSearchText(filePath), q);
 }

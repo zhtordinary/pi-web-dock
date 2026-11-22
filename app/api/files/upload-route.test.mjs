@@ -132,8 +132,8 @@ test("rejects unsafe file names and directory conflicts, while allowing external
 
 test("keeps the directory identity recheck and atomic helper in the upload branch", () => {
   assert.match(routeSource, /isCreateDirectoryStillBound\(directory, directoryIdentityAtStart\)/);
-  assert.match(routeSource, /writeUploadFileAtomicSync\(destination, bytes/);
+  assert.match(routeSource, /await writeUploadFileAtomic\(destination, bytes/);
   assert.doesNotMatch(routeSource, /fs\.unlinkSync\(destination\)/);
-  assert.match(routeSource, /MAX_UPLOAD_FILE_BYTES/);
+  assert.doesNotMatch(routeSource, /MAX_UPLOAD_FILE_BYTES/);
   assert.match(routeSource, /MAX_UPLOAD_TOTAL_BYTES/);
 });

@@ -52,6 +52,7 @@ import { applySessionActivityEvent, applySessionActivityPeerState, isTerminalSes
 import { ACTIVITY_TIME_RANGE_VALUES, isWithinActivityTimeRange, sessionActivityDisplayTime, type ActivityTimeRange as TimeRangeValue } from "@/lib/session-activity-filters";
 import { isSubagentCompletionConfirmed } from "@/lib/session-activity-status";
 import { lineageParentId } from "@/lib/session-lineage";
+import { isHiddenRelation } from "@/lib/session-family";
 import { sessionDisplayTitle, sessionModelLabel, sessionModelValue } from "@/lib/session-display";
 import { useSubagentVisibility, setSubagentVisibility } from "@/hooks/useSubagentVisibility";
 
@@ -464,9 +465,8 @@ const knownSessionParents = new Map<string, string>();
 type SubagentVisibilitySession = Pick<SessionActivityItem["session"], "id" | "relation">;
 
 function isVisibleSubagentSession(session: SubagentVisibilitySession, visibleParentIds: ReadonlySet<string>, keepSessionId?: string): boolean {
-  return session.id === keepSessionId
-    || session.relation?.kind !== "subagent"
-    || visibleParentIds.has(session.relation.parentSessionId);
+  if (session.id === keepSessionId || !isHiddenRelation(session.relation)) return true;
+  return session.relation.kind === "subagent" && visibleParentIds.has(session.relation.parentSessionId);
 }
 
 function filterVisibleSubagentItems(items: readonly SessionActivityItem[], visibleParentIds: ReadonlySet<string>, keepSessionId?: string): SessionActivityItem[] {

@@ -86,6 +86,8 @@ interface Props {
   onStateChange?: (state: FileViewerState) => void;
   onDirtyChange?: (dirty: boolean) => void;
   watchEnabled?: boolean;
+  refreshRevision?: number;
+  onRefresh?: () => void;
   onOpenInReaderView?: () => void;
   onClose?: () => void;
 }
@@ -293,6 +295,25 @@ function DownloadLink({ filePath, sourceSessionId, remotePeer }: { filePath: str
   );
 }
 
+function RefreshButton({ onClick, disabled = false }: { onClick?: () => void; disabled?: boolean }) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick || disabled}
+      title={t("files.refresh")}
+      aria-label={t("files.refresh")}
+      className="file-viewer-icon-button"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+        <path d="M3 3v5h5" />
+      </svg>
+    </button>
+  );
+}
+
 type DiffLine = {
   type: "unchanged" | "removed" | "added" | "hunk";
   text: string;
@@ -486,7 +507,7 @@ function DiffView({ patch }: { patch: string }) {
   );
 }
 
-function ImageViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled = true, onOpenInReaderView, onClose }: Props) {
+function ImageViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled = true, refreshRevision = 0, onRefresh, onOpenInReaderView, onClose }: Props) {
   const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
@@ -505,6 +526,13 @@ function ImageViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
     setError(null);
     setWatching(false);
   }, [filePath, remotePeer, sourceSessionId]);
+
+  useEffect(() => {
+    if (refreshRevision === 0) return;
+    setBust((value) => value + 1);
+    setNaturalSize(null);
+    setError(null);
+  }, [refreshRevision]);
 
   useEffect(() => {
     setWatching(false);
@@ -608,6 +636,7 @@ function ImageViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
           />
           {watching ? "live" : "static"}
         </span>
+        <RefreshButton onClick={onRefresh} />
         <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} remotePeer={remotePeer} />
         {onOpenInReaderView && (
           <button
@@ -687,7 +716,7 @@ function formatDuration(seconds: number): string {
   return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
-function AudioViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled = true, onOpenInReaderView, onClose }: Props) {
+function AudioViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled = true, refreshRevision = 0, onRefresh, onOpenInReaderView, onClose }: Props) {
   const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
@@ -706,6 +735,13 @@ function AudioViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
     setError(null);
     setWatching(false);
   }, [filePath, remotePeer, sourceSessionId]);
+
+  useEffect(() => {
+    if (refreshRevision === 0) return;
+    setBust((value) => value + 1);
+    setDuration(null);
+    setError(null);
+  }, [refreshRevision]);
 
   useEffect(() => {
     setWatching(false);
@@ -807,6 +843,7 @@ function AudioViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
           />
           {watching ? "live" : "static"}
         </span>
+        <RefreshButton onClick={onRefresh} />
         <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} remotePeer={remotePeer} />
         {onOpenInReaderView && (
           <button
@@ -869,7 +906,7 @@ function AudioViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
   );
 }
 
-function VideoViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled = true, onOpenInReaderView, onClose }: Props) {
+function VideoViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled = true, refreshRevision = 0, onRefresh, onOpenInReaderView, onClose }: Props) {
   const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
@@ -888,6 +925,13 @@ function VideoViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
     setError(null);
     setWatching(false);
   }, [filePath, sourceSessionId]);
+
+  useEffect(() => {
+    if (refreshRevision === 0) return;
+    setBust((value) => value + 1);
+    setDuration(null);
+    setError(null);
+  }, [refreshRevision]);
 
   useEffect(() => {
     setWatching(false);
@@ -989,6 +1033,7 @@ function VideoViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
           />
           {watching ? "live" : "static"}
         </span>
+        <RefreshButton onClick={onRefresh} />
         <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} remotePeer={remotePeer} />
         {onOpenInReaderView && (
           <button
@@ -1060,7 +1105,7 @@ function VideoViewer({ filePath, cwd, remotePeer, sourceSessionId, watchEnabled 
   );
 }
 
-function DocumentViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPage, watchEnabled = true, onOpenInReaderView, onClose }: Props) {
+function DocumentViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPage, watchEnabled = true, refreshRevision = 0, onRefresh, onOpenInReaderView, onClose }: Props) {
   const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
@@ -1104,6 +1149,12 @@ function DocumentViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPag
       active = false;
     };
   }, [filePath, isPdf, remotePeer, sourceSessionId]);
+
+  useEffect(() => {
+    if (refreshRevision === 0) return;
+    setBust((value) => value + 1);
+    setError(null);
+  }, [refreshRevision]);
 
   useEffect(() => {
     setWatching(false);
@@ -1204,6 +1255,7 @@ function DocumentViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPag
             </svg>
           </a>
         )}
+        <RefreshButton onClick={onRefresh} />
         <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} remotePeer={remotePeer} />
         {onOpenInReaderView && (
           <button
@@ -1271,17 +1323,20 @@ function DocumentViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPag
 }
 
 export function FileViewer({ filePath, cwd, remotePeer, sourceSessionId, initialPage, initialAnchor, onAnchorApplied, onOpenFile, onMentionLines, onAtMention, gitRefreshKey, panelOpen = true, initialDisplayMode, initialState, onStateChange, onDirtyChange, watchEnabled = true, onOpenInReaderView, onClose }: Props) {
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const requestRefresh = useCallback(() => setRefreshRevision((value) => value + 1), []);
+
   if (isImagePath(filePath)) {
-    return <ImageViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
+    return <ImageViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} refreshRevision={refreshRevision} onRefresh={requestRefresh} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
   }
   if (isAudioPath(filePath)) {
-    return <AudioViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
+    return <AudioViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} refreshRevision={refreshRevision} onRefresh={requestRefresh} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
   }
   if (isVideoPath(filePath)) {
-    return <VideoViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
+    return <VideoViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} refreshRevision={refreshRevision} onRefresh={requestRefresh} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
   }
   if (isDocumentPreviewPath(filePath)) {
-    return <DocumentViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} initialPage={initialPage} watchEnabled={watchEnabled} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
+    return <DocumentViewer filePath={filePath} cwd={cwd} remotePeer={remotePeer} sourceSessionId={sourceSessionId} initialPage={initialPage} watchEnabled={watchEnabled} refreshRevision={refreshRevision} onRefresh={requestRefresh} onOpenInReaderView={onOpenInReaderView} onClose={onClose} />;
   }
   return (
     <TextFileViewer
@@ -1301,6 +1356,8 @@ export function FileViewer({ filePath, cwd, remotePeer, sourceSessionId, initial
       onStateChange={onStateChange}
       onDirtyChange={onDirtyChange}
       watchEnabled={watchEnabled}
+      refreshRevision={refreshRevision}
+      onRefresh={requestRefresh}
       onOpenInReaderView={onOpenInReaderView}
       onClose={onClose}
     />
@@ -1324,6 +1381,8 @@ function TextFileViewer({
   onStateChange,
   onDirtyChange,
   watchEnabled = true,
+  refreshRevision = 0,
+  onRefresh,
   onOpenInReaderView,
   onClose,
 }: Props) {
@@ -1736,8 +1795,8 @@ function TextFileViewer({
     }
   }, [data, dirty, editText, filePath, isSaving, remotePeer, sourceSessionId, t]);
 
-  // Reset and load the file itself when its identity changes. Live watching is
-  // managed separately so pausing it never clears the displayed content.
+  // Reset and load the file itself when its identity or refresh revision changes.
+  // Live watching is managed separately so pausing it never clears displayed content.
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -1750,8 +1809,8 @@ function TextFileViewer({
     setData(null);
     setGitDiff(null);
     setGitDiffResolved(false);
-    setWatching(false);
     editDraftRef.current = initialEditDraftRef.current;
+    scrollRestorePendingRef.current = true;
 
     fetchContent(filePath)
       .then((loaded) => {
@@ -1771,7 +1830,11 @@ function TextFileViewer({
     return () => {
       active = false;
     };
-  }, [filePath, fetchContent, sourceSessionId]);
+  }, [filePath, fetchContent, refreshRevision, sourceSessionId]);
+
+  useEffect(() => {
+    void fetchGitDiff(filePath);
+  }, [fetchGitDiff, filePath, gitRefreshKey, refreshRevision]);
 
   useEffect(() => {
     setWatching(false);
@@ -1811,10 +1874,6 @@ function TextFileViewer({
       if (esRef.current === es) esRef.current = null;
     };
   }, [filePath, fetchContent, fetchGitDiff, isEditing, remotePeer, sourceSessionId, watchEnabled]);
-
-  useEffect(() => {
-    void fetchGitDiff(filePath);
-  }, [fetchGitDiff, filePath, gitRefreshKey]);
 
   useEffect(() => {
     // HTML gets the same rendered-first treatment as markdown: a generated page
@@ -2042,8 +2101,9 @@ function TextFileViewer({
 
   if (error && !isDeletedDiff) {
     return (
-      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 13 }}>
-        {error}
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, color: "#f87171", fontSize: 13 }}>
+        <span>{error}</span>
+        <RefreshButton onClick={onRefresh} />
       </div>
     );
   }
@@ -2103,6 +2163,7 @@ function TextFileViewer({
         )}
 
         <div className="file-viewer-controls" style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+          {!isDeletedDiff && <RefreshButton onClick={onRefresh} disabled={isEditing} />}
           {!isEditing && displayModes.length > 1 && (
             <div className="file-viewer-mode-switch" aria-label={t("i18n.fileViewMode")}>
               {displayModes.map((mode) => {

@@ -197,6 +197,7 @@ function routeFixture({ uiError, retryError, raceQueue = false, failPersistence 
     "@/lib/activity-peers": { localDeviceIdentity: () => ({ id: "fixture" }), readActivityConfig: () => ({}) },
     "@/lib/paths": { samePath: (a, b) => a === b },
     "@/lib/live-agent-events": { redactLiveValue: (value) => (bindingRejection || lookupRejection) && typeof value === "string" ? "[projected-error]" : value },
+    "@/lib/missing-cwd": { cwdMissingBody: () => ({}), missingCwdFromError: () => undefined },
     "@/lib/reader-control-receipts": receiptApi,
   };
   const testModule = { exports: {} };

@@ -1,5 +1,6 @@
 import type { SessionActivityItem } from "./session-activity-types.ts";
 import { AgentCommandError, sendAgentCommand } from "./agent-client.ts";
+import { isHiddenRelation } from "./session-family.ts";
 
 export const MIN_BATCH_CONTINUE_SESSIONS = 2;
 
@@ -25,7 +26,7 @@ export function filterContinuableSessions(
   if (!Array.isArray(sessions)) return [];
   return sessions.filter((item) =>
     (item.status === "unknown" || item.status === "failed")
-    && item.session.relation?.kind !== "subagent"
+    && !isHiddenRelation(item.session.relation)
     && item.latestRun != null,
   );
 }

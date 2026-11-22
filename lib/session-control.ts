@@ -603,28 +603,7 @@ function toolError(action: SessionControlAction, caller: string | undefined, tar
 
 export const LIVE_SESSION_CONTROL_ACTIONS = ["list_sessions", "inspect", "pending_ui", "answer_ui", "wait_for"] as const;
 
-export function isProtectedSideAskControl(input: unknown, callerId: string, protectedSessionId: string): boolean {
-  if (!isRecord(input)) return false;
-  const action = input.action;
-  const controls = ["answer_ui", "prompt", "steer", "follow_up", "retract_follow_up", "abort", "reply"];
-  if (!controls.includes(String(action)) && !(action === "register_wait" && input.condition === "ui_request")) return false;
-  const target = typeof input.target === "string" ? input.target : undefined;
-  const resolved = resolveLiveTarget(target, callerId);
-  return !("error" in resolved) && resolved.sessionId === protectedSessionId;
-}
-
-export function createSideAskControlGuard(protectedSessionId: string): InlineExtension {
-  return { name: "pi-web-side-ask-control-guard", hidden: true, factory: (pi) => {
-    pi.on("tool_call", (event, ctx) => {
-      if (event.toolName === "session_control"
-        && isProtectedSideAskControl(event.input, ctx.sessionManager.getSessionId(), protectedSessionId)) {
-        return { block: true, reason: "Cannot control the source session or approve its Side Ask requests" };
-      }
-    });
-  } };
-}
-
-export async function executeLiveSessionControl(params: Record<string, unknown>, callerId?: string, signal?: AbortSignal, protectedSessionId?: string) {
+export async function executeLiveSessionControl(params: Record<string, unknown>, callerId?: string, signal?: AbortSignal) {
   const action = params.action as SessionControlAction;
   const target = typeof params.target === "string" ? params.target : undefined;
   if (!LIVE_SESSION_CONTROL_ACTIONS.includes(action as typeof LIVE_SESSION_CONTROL_ACTIONS[number])) throw new Error("Unsupported live session operation");
@@ -632,8 +611,8 @@ export async function executeLiveSessionControl(params: Record<string, unknown>,
   if (action === "list_sessions") return toolResult(action, getRpcSessionInfos().map(info => ({ ...candidateSummary(info), deviceId: device.id, isAlive: Boolean(getRpcSession(info.id)?.isAlive()), isSelf: info.id === callerId })));
   const resolved = resolveLiveTarget(target, callerId);
   if ("error" in resolved) return toolError(action, callerId, target, resolved.error, resolved.candidates ? { candidates: resolved.candidates } : {});
-  if (resolved.sessionId === callerId || (action === "answer_ui" && resolved.sessionId === protectedSessionId)) {
-    return toolError(action, callerId, target, "refusing to control the calling session or its own Side Ask confirmation");
+  if (resolved.sessionId === callerId) {
+    return toolError(action, callerId, target, "refusing to control the calling session");
   }
 
   const session = getRpcSession(resolved.sessionId);
@@ -720,7 +699,6 @@ export async function executeLiveSessionControl(params: Record<string, unknown>,
 
 type SessionControlRuntime = {
   createSession?: (request: DurableSessionCreateRequest) => Promise<DurableSessionResult>;
-  protectedSessionId?: string;
 };
 
 function deriveCreateIdempotencyKey(toolCallId: string, explicit: unknown): string {
@@ -844,7 +822,7 @@ export function createSessionControlExtension(runtime: SessionControlRuntime = {
           }
           if (params.targetDeviceId && params.targetDeviceId !== device.id && action !== "register_wait") return toolError(action, caller.id, target, `${action} does not support targetDeviceId; no local fallback was executed`);
           if (["inspect", "pending_ui", "answer_ui", "wait_for"].includes(action)) {
-            return executeLiveSessionControl(params, caller.id, signal, runtime.protectedSessionId);
+            return executeLiveSessionControl(params, caller.id, signal);
           }
           if (action === "create_session") {
             try {
@@ -888,7 +866,7 @@ export function createSessionControlExtension(runtime: SessionControlRuntime = {
                   }
                   const resolved = resolveLiveTarget(target, caller.id);
                   if ("error" in resolved) return toolError(action, caller.id, target, resolved.error, resolved.candidates ? { candidates: resolved.candidates } : {});
-                  if (resolved.sessionId === caller.id || resolved.sessionId === runtime.protectedSessionId) {
+                  if (resolved.sessionId === caller.id) {
                     throw new Error("ui_request waits must target another session");
                   }
                   const live = getRpcSession(resolved.sessionId);
@@ -1029,7 +1007,7 @@ export function createSessionControlExtension(runtime: SessionControlRuntime = {
 
           const resolved = resolveLiveTarget(target, caller.id);
           if ("error" in resolved) return toolError(action, caller.id, target, resolved.error, resolved.candidates ? { candidates: resolved.candidates } : {});
-          if (resolved.sessionId === caller.id || resolved.sessionId === runtime.protectedSessionId) {
+          if (resolved.sessionId === caller.id) {
             return toolError(action, caller.id, target, "refusing to control the calling session itself; target a different session");
           }
 

@@ -74,13 +74,19 @@ function resolveCreationPath(rawPath: string, baseDir: string): string | undefin
 }
 
 const READ_ONLY_REVISION_GUARD = /^test\s+"\$\(git\s+-C\s+"\$[A-Za-z_][A-Za-z0-9_]*"\s+rev-parse\s+[A-Za-z0-9._/-]+\)"\s*=\s*(?:"\$\(git\s+-C\s+"\$[A-Za-z_][A-Za-z0-9_]*"\s+rev-parse\s+[A-Za-z0-9._/-]+\)"|[A-Fa-f0-9]{40,64})\s*$/;
+const PROJECT_ROOT_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(?:"\$\(\s*git\s+rev-parse\s+--show-toplevel\s*\)"|\$\(\s*git\s+rev-parse\s+--show-toplevel\s*\))$/;
 
-// shortcut: recognize a limited shell form, extend it only with equally verifiable execution evidence.
-function creationCommand(command: string, worktrees: ReadonlyMap<string, string> | null, home: string, sessionCwd: string): CreationCommand | undefined {
+// shortcut: resolve only the read-only top-level query; do not evaluate arbitrary command substitutions.
+function creationCommand(command: string, worktrees: ReadonlyMap<string, string> | null, home: string, sessionCwd: string, projectRoot: string): CreationCommand | undefined {
   // Multiple add commands cannot be paired unambiguously with one tool result.
   if ((command.match(/\bworktree\s+add\b/g) ?? []).length !== 1) return undefined;
   const variables = new Map<string, string>([["HOME", home]]);
   for (const fragment of commandFragments(command)) {
+    const rootAssignment = PROJECT_ROOT_ASSIGNMENT.exec(fragment.trim());
+    if (rootAssignment && isAbsolute(projectRoot)) {
+      variables.set(rootAssignment[1], projectRoot);
+      continue;
+    }
     const parsed = splitShellWords(fragment.trim());
     if (!parsed.ok) {
       // A read-only revision guard runs in a subshell and cannot change these variables.
@@ -157,6 +163,7 @@ export function createWorktreeCreationCollector(
   session: Pick<SessionInfo, "id" | "created" | "cwd">,
   worktreePaths: readonly string[] | null,
   home: string,
+  projectRoot = session.cwd,
 ) {
   const created = Date.parse(session.created);
   const worktrees = worktreePaths && new Map(worktreePaths.filter(isAbsolute).map((path) => [normalize(path), path]));
@@ -172,7 +179,7 @@ export function createWorktreeCreationCollector(
         if (message.role !== "assistant") return;
         for (const block of message.content) {
           if (block.type !== "toolCall" || block.toolName !== "bash" || !block.toolCallId || typeof block.input.command !== "string") continue;
-          const command = creationCommand(block.input.command, worktrees, home, session.cwd);
+          const command = creationCommand(block.input.command, worktrees, home, session.cwd, projectRoot);
           if (command) {
             if (!worktrees && pending.has(block.toolCallId)) throw new Error("Ambiguous worktree creation call");
             if (!pending.has(block.toolCallId) && pending.size >= 4096) throw new Error("Too many pending worktree creation calls");
@@ -200,8 +207,9 @@ export function findWorktreeCreationRecords(
   session: Pick<SessionInfo, "id" | "created" | "cwd">,
   worktreePaths: readonly string[],
   home: string,
+  projectRoot = session.cwd,
 ): WorktreeCreationRecord[] {
-  const collector = createWorktreeCreationCollector(session, worktreePaths, home);
+  const collector = createWorktreeCreationCollector(session, worktreePaths, home, projectRoot);
   for (const entry of entries) collector.add(entry);
   return collector.records();
 }

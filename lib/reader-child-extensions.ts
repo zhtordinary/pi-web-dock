@@ -14,10 +14,6 @@ const REQUIRED_CHILD_API_PATH = (agentDir: string) => join(
 );
 const REQUIRED_CHILD_EXTENSIONS = [
   {
-    id: "reader-openai-provider-aliases",
-    path: join(process.cwd(), "packages", "reader-openai-subscription", "index.ts"),
-  },
-  {
     id: "pi-web-usage-pricing",
     path: join(process.cwd(), "packages", "reader-usage-pricing", "index.ts"),
   },

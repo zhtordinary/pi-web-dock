@@ -5,7 +5,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { CompactionContextInfo, ContextUsage } from "./pi-types";
 import type { SessionEntry } from "./types";
 import { getModelsConfigPath } from "./models-config-store";
-import { installOpenAIProviderAliases } from "./openai-provider-aliases";
+import { canonicalHistoricalOpenAIProvider } from "./openai-provider-aliases";
 import { getSessionReadAgentContext, getSessionReadBranch, getSessionReadSnapshot } from "./session-read-cache";
 
 let readOnlyModelRuntime: Promise<ModelRuntime> | undefined;
@@ -29,10 +29,7 @@ export function getReadOnlyModelRuntime(): Promise<ModelRuntime> {
   }
   if (!readOnlyModelRuntime) {
     readOnlyModelRuntimeLoadedAt = Date.now();
-    readOnlyModelRuntime = ModelRuntime.create({ refreshOnCreate: false }).then((runtime) => {
-      installOpenAIProviderAliases(runtime);
-      return runtime;
-    }).catch((error) => {
+    readOnlyModelRuntime = ModelRuntime.create({ refreshOnCreate: false }).catch((error) => {
       readOnlyModelRuntime = undefined;
       readOnlyModelRuntimeLoadedAt = 0;
       throw error;
@@ -93,7 +90,7 @@ export function getCompactionContextInfo(
     const provider = summarizer?.provider ?? contextProvider;
     const modelId = summarizer?.modelId ?? contextModel;
     const contextWindow = contextProvider && contextModel
-      ? modelRuntime.getModel(contextProvider, contextModel)?.contextWindow
+      ? modelRuntime.getModel(canonicalHistoricalOpenAIProvider(contextProvider)!, contextModel)?.contextWindow
       : undefined;
     result[entry.id] = {
       tokensBefore: entry.tokensBefore,
@@ -117,7 +114,9 @@ export async function readSessionContextUsageFromFile(filePath: string, leafId?:
       ? getSessionReadAgentContext(snapshot)
       : piBuildSessionContext(snapshot.entries as never, selectedLeaf);
     if (!context.model) return null;
-    const model = (await getReadOnlyModelRuntime()).getModel(context.model.provider, context.model.modelId);
+    const model = (await getReadOnlyModelRuntime()).getModel(
+      canonicalHistoricalOpenAIProvider(context.model.provider)!, context.model.modelId,
+    );
     if (!model) return null;
     const branch = leafId === undefined
       ? getSessionReadBranch(snapshot)

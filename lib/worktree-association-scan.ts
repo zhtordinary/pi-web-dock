@@ -74,7 +74,7 @@ function createFileScan(session: Session, stat: Stats, projectRoot: string): Fil
   return {
     identity: sessionIdentity(session), target: stat, offset: 0, hash: createHash("sha256"), phase: "read", verifyOffset: 0,
     parts: [], lineBytes: 0, headerSeen: false, nameSeen: false, unterminated: false, restarts: 0,
-    creation: createWorktreeCreationCollector(session, null, homedir()),
+    creation: createWorktreeCreationCollector(session, null, homedir(), projectRoot),
     bindings: createWorktreeBindingCollector(session, projectRoot, null),
   };
 }

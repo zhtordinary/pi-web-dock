@@ -427,7 +427,7 @@ export function getSessionReadBranch(snapshot: SessionReadSnapshot): SessionBran
   // Every branch-derived read (user questions, recap, todos, compaction, cost)
   // must share one definition of "current branch": the snapshot's resolved
   // leaf. Falling back to the manager's physical leaf would answer from a
-  // metadata-only side branch (plan-mode state, quick-ask thread, zombie SDK
+  // metadata-only side branch (plan-mode state, side session, zombie SDK
   // state) while the transcript already renders the resolved main line.
   snapshot.branch ??= snapshot.leafId === null
     ? []

@@ -27,6 +27,7 @@ import {
 } from "./mcp-test";
 import type {
   McpOAuthChallenge,
+  McpOAuthRefreshLock,
   McpOAuthSettings,
   McpOAuthStateStore,
   McpSignInOptions,
@@ -383,6 +384,10 @@ function watchedStore(store: McpOAuthStateStore, flow: Flow, guard: McpSignInWri
       guard();
       note(state);
       await store.save(state);
+    },
+    withRefreshLock: <T>(fn: () => Promise<T>) => {
+      const withLock = store.withRefreshLock as McpOAuthRefreshLock | undefined;
+      return withLock ? withLock.call(store, fn) as Promise<T> : fn();
     },
   };
 }

@@ -35,6 +35,7 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { useContinueController, CONTINUE_TEXT } from "@/hooks/useContinueController";
 import type { SchedulerState } from "@/lib/continue-logic";
 import { AgentCommandError, isPromptRejectedError, isSessionMissingError, sendAgentCommand, SESSION_RESOURCES_RELOADED_EVENT } from "@/lib/agent-client";
+import { missingCwdFromBody } from "@/lib/missing-cwd";
 import { BranchNavigation, canWriteBranch, isBranchPositionError } from "@/lib/branch-navigation";
 import type { QuestionAnalysisPromptMetadata } from "@/lib/question-analysis";
 import { markSessionDialogInteracted } from "@/hooks/useAudio";
@@ -126,7 +127,7 @@ export interface SessionData {
 }
 
 export type SessionForkResult =
-  | { newSessionId: string; newSessionPath?: string; subprojectAssignmentFailed?: boolean }
+  | { newSessionId: string; newSessionPath?: string; session?: SessionInfo; subprojectAssignmentFailed?: boolean }
   | { restoreMessage: UserMessage };
 
 interface AgentEvent {
@@ -163,6 +164,8 @@ type NewSessionResponse = {
   error?: string;
   code?: string;
   accepted?: boolean;
+  reason?: string;
+  cwd?: string;
 };
 
 type AgentStateResponse = {
@@ -454,6 +457,8 @@ type ModelsResponse = {
   fastMode?: FastModeStatus;
   modelError?: ModelErrorInfo;
   modelScopeWarnings?: string[];
+  reason?: string;
+  cwd?: string;
   error?: string;
 };
 
@@ -621,6 +626,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelList, setModelList] = useState<ModelEntry[]>([]);
   const [modelScopeWarnings, setModelScopeWarnings] = useState<string[]>([]);
   const [modelError, setModelError] = useState<ModelErrorInfo | null>(null);
+  const [modelsMissingCwd, setModelsMissingCwd] = useState<string | null>(null);
+  const [promptMissingCwd, setPromptMissingCwd] = useState<string | null>(null);
+  const missingCwd = promptMissingCwd ?? modelsMissingCwd;
+  useEffect(() => {
+    setPromptMissingCwd(null);
+    setModelsMissingCwd(null);
+  }, [newSessionCwd, session?.id, remotePeer]);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [modelThinkingLevelPins, setModelThinkingLevelPins] = useState<Record<string, string>>({});
@@ -1659,6 +1671,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         res.status,
         result.code,
         result.accepted,
+        missingCwdFromBody(result) ?? undefined,
       );
     }
     if (!isCurrent()) return null;
@@ -3060,6 +3073,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else {
         throw new Error("No active session for the prompt");
       }
+      setPromptMissingCwd(null);
       if (isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
@@ -3097,7 +3111,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       rpcPromptPendingRef.current = false;
       if (!isHistoricalEdit) updateMessages((current) => removeMessage(current, userMsg));
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (isPromptRejectedError(e) && e.missingCwd) {
+        setPromptMissingCwd(e.missingCwd);
+      } else {
+        addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      }
       restoreSubmission(message, images, composerDraftKey);
       // A rejected prompt is never replayed. Recover the confirmed cursor and
       // reconcile idle/busy truth so an optimistic waiting indicator can settle.
@@ -3285,6 +3303,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, onSessionForked, sendAgentCommandR]);
 
+  /** Fork a cold session whose recorded folder is gone into an existing folder. */
+  const forkIntoCwd = useCallback(async (cwd: string): Promise<string | null> => {
+    const sid = sessionIdRef.current;
+    if (!sid) return "Session not found";
+    try {
+      const response = await fetch(apiPath(`sessions/${encodeURIComponent(sid)}/fork`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd }),
+      });
+      const data = await response.json().catch(() => ({})) as {
+        sessionId?: string;
+        sessionPath?: string;
+        session?: SessionInfo;
+        error?: string;
+      };
+      if (!response.ok || !data.sessionId || !data.session) return data.error ?? `Fork failed (HTTP ${response.status})`;
+      const previousKey = composerDraftKey ?? sessionDraftKey(sid, remotePeer);
+      const nextKey = sessionDraftKey(data.sessionId, remotePeer);
+      if (opts.chatInputRef?.current) opts.chatInputRef.current.rekeyDraft(previousKey, nextKey);
+      else rekeyDraft(previousKey, nextKey);
+      onSessionForked?.({ newSessionId: data.sessionId, newSessionPath: data.sessionPath, session: data.session });
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, [apiPath, composerDraftKey, onSessionForked, opts.chatInputRef, remotePeer]);
+
+  const canForkMissingCwd = Boolean(missingCwd) && !isNew && Boolean(session?.id)
+    && session?.relation?.kind !== "subagent" && session?.relation?.kind !== "side";
+
   const navigateBranch = useCallback(async (sid: string, leafId: string | null, beforeEntryId?: string): Promise<boolean> => {
     if (branchRef.current!.state.phase === "unknown" && !await recoverBranchPosition(sid)) return false;
     const result = await branchRef.current!.navigate(
@@ -3450,6 +3499,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const message = body?.modelError?.message
           ?? body?.error
           ?? `Failed to load models (HTTP ${res.status})`;
+        const cwdGone = missingCwdFromBody(body);
+        setModelsMissingCwd(cwdGone);
         setModelNames(body?.models ?? {});
         setModelError(body?.modelError ?? {
           code: "MODEL_REQUEST_FAILED",
@@ -3467,6 +3518,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as ModelsResponse;
       signal?.throwIfAborted();
       if (!isCurrentResponse()) return;
+      setModelsMissingCwd(null);
       setModelNames(d.models ?? {});
       setModelError(d.modelError ?? null);
       setModelScopeWarnings(d.modelScopeWarnings ?? []);
@@ -4411,7 +4463,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // State
     data, loading, error, activeLeafId, history, reader, retrySessionRead, messages, entryIds, activeToolResults, questionAnalysisJobs, questionDraftViews, streamingStore,
     systemTools,
-    agentRunning, sessionStatePending, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastMode,
+    agentRunning, sessionStatePending, modelNames, modelList, modelError, missingCwd, canForkMissingCwd, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastMode,
     retryInfo, contextUsage, systemPrompt, runtimeInspection, forkingEntryId,
     continueUi, unattended, toggleUnattended, triggerContinue, stopAutoRetry,
     compactionCosts,
@@ -4438,7 +4490,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, scrollContainerRef, lastUserMsgRef, pendingScrollToUserRef,
     // Actions
     ensureSession: ensureNewSession,
-    handleSend, handleAbort, handleFork, handleNavigate, handleLeafChange, handleModelChange, handleFastModeChange,
+    handleSend, handleAbort, handleFork, forkIntoCwd, handleNavigate, handleLeafChange, handleModelChange, handleFastModeChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleAutoCompactionChange,
     handleRecallQueue,
     handleBuiltinSlashCommand,

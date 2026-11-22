@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readAsyncModelMetadata } from "@/lib/subagent-async-metadata";
+import { readAsyncStatusMetadata } from "@/lib/subagent-async-metadata";
 
 export const dynamic = "force-dynamic";
 
@@ -10,5 +10,5 @@ export async function GET(req: Request) {
   if (!sessionId || ids.length === 0) {
     return NextResponse.json({ error: "sessionId and ids are required" }, { status: 400 });
   }
-  return NextResponse.json({ models: readAsyncModelMetadata(sessionId, ids) });
+  return NextResponse.json(readAsyncStatusMetadata(sessionId, ids));
 }

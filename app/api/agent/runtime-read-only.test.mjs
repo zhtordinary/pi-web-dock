@@ -18,6 +18,7 @@ function fixture({ live = false, trusted = true, startError } = {}) {
     "@/lib/session-reader": { resolveSessionPath: async () => "/fixture/session.jsonl", resolveSessionPathReadOnly: async () => { calls.fileReads++; return "/fixture/session.jsonl"; } },
     "@/lib/request-security": { isApiRequestAllowed: () => trusted, hasJsonContentType: () => true },
     "@/lib/live-agent-events": { redactLiveValue: value => value },
+    "@/lib/missing-cwd": { cwdMissingBody: () => ({}), missingCwdFromError: () => undefined },
     "@/lib/agent-event-stream": { createAgentEventStream: (_req, _id, session, file) => { calls.stream++; calls.observedSession = session; calls.observedFile = file; return new ReadableStream({ start(c) { c.close(); } }); } },
     "@/lib/queue-recall-store": {}, "@/lib/session-tool-selection": {}, "@/lib/branch-navigation": {},
     "@/lib/activity-peers": {}, "@/lib/paths": {}, "@/lib/reader-control-receipts": {},

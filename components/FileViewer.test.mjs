@@ -15,6 +15,15 @@ test("PDF preview offers a user-initiated top-level link without changing the if
   assert.match(document, /<iframe[\s\S]*?src=\{previewUrl\}/);
 });
 
+test("every open-file viewer exposes a manual refresh control", () => {
+  assert.match(source, /function RefreshButton\(/);
+  assert.equal((source.match(/<RefreshButton onClick=\{onRefresh\}/g) ?? []).length, 6);
+  assert.match(source, /const \[refreshRevision, setRefreshRevision\] = useState\(0\)/);
+  assert.match(source, /refreshRevision=\{refreshRevision\} onRefresh=\{requestRefresh\}/);
+  assert.match(source, /<RefreshButton onClick=\{onRefresh\} disabled=\{isEditing\} \/>/);
+  assert.match(source, /\[filePath, fetchContent, refreshRevision, sourceSessionId\]/);
+});
+
 test("large source previews bypass the per-line syntax highlighter", () => {
   assert.match(source, /const SOURCE_HIGHLIGHT_MAX_LINES = 1_000;/);
   assert.match(source, /const useLightweightSource = lineCount > SOURCE_HIGHLIGHT_MAX_LINES/);

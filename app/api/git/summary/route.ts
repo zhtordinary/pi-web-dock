@@ -18,8 +18,9 @@ import {
 } from "@/lib/git-summary";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
-import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import { orderModelScope, resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { createReaderAgentSessionServices } from "@/lib/model-runtime";
+import { readModelsConfig } from "@/lib/models-config-store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -112,12 +113,16 @@ async function resolveSummaryModel(cwd: string) {
     agentDir,
     ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
   });
-  const scope = await resolveVisibleModels(services.modelRuntime, services.settingsManager.getEnabledModels());
+  const scope = orderModelScope(
+    await resolveVisibleModels(services.modelRuntime, services.settingsManager.getEnabledModels()),
+    readModelsConfig(),
+  );
   const defaultProvider = services.settingsManager.getDefaultProvider();
   const defaultModel = services.settingsManager.getDefaultModel();
   const selected = selectInitialModelScope(scope, {
-    ...(defaultProvider && defaultModel ? { defaultModel: { provider: defaultProvider, modelId: defaultModel } } : {}),
+    ...(defaultProvider ? { defaultModel: { provider: defaultProvider, modelId: defaultModel ?? "" } } : {}),
   });
+  if (selected.requiresModelSelection) throw new Error("The saved OpenAI provider is retired. Select a new default model before generating a Git summary.");
   if (!selected.model) throw new Error("No model is configured for Git summary");
   return { runtime: services.modelRuntime as unknown as SimpleCompletionRuntime, model: selected.model };
 }

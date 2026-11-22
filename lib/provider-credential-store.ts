@@ -52,7 +52,10 @@ async function updateStoredCredentials<T>(
 
   try {
     throwIfCompromised();
-    const parsed: unknown = JSON.parse(readFileSync(authPath, "utf-8"));
+    // Match Pi's AuthStorage: a leading BOM is ignored and an empty file has
+    // no credentials. Invalid non-object content still fails closed.
+    const content = readFileSync(authPath, "utf-8").replace(/^\uFEFF/, "");
+    const parsed: unknown = content ? JSON.parse(content) : {};
     if (!isRecord(parsed)) throw new Error("Invalid auth.json: expected an object");
 
     const { result, changed } = update(parsed);

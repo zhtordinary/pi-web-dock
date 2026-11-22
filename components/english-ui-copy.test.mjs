@@ -9,7 +9,6 @@ const jiti = createJiti(import.meta.url, { fsCache: false, jsx: { runtime: "auto
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { MessageView } = await jiti.import("./MessageView.tsx");
 const { formatSideBranchTitle } = await jiti.import("./BranchNavigator.tsx");
-const { SidekickAnswer, SidekickHeader, SidekickQuestion, restoreSidekickDraft } = await jiti.import("./SidekickDrawer.tsx");
 const { WorktreeSessionBuckets } = await jiti.import("./WorktreeSessionBuckets.tsx");
 const { ChatInput } = await jiti.import("./ChatInput.tsx");
 const { QuoteCardGroup } = await jiti.import("./QuoteCardGroup.tsx");
@@ -69,24 +68,6 @@ test("stored automatic branch titles follow the current locale without changing 
   assert.equal(formatSideBranchTitle("Branch: 用户内容", zh), "分支: 用户内容");
   assert.equal(formatSideBranchTitle("Branch 3", zh), "分支 3");
   assert.equal(formatSideBranchTitle("A custom title", en), "A custom title");
-});
-
-test("Side Ask questions, answers, topic tabs and restore notes render English copy", () => {
-  assertEnglish(renderEnglish(SidekickQuestion, { question: "Side question", images: [{ data: "AQID", mimeType: "image/png" }], copied: false, onCopy() {}, onQuote() {} }), "side question");
-  assertEnglish(renderEnglish(SidekickQuestion, { question: "Side question", images: [], copied: true, onCopy() {} }), "copied side question");
-  for (const entry of [
-    { stopReason: "length", data: { answer: "", thinking: "Kept thinking" } },
-    { stopReason: "stop", data: { answer: "", thinking: "" } },
-  ]) assertEnglish(renderEnglish(SidekickAnswer, { entry }), "side answer");
-  assertEnglish(renderEnglish(SidekickHeader, {
-    threads: [{ id: "default", label: "1", count: 3 }, { id: "other", label: "2", count: 0 }],
-    activeThreadId: "default", busyThreads: new Set(["other"]), mainBusy: true, expanded: false, rightPanel: false,
-    canFork: true, isForking: false, onSelect() {}, onCloseThread() {}, onDelete() {}, onCreate() {}, onFork() {}, onExpand() {}, onClose() {},
-  }), "side ask header");
-  const previous = { drafts: { view: { question: "typed", images: [], error: null } }, replies: { view: { runId: "run", question: "asked", images: [], answer: "", thinking: "", running: false } } };
-  const source = { runId: "run", question: "asked", images: [] };
-  assert.doesNotMatch(restoreSidekickDraft(previous, "view", source, false, en).drafts.view.error, CJK_TEXT);
-  assert.doesNotMatch(restoreSidekickDraft(previous, "view", source, false, en, "refused").replies.view.answer, CJK_TEXT);
 });
 
 test("worktree buckets and the composer's continue controls render English copy", () => {

@@ -57,6 +57,28 @@ export function mcpStatusKey(entry: McpStatusEntry): string {
   return `${entry.scope}\0${entry.sourcePath}\0${entry.name}`;
 }
 
+// Test and session bundles may be loaded separately, so this subscription lives
+// on globalThis just like the status records.
+const TEST_CONNECTED_LISTENERS_KEY: symbol = Symbol.for("pi-web:mcp-test-connected-listeners");
+type McpTestConnectedListener = (entry: McpStatusEntry, configKey: string) => void;
+
+function testConnectedListeners(): Set<McpTestConnectedListener> {
+  const store = globalThis as Record<symbol, Set<McpTestConnectedListener> | undefined>;
+  return (store[TEST_CONNECTED_LISTENERS_KEY] ??= new Set());
+}
+
+/** Notify open session hosts when Settings › MCP successfully connects an entry. */
+export function onMcpTestConnected(listener: McpTestConnectedListener): () => void {
+  const listeners = testConnectedListeners();
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Number of active test-connected listeners; useful for lifecycle tests. */
+export function mcpTestConnectedListenerCount(): number {
+  return testConnectedListeners().size;
+}
+
 /**
  * Records the last known state of `entry` as it read `configKey`; a later
  * record for the same entry and content replaces it. A record for other
@@ -77,6 +99,15 @@ export function recordMcpStatus(entry: McpStatusEntry, configKey: string, status
     const [oldestKey, oldest] = map.entries().next().value as [string, Map<string, McpServerStatus>];
     oldest.delete(oldest.keys().next().value as string);
     if (oldest.size === 0) map.delete(oldestKey);
+  }
+  if (status.origin === "test" && status.state === "connected") {
+    for (const listener of testConnectedListeners()) {
+      try {
+        listener(entry, configKey);
+      } catch {
+        // One open session must not prevent other hosts from retrying.
+      }
+    }
   }
 }
 

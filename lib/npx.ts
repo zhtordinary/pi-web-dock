@@ -1,18 +1,23 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { nodeCliInvocation } from "./node-cli";
+import { sanitizeProjectCommandEnvironment } from "./project-command-env";
 
 const execFileAsync = promisify(execFile);
 
 export interface RunNpxOptions {
   timeout?: number;
   cwd?: string;
-  env?: NodeJS.ProcessEnv;
 }
 
 export interface RunNpxResult {
   stdout: string;
   stderr: string;
+}
+
+/** The npx child may run third-party code, but never receives this server's runtime secrets. */
+export function npxEnvironment(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...sanitizeProjectCommandEnvironment(base), FORCE_COLOR: "0" };
 }
 
 /**
@@ -26,6 +31,6 @@ export async function runNpx(args: string[], opts: RunNpxOptions = {}): Promise<
   return execFileAsync(command, commandArgs, {
     timeout: opts.timeout,
     cwd: opts.cwd,
-    env: opts.env,
+    env: npxEnvironment(),
   });
 }

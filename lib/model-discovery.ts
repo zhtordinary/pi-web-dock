@@ -366,6 +366,10 @@ export function parseDiscoveredModels(value: unknown): DiscoveredModel[] {
   }));
 }
 
+// Google sends requests under the supplied base URL, including /v1alpha and
+// /v1beta1; do not append a second API version segment.
+const GOOGLE_API_VERSION_SEGMENT = /\/v\d+(?:(?:alpha|beta)\d*)?$/i;
+
 export function buildModelsListUrl(baseUrl: string, api: string): URL {
   const url = new URL(baseUrl.trim());
   const trimmedPath = url.pathname.replace(/\/+$/, "");
@@ -373,7 +377,7 @@ export function buildModelsListUrl(baseUrl: string, api: string): URL {
   if (!/\/models$/i.test(trimmedPath)) {
     let path = trimmedPath;
     if (api === "anthropic-messages" && !/\/v\d+(?:beta)?$/i.test(path)) path += "/v1";
-    if (api === "google-generative-ai" && !/\/v\d+(?:beta)?$/i.test(path)) path += "/v1beta";
+    if (api === "google-generative-ai" && !GOOGLE_API_VERSION_SEGMENT.test(path)) path += "/v1beta";
     url.pathname = `${path}/models`.replace(/\/+/g, "/");
   }
 

@@ -9,6 +9,7 @@ import { parseReaderNativeProfile } from "./subagent-profile-reader";
 import { parseNpmSource } from "./npm-source";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isExistingPathWithinRoots } from "./path-security";
+import { getProjectTrustStatus } from "./project-trust";
 import { disabledBuiltInSubagents, getSubagentSettingsPath, readBuiltInSubagentOverride } from "./subagent-settings";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
@@ -102,6 +103,15 @@ export interface SubagentSessionResources {
   extensions?: string[];
   maxTurns?: number;
   exactSystemPrompt?: string;
+}
+
+export function getSubagentExactSystemPrompt(resources: SubagentSessionResources): string | undefined {
+  const chatOnly = resources.tools.length === 0
+    && !resources.loadSkills
+    && !resources.loadExtensions
+    && !resources.codemode
+    && !resources.mcp;
+  return resources.exactSystemPrompt ?? (chatOnly ? resources.appendSystemPrompt[0] ?? "" : undefined);
 }
 
 export interface SubagentResultMetadata {
@@ -497,9 +507,12 @@ export function listSubagentProfileSources(cwd: string, agentDir = getAgentDir()
 }
 
 export function listSubagentProfiles(cwd: string, agentDir = getAgentDir()): SubagentProfile[] {
-  // A same-name file replaces the built-in outright, its own `enabled` included.
+  // Project and workspace files are a child's system prompt and tool grant;
+  // untrusted folders must not let them replace built-ins or global profiles.
+  const projectTrusted = getProjectTrustStatus(cwd, agentDir).trusted;
   const byName = new Map(builtInProfiles(agentDir).map((profile) => [profile.name.toLowerCase(), profile]));
   for (const [dir, scope] of profileDirectories(cwd, agentDir)) {
+    if (scope !== "global" && !projectTrusted) continue;
     for (const profile of readProfileDirectory(dir, scope, cwd)) byName.set(profile.name.toLowerCase(), profile);
   }
   return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));

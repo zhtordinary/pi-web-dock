@@ -120,6 +120,39 @@ test("creation history reads visible project sessions without executing or expos
   assert.equal(missing.status, 400);
 });
 
+test("worktree removal ignores pi-subagents artifact JSONL", async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-web-worktree-artifacts-")));
+  const previous = { agent: process.env.PI_CODING_AGENT_DIR, hidden: process.env.PI_WEB_HIDDEN_FILE, cache: process.env.XDG_CACHE_HOME };
+  t.after(async () => {
+    if (previous.agent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous.agent;
+    if (previous.hidden === undefined) delete process.env.PI_WEB_HIDDEN_FILE;
+    else process.env.PI_WEB_HIDDEN_FILE = previous.hidden;
+    if (previous.cache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previous.cache;
+    await rm(root, { recursive: true, force: true });
+  });
+  process.env.PI_CODING_AGENT_DIR = path.join(root, "agent");
+  process.env.XDG_CACHE_HOME = path.join(root, "cache");
+  const repo = path.join(root, "repo"), linked = path.join(root, "linked");
+  await execFileAsync("git", ["init", "-b", "main", repo]);
+  for (const [key, value] of [["user.name", "Test"], ["user.email", "test@example.invalid"], ["commit.gpgsign", "false"]]) await execFileAsync("git", ["-C", repo, "config", key, value]);
+  await writeFile(path.join(repo, "README.md"), "test\n");
+  await execFileAsync("git", ["-C", repo, "add", "README.md"]);
+  await execFileAsync("git", ["-C", repo, "commit", "-m", "initial"]);
+  await execFileAsync("git", ["-C", repo, "worktree", "add", "-b", "feat/artifacts", linked]);
+  const artifactDir = path.join(process.env.PI_CODING_AGENT_DIR, "sessions", "project", "subagent-artifacts");
+  await mkdir(artifactDir, { recursive: true });
+  await writeFile(path.join(artifactDir, "trace.jsonl"), "shared artifact\n");
+  const { DELETE } = await createJiti(import.meta.url, { tsconfigPaths: true, moduleCache: false }).import("./route.ts");
+  const response = await DELETE(new Request("http://localhost/api/worktrees", {
+    method: "DELETE", headers: { Host: "localhost", "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: repo, path: linked }),
+  }));
+  assert.equal(response.status, 200, await response.text());
+  await assert.rejects(stat(linked), { code: "ENOENT" });
+});
+
 test("grouped scans yield and never publish a binding rewritten between slices", async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "pi-web-worktree-concurrent-")));
   const previous = { agent: process.env.PI_CODING_AGENT_DIR, hidden: process.env.PI_WEB_HIDDEN_FILE, cache: process.env.XDG_CACHE_HOME };
@@ -242,6 +275,7 @@ test("an unindexed session leaves verified associations available but removal fa
   assert.match((await response.json()).error, /session inventory is incomplete/);
   assert.equal((await stat(linked)).isDirectory(), true);
   await rm(path.join(sessionsDir, "unreadable-session.jsonl"));
+  await rm(path.join(sessionsDir, "valid.jsonl"));
   const deletedDir = path.join(process.env.PI_CODING_AGENT_DIR, "deleted_sessions", "project");
   await mkdir(deletedDir, { recursive: true });
   await writeFile(path.join(deletedDir, "recoverable.jsonl"), JSON.stringify({ type: "session", id: "recoverable", cwd: linked, timestamp: "2026-01-01T00:00:00Z" }) + "\n");
@@ -250,5 +284,6 @@ test("an unindexed session leaves verified associations available but removal fa
     body: JSON.stringify({ cwd: repo, path: linked }),
   }));
   assert.equal(deletedReference.status, 409, "recoverable deleted sessions are not treated as absent");
+  assert.match((await deletedReference.json()).error, /session uses this directory/);
   assert.equal((await stat(linked)).isDirectory(), true);
 });

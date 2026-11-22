@@ -128,7 +128,7 @@ export function isBuiltinRuntimeExtensionSearchMatch(
 ): boolean {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return true;
-  return [extension.id, displayName, ...extension.capabilities.map((capability) => capability.name)]
+  return [extension.id, extension.sourcePath, displayName, ...extension.capabilities.map((capability) => capability.name)]
     .some((value) => value.toLowerCase().includes(normalized));
 }
 
@@ -1155,6 +1155,8 @@ function BuiltinRuntimeExtensionDetail({
         <div style={{ color: "var(--accent)" }}>{t("i18n.builtinRuntimeExtensionProvided")}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.builtinRuntimeExtensionSource")}</div>
         <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{t("i18n.builtinRuntimeExtensionReader")}</div>
+        <div style={{ color: "var(--text-dim)" }}>{t("i18n.builtinRuntimeExtensionSourceFile")}</div>
+        <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>{extension.sourcePath}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.builtinRuntimeExtensionOrigin")}</div>
         <div style={{ color: "var(--text-muted)" }}>{t(extension.origin === "builtin" ? "i18n.builtinRuntimeExtensionBuiltin" : "i18n.builtinRuntimeExtensionInline")}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("i18n.builtinRuntimeExtensionScope")}</div>
@@ -1232,12 +1234,14 @@ function BuiltinRuntimeExtensionDetail({
 
 function BuiltinRuntimeExtensionGroup({
   extensions,
+  titleKey,
   selected,
   collapsed,
   onToggleGroup,
   onSelect,
 }: {
   extensions: BuiltinRuntimeExtensionInfo[];
+  titleKey: string;
   selected: string | null;
   collapsed: boolean;
   onToggleGroup: () => void;
@@ -1272,7 +1276,7 @@ function BuiltinRuntimeExtensionGroup({
           style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
           aria-hidden="true"
         />
-        <span>{t("i18n.builtinRuntimeExtensions")}</span>
+        <span>{t(titleKey)}</span>
         <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>{extensions.length}</span>
       </button>
       {!collapsed && extensions.map((extension, index) => {
@@ -1316,7 +1320,7 @@ function BuiltinRuntimeExtensionGroup({
                 width: 7,
                 height: 7,
                 borderRadius: "50%",
-                background: "var(--accent)",
+                background: "var(--text-dim)",
               }}
             />
             <div style={{ minWidth: 0, flex: 1 }}>
@@ -1699,6 +1703,10 @@ export function PluginsConfig({
   });
   const [topLevelExtensionsCollapsed, setTopLevelExtensionsCollapsed] = useState(false);
   const [builtinRuntimeExtensionsCollapsed, setBuiltinRuntimeExtensionsCollapsed] = useState(false);
+  const [builtinRuntimeInfrastructureCollapsed, setBuiltinRuntimeInfrastructureCollapsed] = useState(true);
+  useEffect(() => {
+    if (searchQuery.trim()) setBuiltinRuntimeInfrastructureCollapsed(false);
+  }, [searchQuery]);
 
   const packages = useMemo(
     () => [...(data?.packages ?? [])]
@@ -1717,6 +1725,8 @@ export function PluginsConfig({
     () => filterBuiltinRuntimeExtensions(builtinRuntimeExtensions, { searchQuery, showEnabled, viewScope }, (extension) => t(extension.labelKey)),
     [builtinRuntimeExtensions, searchQuery, showEnabled, viewScope, t],
   );
+  const visibleBuiltinCapabilities = visibleBuiltinRuntimeExtensions.filter((extension) => extension.category === "capability");
+  const visibleBuiltinInfrastructure = visibleBuiltinRuntimeExtensions.filter((extension) => extension.category === "infrastructure");
   const filterablePackages = useMemo(
     () => filterPackagesForProjectStatusCounts(packages, {
       searchQuery,
@@ -2415,12 +2425,29 @@ export function PluginsConfig({
                     </div>
                   );
                   })}
-                  {visibleBuiltinRuntimeExtensions.length > 0 && (
+                  {visibleBuiltinCapabilities.length > 0 && (
                     <BuiltinRuntimeExtensionGroup
-                      extensions={visibleBuiltinRuntimeExtensions}
+                      extensions={visibleBuiltinCapabilities}
+                      titleKey="i18n.builtinRuntimeExtensions"
                       selected={selected}
                       collapsed={builtinRuntimeExtensionsCollapsed}
                       onToggleGroup={() => setBuiltinRuntimeExtensionsCollapsed((current) => !current)}
+                      onSelect={(extension) => {
+                        setSelected(builtinRuntimeExtensionKey(extension));
+                        setAddMode(false);
+                        setActionError(null);
+                        setActionMessage(null);
+                        navigation?.openDetail(extension.id);
+                      }}
+                    />
+                  )}
+                  {visibleBuiltinInfrastructure.length > 0 && (
+                    <BuiltinRuntimeExtensionGroup
+                      extensions={visibleBuiltinInfrastructure}
+                      titleKey="i18n.builtinRuntimeInfrastructure"
+                      selected={selected}
+                      collapsed={builtinRuntimeInfrastructureCollapsed}
+                      onToggleGroup={() => setBuiltinRuntimeInfrastructureCollapsed((current) => !current)}
                       onSelect={(extension) => {
                         setSelected(builtinRuntimeExtensionKey(extension));
                         setAddMode(false);

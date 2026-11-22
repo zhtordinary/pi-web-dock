@@ -18,6 +18,7 @@ function fixture({ preference, inherited = false, live = false, missing = false,
     },
     "@/lib/session-persisted-state": { readPersistedSessionState: async () => { calls.read++; if (liveAfterRead) currentLive = true; if (readError) throw new Error(readError); return typeof preference === "boolean" ? { autoCompactionEnabled: preference, ...(inherited ? { autoCompactionSource: "inherited" } : {}) } : {}; } },
     "@/lib/live-agent-events": { redactLiveValue: value => value },
+    "@/lib/missing-cwd": { cwdMissingBody: () => ({}), missingCwdFromError: () => undefined },
     "@/lib/queue-recall-store": {}, "@/lib/session-tool-selection": {}, "@/lib/branch-navigation": {}, "@/lib/activity-peers": {}, "@/lib/paths": {}, "@/lib/request-security": {}, "@/lib/reader-control-receipts": {},
   };
   const load = source => {

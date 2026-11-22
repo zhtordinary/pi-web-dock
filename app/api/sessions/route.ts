@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { isAbsolute } from "path";
-import { jsonResponse } from "@/lib/json-response";
 import {
   attachSessionProjectInfo,
   getSessionListVersion,
@@ -105,8 +104,8 @@ export async function GET(req: Request) {
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
     };
 
-    return perf?.attach(jsonResponse(req, payload, { headers: { "Cache-Control": "no-store" } })) ??
-      jsonResponse(req, payload, { headers: { "Cache-Control": "no-store" } });
+    return perf?.attach(NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } })) ??
+      NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("[pi-web] failed to list sessions:", error);
     return NextResponse.json(

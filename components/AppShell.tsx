@@ -118,6 +118,7 @@ import { SlashCommandDetailsSurface, type SlashCommandDetailsView } from "./Slas
 import { ImageLightbox } from "./ImageLightbox";
 import { QuoteAnnotationModal } from "./QuoteAnnotationModal";
 import { ResourceToolbar } from "./app-shell-resource-toolbar";
+import { isHiddenRelation } from "@/lib/session-family";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree" | "sourceInfo";
 type LayoutControlId = "sessions" | "explorer" | "reader" | "document";
@@ -129,7 +130,7 @@ type AutoNameStatus =
   | { kind: "error"; message: string };
 
 function isSubagentSession(session: Pick<SessionInfo, "relation"> | null | undefined): boolean {
-  return session?.relation?.kind === "subagent";
+  return isHiddenRelation(session?.relation);
 }
 
 interface SessionTopBarButtonProps {
@@ -3314,6 +3315,20 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         || current.sessionInfo?.id !== remoteSession.sessionInfo?.id
         || current.draftInstanceKey !== remoteSession.draftInstanceKey) return;
     } else if (committedRemoteSessionRef.current || committedSelectedSessionRef.current?.id !== selectedSession?.id) return;
+    if ("session" in result && result.session) {
+      invalidateWorkspaceRestore();
+      activeNewSessionDraftKeyRef.current = null;
+      setPendingRestoreMessage(null);
+      setSelectedSession(result.session);
+      setSessionKey((key) => key + 1);
+      setNewSessionCwd(null);
+      setNewSessionSubprojectId(null);
+      setNewSessionSubprojectLabel(null);
+      const params = workspaceParams();
+      params.set("session", result.session.id);
+      router.replace(`?${params.toString()}`, { scroll: false });
+      return;
+    }
     invalidateWorkspaceRestore();
     const forkRestoreToken = urlRestoreTokenRef.current;
     activeNewSessionDraftKeyRef.current = null;
