@@ -95,8 +95,12 @@ import {
 } from "./rpc-session-tool-policy";
 export { readSessionThinkingLevel, resolveActiveToolNames } from "./rpc-session-tool-policy";
 import { createSessionControlExtension } from "./session-control";
-import { readSideRelation, sideToolNames } from "./side-session";
-import { createPromptCacheLineageExtension, readPromptCacheLineage } from "./prompt-cache-lineage";
+import { readSideRelation } from "./side-session";
+import {
+  createPromptCacheLineageExtension,
+  readPromptCacheLineage,
+  readPromptCacheMcpServersSection,
+} from "./prompt-cache-lineage";
 import { drainLocalOwnerOutboxes, persistSessionWaitEvent, persistSessionUiRequestEvent, invalidateSessionUiRequestWaits } from "./session-waits";
 import { drainPendingSessionWakes } from "./session-control-wake-queue";
 import { createSubagentExtension, preferPiWebSubagentExtension, type SubagentExecution, type SubagentExtensionRuntime } from "./subagent-extension";
@@ -7536,8 +7540,13 @@ export async function startRpcSession(
     const runtimeProjectRoot = await readerRuntimeProjectRoot(sessionCwd);
     const startupEntries = sessionManager.getEntries() as unknown as SessionEntry[];
     const agentDir = requestedAgentDir ?? getAgentDir();
-    const sideRelation = readSideRelation(startupEntries);
     const promptCacheLineage = readPromptCacheLineage(sessionManager.getHeader());
+    const inheritedMcpServersSection = promptCacheLineage
+      ? readPromptCacheMcpServersSection(startupEntries)
+      : undefined;
+    const promptCacheLineageExtension = createPromptCacheLineageExtension(promptCacheLineage, {
+      inheritedMcpServersSection,
+    });
     const subagentResources = sessionFile
       ? readValidSubagentResources(startupEntries)
       : null;
@@ -7551,12 +7560,7 @@ export async function startRpcSession(
       ? undefined
       : readSessionToolSelectionPolicy(sessionManager.getEntries() as unknown as SessionEntry[]);
     const persistedToolNames = persistedToolPolicy?.tools;
-    const sideToolNamesForSession = sideRelation
-      ? sideToolNames(persistedToolNames, sessionManager.buildSessionContext().messages as never)
-      : undefined;
-    const effectiveToolNames = subagentResources?.tools ?? (sideRelation
-      ? sideToolNamesForSession
-      : toolNames ?? persistedToolNames);
+    const effectiveToolNames = subagentResources?.tools ?? toolNames ?? persistedToolNames;
     if (!subagentResources && strictToolAllowlist === true) {
       if (toolNames === undefined) {
         throw new Error("strictToolAllowlist requires an explicit toolNames allow-list");
@@ -7564,7 +7568,6 @@ export async function startRpcSession(
       validateSessionToolSelection(toolNames);
     }
     const strictToolAllowlistEnabled = !subagentResources
-      && !sideRelation
       && (strictToolAllowlist ?? persistedToolPolicy?.strict ?? false)
       && effectiveToolNames !== undefined;
     const explicitStrictPolicyNeedsPersist = strictToolAllowlist !== undefined
@@ -7598,7 +7601,7 @@ export async function startRpcSession(
       // tool registry — so they were unavailable in Pi Web sessions even though the
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
-      toolsOption = effectiveToolNames.length === 0 || strictToolAllowlistEnabled || sideRelation
+      toolsOption = effectiveToolNames.length === 0 || strictToolAllowlistEnabled
         ? effectiveToolNames
         : undefined;
     }
@@ -7609,7 +7612,7 @@ export async function startRpcSession(
     const builtinResources = subagentResources && (subagentResources.codemode || subagentResources.mcp)
       ? await createPiWebBuiltinExtensions({ agentDir })
       : undefined;
-    const builtins = subagentResources || chatOnly || strictToolAllowlistEnabled || sideRelation
+    const builtins = subagentResources || chatOnly || strictToolAllowlistEnabled
       ? undefined
       : await createPiWebBuiltinExtensions({ agentDir });
 
@@ -7764,21 +7767,7 @@ export async function startRpcSession(
               ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
               extensionFactories: [createExactSystemPromptExtension(() => exactSystemPromptRef.current?.()),
                 createCompactionModelExtension(settingsManager),
-                createPromptCacheLineageExtension(promptCacheLineage)],
-            }
-        : sideRelation
-          ? {
-              noPromptTemplates: true,
-              noThemes: true,
-              extensionFactories: [
-                createCompactionModelExtension(settingsManager),
-                createPromptCacheLineageExtension(promptCacheLineage),
-                ...(effectiveToolNames?.includes("bash") ? [createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager })] : []),
-                ...(effectiveToolNames?.includes("powershell") ? [createProjectCommandPowerShellExtension({ cwd: sessionCwd })] : []),
-                createImageGenerationOutputExtension(),
-                createRemoteClaudeHostGuardExtension(),
-              ],
-              extensionsOverride: (base) => preferUserPowerShellExtension(preferUserBashExtension(preferPiWebSubagentExtension(base))),
+                promptCacheLineageExtension],
             }
         : strictToolAllowlistEnabled
           ? {
@@ -7788,7 +7777,7 @@ export async function startRpcSession(
               noThemes: true,
               noContextFiles: true,
               extensionFactories: [createCompactionModelExtension(settingsManager),
-                createPromptCacheLineageExtension(promptCacheLineage),
+                promptCacheLineageExtension,
                 createProjectCommandPowerShellExtension({ cwd: sessionCwd })],
             }
           : {
@@ -7811,9 +7800,10 @@ export async function startRpcSession(
             },
             extensionFactories: [
               createCompactionModelExtension(settingsManager),
-              createPromptCacheLineageExtension(promptCacheLineage),
               createImageGenerationOutputExtension(),
               ...(builtins?.extensions ?? []),
+              // Restore the copied MCP section after builtin:mcp refreshes it.
+              promptCacheLineageExtension,
               createReadOnlyMcpPolicyExtension(),
               createFastModeExtension(fastModeState),
               createProjectCommandBashExtension({
@@ -7939,9 +7929,7 @@ export async function startRpcSession(
         effectiveToolNames ?? initialToolNames,
         strictToolAllowlistEnabled ? [] : initialToolNames,
       );
-      inner.setActiveToolsByName(sideRelation
-        ? selectedTools.filter((name) => effectiveToolNames?.includes(name))
-        : selectedTools);
+      inner.setActiveToolsByName(selectedTools);
     }
 
     let remoteClaudeHost: RemoteClaudeHostBinding | undefined;

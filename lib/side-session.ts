@@ -1,31 +1,18 @@
 /**
  * Side chats (ADR 0007): a focused detour beside the main chat. A side chat is
  * a normal session forked from a parent's active tip (`createSideSession()` in
- * `lib/session-fork.ts`) with three differences, all decided here: a
- * `pi-web:side` entry hides it in its parent's family, it keeps only the
- * parent's read-mostly built-in tools, and a hidden message marks where the
- * inherited history ends. The prompt is not touched, so providers with native
- * mid-conversation updates keep the cached prefix.
+ * `lib/session-fork.ts`) with two differences, all decided here: a
+ * `pi-web:side` entry hides it in its parent's family, and a hidden metadata
+ * entry marks where the inherited history ends. The runtime keeps the source
+ * session's loadout and does not send that metadata entry to the provider.
  */
 
-import { getCurrentTools } from "@earendil-works/pi-ai";
 import { SIDE_BOUNDARY_MESSAGE_TYPE } from "./session-family.ts";
 import type { SessionEntry } from "./types";
 
 export const SIDE_META_TYPE = "pi-web:side";
 
-/** The tools a side chat may keep of its parent's. */
-export const SIDE_TOOLS: readonly string[] = ["read", "bash", "powershell", "grep", "find", "ls"];
-
-/** What pi's default tools leave when a parent recorded no tools (older transcripts). */
-const SIDE_FALLBACK_TOOLS: readonly string[] = ["read", "bash"];
-
-/**
- * What the model reads at the end of the inherited history. pi sends a custom
- * message as a user turn, on every provider, at its place in the conversation:
- * a system prompt cannot say where a side chat starts on a model that folds
- * updates into the head. So it has to say it is not the user speaking.
- */
+/** Retained in Side metadata for Reader-side history and usage boundaries. */
 export const SIDE_BOUNDARY_TEXT = "[Side chat] This is a note from the app, not from the user. Everything above is inherited from a parent session as background, frozen when this side chat started. It is not your current task, and work left unfinished in it is not yours to continue. Only messages after this note are active.";
 
 type SideMetadata = { version: 1; parentSessionId: string; createdAt: string };
@@ -62,13 +49,12 @@ export function createSideMetadataEntry(parentSessionId: string, id: string, par
   };
 }
 
-/** The hidden message a new side chat ends its inherited history with. */
+/** The hidden metadata entry that marks the end of inherited Side history. */
 export function createSideBoundaryEntry(id: string, parentId: string) {
   return {
-    type: "custom_message",
+    type: "custom",
     customType: SIDE_BOUNDARY_MESSAGE_TYPE,
-    content: SIDE_BOUNDARY_TEXT,
-    display: false,
+    data: { content: SIDE_BOUNDARY_TEXT },
     id,
     parentId,
     timestamp: new Date().toISOString(),
@@ -82,7 +68,7 @@ export function createSideBoundaryEntry(id: string, parentId: string) {
 export function sideOwnEntries<T extends { timestamp?: string }>(entries: readonly T[]): readonly T[] {
   const boundaryIndex = entries.findLastIndex((entry) => {
     const value = entry as T & { type?: unknown; customType?: unknown };
-    return value.type === "custom_message" && value.customType === SIDE_BOUNDARY_MESSAGE_TYPE;
+    return (value.type === "custom" || value.type === "custom_message") && value.customType === SIDE_BOUNDARY_MESSAGE_TYPE;
   });
   if (boundaryIndex >= 0) return entries.slice(boundaryIndex + 1);
 
@@ -102,20 +88,4 @@ export function sideFirstMessageEntryId(entries: readonly SessionEntry[]): strin
 /** Number of user turns that belong to the side chat, excluding inherited history. */
 export function sideUserMessageCount(entries: readonly SessionEntry[]): number {
   return sideOwnEntries(entries).filter((entry) => entry.type === "message" && entry.message.role === "user").length;
-}
-
-/**
- * A side chat's tools, which `startRpcSession()` passes as pi's allow-list, so
- * nothing else registers, every extension, MCP, Code mode and subagent tool
- * included: the ones its transcript gives it, a pin first, then the loadout pi
- * recorded, cut down to `SIDE_TOOLS`. Never more than the parent had, so a
- * Read-only parent stays without a shell. Reopening reads the same answer back
- * from the side chat's own transcript.
- */
-export function sideToolNames(
-  pinned: readonly string[] | undefined,
-  systemMessages: Parameters<typeof getCurrentTools>[0],
-): string[] {
-  const recorded = systemMessages.length > 0 ? getCurrentTools(systemMessages).map((tool) => tool.name) : undefined;
-  return (pinned ?? recorded ?? SIDE_FALLBACK_TOOLS).filter((name) => SIDE_TOOLS.includes(name));
 }

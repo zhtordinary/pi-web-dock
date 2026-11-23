@@ -124,6 +124,8 @@ test("ChatWindow wires Sidekick quotes back to the main composer", async () => {
 test("Sidekick shows canonical cache hit rate and keeps stop in the composer", async () => {
   const source = await readFile(new URL("./SidekickDrawer.tsx", import.meta.url), "utf8");
   assert.match(source, /turnCacheHitRate\(answer\.usage\)/, "must use the canonical per-turn cache rate");
+  const answerSource = source.slice(source.indexOf("function SidekickAnswer"), source.indexOf("function SidekickComposer"));
+  assert.match(answerSource, /text \? <MarkdownBody>\{text\}<\/MarkdownBody> : <>[\s\S]*thinking\.trim\(\)/, "must keep thinking fallback inside the no-answer branch");
   assert.match(source, /onStop=\{\(\) => void agent\.handleAbort\(\)\}/, "must keep stop in the composer");
   const streaming = source.slice(source.indexOf("isStreaming && streamingMessage"), source.indexOf("agent.error &&", source.indexOf("isStreaming && streamingMessage")));
   assert.doesNotMatch(streaming, /handleAbort/, "must not duplicate stop in the streaming answer card");

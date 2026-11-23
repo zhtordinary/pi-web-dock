@@ -274,8 +274,10 @@ function SidekickAnswer({ messages }: { messages: readonly AssistantMessage[] })
   return (
     <>
       {tools.length > 0 && <details style={{ marginBottom: 8, color: "var(--text-muted)", fontSize: 11 }}><summary>{t("sidekick.toolCalls", { count: tools.length })}</summary><ul>{tools.map((tool, index) => <li key={`${tool}-${index}`}>{tool}</li>)}</ul></details>}
-      {text ? <MarkdownBody>{text}</MarkdownBody> : <p role="status" style={{ color: "var(--text-dim)", fontStyle: "italic" }}>{t("sidekick.noAnswerBody")}</p>}
-      {thinking.trim() && <MarkdownBody>{t("sidekick.thinkingBlock", { thinking })}</MarkdownBody>}
+      {text ? <MarkdownBody>{text}</MarkdownBody> : <>
+        <p role="status" style={{ color: "var(--text-dim)", fontStyle: "italic" }}>{t("sidekick.noAnswerBody")}</p>
+        {thinking.trim() && <MarkdownBody>{t("sidekick.thinkingBlock", { thinking })}</MarkdownBody>}
+      </>}
     </>
   );
 }

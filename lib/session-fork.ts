@@ -133,7 +133,7 @@ export function promoteSideSession(
 
 function isSideOnlyEntry(entry: Record<string, unknown>): boolean {
   if (entry.type === "custom" && entry.customType === SIDE_META_TYPE) return true;
-  if (entry.type === "custom_message" && entry.customType === SIDE_BOUNDARY_MESSAGE_TYPE) return true;
+  if ((entry.type === "custom" || entry.type === "custom_message") && entry.customType === SIDE_BOUNDARY_MESSAGE_TYPE) return true;
   return entry.type === "custom"
     && entry.customType === TOOL_SELECTION_TYPE
     && typeof entry.id === "string"

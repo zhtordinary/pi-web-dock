@@ -74,6 +74,7 @@ function resolveCreationPath(rawPath: string, baseDir: string): string | undefin
 }
 
 const READ_ONLY_REVISION_GUARD = /^test\s+"\$\(git\s+-C\s+"\$[A-Za-z_][A-Za-z0-9_]*"\s+rev-parse\s+[A-Za-z0-9._/-]+\)"\s*=\s*(?:"\$\(git\s+-C\s+"\$[A-Za-z_][A-Za-z0-9_]*"\s+rev-parse\s+[A-Za-z0-9._/-]+\)"|[A-Fa-f0-9]{40,64})\s*$/;
+const READ_ONLY_STATUS_GUARD = /^test\s+-z\s+"\$\(git\s+-C\s+"\$[A-Za-z_][A-Za-z0-9_]*"\s+status\s+--porcelain=v1\s+--untracked-files=all\)"\s*$/;
 const PROJECT_ROOT_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(?:"\$\(\s*git\s+rev-parse\s+--show-toplevel\s*\)"|\$\(\s*git\s+rev-parse\s+--show-toplevel\s*\))$/;
 
 // shortcut: resolve only the read-only top-level query; do not evaluate arbitrary command substitutions.
@@ -89,8 +90,9 @@ function creationCommand(command: string, worktrees: ReadonlyMap<string, string>
     }
     const parsed = splitShellWords(fragment.trim());
     if (!parsed.ok) {
-      // A read-only revision guard runs in a subshell and cannot change these variables.
-      if (parsed.error.code === "command-substitution" && READ_ONLY_REVISION_GUARD.test(fragment.trim())) continue;
+      // Read-only guards run in subshells and cannot change these variables.
+      if (parsed.error.code === "command-substitution"
+        && (READ_ONLY_REVISION_GUARD.test(fragment.trim()) || READ_ONLY_STATUS_GUARD.test(fragment.trim()))) continue;
       const homeValue = variables.get("HOME");
       variables.clear();
       if (homeValue !== undefined) variables.set("HOME", homeValue);

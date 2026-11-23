@@ -1,6 +1,6 @@
 {
   "name": "@zhtordinary/pi-web-dock",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "Web workbench for the pi coding agent: sessions, files, worktrees and multi-device activity in one browser UI",
   "homepage": "https://github.com/zhtordinary/pi-web-dock#readme",
   "repository": {
