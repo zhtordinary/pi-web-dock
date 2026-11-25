@@ -51,6 +51,7 @@ import {
   COLLAPSED_PROVIDERS_REQUEST_EVENT,
   COLLAPSED_PROVIDERS_SYNC_EVENT,
   isCollapsedProvidersLoaded,
+  normalizeCollapsedProviderNames,
   readCollapsedProviderNames,
   writeCollapsedProviderNames,
 } from "@/lib/model-visibility-preference";
@@ -141,6 +142,7 @@ interface ProviderEntry {
 
 interface ModelsJson {
   providers?: Record<string, ProviderEntry>;
+  collapsedProviders?: string[];
   hiddenModels?: string[];
 }
 
@@ -2236,7 +2238,11 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
         if (cancelled) return;
         const normalized = d.providers ? d : { ...d, providers: {} };
         savedProvidersRef.current = JSON.parse(JSON.stringify(normalized.providers ?? {}));
-        setConfig({ ...normalized, hiddenModels: normalizeHiddenModelReferences(d.hiddenModels) });
+        setConfig({
+          ...normalized,
+          collapsedProviders: normalizeCollapsedProviderNames(d.collapsedProviders),
+          hiddenModels: normalizeHiddenModelReferences(d.hiddenModels),
+        });
         const keys = Object.keys(normalized.providers ?? {}).filter((name) => !isLegacyOpenAIProvider(name));
         if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
@@ -2561,7 +2567,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
     setSaveError(null);
     setSaveWarning(null);
     setSavedOk(false);
-    let draft = config;
+    let draft: ModelsJson = { ...config, collapsedProviders: [...collapsedProviders] };
     const pendingName = providerNameDraft?.name.trim();
     if (providerNameDraft && pendingName && config.providers?.[providerNameDraft.provider]) {
       const renamed = applyProviderRename(config, providerNameDraft.provider, pendingName);
@@ -2570,7 +2576,10 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
         setSaving(false);
         return false;
       }
-      draft = renamed;
+      draft = {
+        ...renamed,
+        collapsedProviders: [...collapsedProviders].map((name) => name === providerNameDraft.provider ? pendingName : name),
+      };
     }
     const endpointConflicts = findModelEndpointConflicts(draft);
     if (endpointConflicts.length > 0) {
@@ -2626,7 +2635,7 @@ export function ModelsConfig({ onClose, sessionFile, cwd, remotePeer, embedded =
     } finally {
       setSaving(false);
     }
-  }, [applyProviderRename, config, loadError, loading, providerNameDraft, refreshEnabledModels, remotePeer, t]);
+  }, [applyProviderRename, collapsedProviders, config, loadError, loading, providerNameDraft, refreshEnabledModels, remotePeer, t]);
 
   const isMainDirty = useCallback(() => {
     if (!savedProvidersRef.current) return false;

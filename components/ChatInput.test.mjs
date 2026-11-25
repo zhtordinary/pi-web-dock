@@ -15,7 +15,7 @@ const jiti = createJiti(import.meta.url, {
 });
 await installEnglishTestLocale(jiti);
 const en = testTranslator("en");
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, filterModelOptionsByProvider, getSlashCommandTrigger, buildSlashCommandValue, buildSlashCommandSelectionValue, buildCustomPromptValue, getCustomPromptsFromResponse, resolveSlashFavoriteLoad, filterSlashCommandsByTab, getSlashTabCounts, sortSlashCommandItems, getSlashCommandFavoriteKey, getSlashCommandDetails, normalizeSlashFavoriteKeys, reorderSlashFavoritesByDrop, isAsciiSlashKey, isSlashCommandInsertionPoint, getUpwardMenuMaxHeight, SlashCommandDetailsDialog, getUserMessageText, getUserMessageDraftImages, getDefaultGenOptions, getSessionGenOptions, insertAtSelection, getEditorSuggestionSuffix, getMarkdownListContinuation, appendTermsToDraft, stripTrailingTerms, createDraftPromptRequestController, canRunBuiltinSlashCommandWhileStreaming, offersBuiltinSlashCommandWhileStreaming, submitsSlashCommandOnEnter, canClearBuiltinCommandInput, hasStreamingMessagePayload, withQuoteContext } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canRestoreUserMessage, filterModelOptions, filterModelOptionsByProvider, getSlashCommandTrigger, buildSlashCommandValue, buildSlashCommandSelectionValue, buildCustomPromptValue, getCustomPromptsFromResponse, resolveSlashFavoriteLoad, filterSlashCommandsByTab, getSlashTabCounts, sortSlashCommandItems, getSlashCommandFavoriteKey, getSlashCommandDetails, normalizeSlashFavoriteKeys, mergeSlashFavoriteKeysIntoCategories, reorderSlashFavoritesByDrop, isAsciiSlashKey, isSlashCommandInsertionPoint, getUpwardMenuMaxHeight, SlashCommandDetailsDialog, getUserMessageText, getUserMessageDraftImages, getDefaultGenOptions, getSessionGenOptions, insertAtSelection, getEditorSuggestionSuffix, getMarkdownListContinuation, appendTermsToDraft, stripTrailingTerms, createDraftPromptRequestController, canRunBuiltinSlashCommandWhileStreaming, offersBuiltinSlashCommandWhileStreaming, submitsSlashCommandOnEnter, canClearBuiltinCommandInput, hasStreamingMessagePayload, withQuoteContext } = await jiti.import("./ChatInput.tsx");
 const { getMarkdownListContinuation: getMarkdownListEdit } = await jiti.import("../lib/markdown-list-continuation.ts");
 const { isBareMcpCommand } = await jiti.import("../lib/mcp-command.ts");
 const { buildAtInsertText, extractAtQuery } = await jiti.import("../lib/file-fuzzy.ts");
@@ -630,6 +630,13 @@ test("favorite slash items have stable keys and deterministic drop/remove behavi
   assert.deepEqual(reorderSlashFavoritesByDrop(["a", "b", "c"], "c", "a"), ["c", "a", "b"]);
   assert.deepEqual(reorderSlashFavoritesByDrop(["a", "b", "c"], "b", "c"), ["a", "b", "c"]);
   assert.deepEqual(reorderSlashFavoritesByDrop(["a", "b", "c"], "a", "c"), ["b", "a", "c"]);
+  assert.deepEqual(
+    mergeSlashFavoriteKeysIntoCategories(
+      [{ id: "default", name: "常用", keys: ["skill:skill:existing"] }, { id: "other", name: "其他", keys: [] }],
+      ["skill:skill:new", "skill:skill:existing"],
+    ),
+    [{ id: "default", name: "常用", keys: ["skill:skill:existing", "skill:skill:new"] }, { id: "other", name: "其他", keys: [] }],
+  );
   assert.equal(getSlashCommandDetails({ name: "Review", description: "short", source: "customPrompt", promptId: "p1", content: "full prompt", order: 0 }, (key) => key), "full prompt");
 });
 
@@ -674,6 +681,10 @@ test("renders favorite drag ordering, details, server persistence, and accessibl
   assert.match(chatInputSource, /onClick=\{\(\) => applySlashCommand\(command\)\}/);
   assert.match(chatInputSource, /reorderSlashFavoritesByDrop/);
   assert.match(chatInputSource, /fetch\(apiPath\("slash-command-favorites"\)/);
+  assert.match(chatInputSource, /\[apiPath, slashFavoriteCategories, t\]/, "favorite writes use the current category state");
+  assert.match(chatInputSource, /mergeSlashFavoriteKeysIntoCategories/, "new favorites update their category immediately");
+  assert.match(chatInputSource, /slashFavoriteLoadRevisionRef/, "external favorite updates invalidate stale loads");
+  assert.match(chatInputSource, /const otherCommands = filteredSlashCommands\.filter/, "searching favorites also searches other tabs");
   assert.match(chatInputSource, /chat\.viewSlashCommandDetails/);
   assert.match(chatInputSource, /fileApiPath\(sourcePath, "read"/);
   assert.match(chatInputSource, /aria-label=\{`\$\{t\(SLASH_TAB_LABEL_KEYS\[tab\]\)\} · \$\{slashTabCounts\[tab\]\}`\}/);

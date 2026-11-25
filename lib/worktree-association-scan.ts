@@ -46,9 +46,14 @@ interface ProjectScan {
 }
 
 export interface WorktreeAssociationHistory {
-  records: Array<WorktreeCreationRecord & { sessionName?: string }>;
-  bindings: WorktreeBindingRecord[];
+  records: Array<WorktreeCreationRecord & { sessionName?: string; source: "history" }>;
+  bindings: Array<WorktreeBindingRecord & { source: "structured" }>;
   partial: boolean;
+  /** True when a scan is not a complete verified absence or contains ambiguous history. */
+  incomplete: boolean;
+  /** True when an error or an unsafe historical shell shape prevents a safe absence claim. */
+  unknown: boolean;
+  state: "complete" | "incomplete" | "unknown";
   failure?: "entry_too_large" | "unavailable";
   priorityPending?: boolean;
   progress: { running: boolean; processedBytes: number; totalBytes: number };
@@ -293,10 +298,11 @@ export function scanWorktreeAssociations(
   project.activePath = ordered[cursor]?.path;
 
   const records: WorktreeAssociationHistory["records"] = [];
-  const bindings: WorktreeBindingRecord[] = [];
+  const bindings: WorktreeAssociationHistory["bindings"] = [];
   let processedBytes = 0;
   let failure: WorktreeAssociationHistory["failure"] = errors ? "unavailable" : undefined;
   let running = false;
+  let uncertain = false;
   for (const session of sessions) {
     const file = project.files.get(session.path);
     if (!file) continue;
@@ -307,13 +313,35 @@ export function scanWorktreeAssociations(
     } else if (file.phase !== "done") running = true;
     else {
       const name = file.nameSeen ? file.name : session.name;
-      records.push(...file.creation.records().filter((record) => selectedPaths.has(normalize(record.worktreePath))).map((record: WorktreeCreationRecord) => ({ ...record, worktreePath: selectedPaths.get(normalize(record.worktreePath))!, ...(name ? { sessionName: name } : {}) })));
-      bindings.push(...file.bindings.records().filter((record) => selectedPaths.has(normalize(record.worktreePath))).map((record: WorktreeBindingRecord) => ({ ...record, ...(name ? { sessionName: name } : {}) })));
+      const evidence = file.creation.evidence();
+      uncertain ||= evidence.uncertain;
+      records.push(...evidence.records.filter((record) => selectedPaths.has(normalize(record.worktreePath))).map((record: WorktreeCreationRecord) => ({
+        ...record,
+        worktreePath: selectedPaths.get(normalize(record.worktreePath))!,
+        ...(name ? { sessionName: name } : {}),
+        source: "history" as const,
+      })));
+      bindings.push(...file.bindings.records().filter((record) => selectedPaths.has(normalize(record.worktreePath))).map((record: WorktreeBindingRecord) => ({
+        ...record,
+        ...(name ? { sessionName: name } : {}),
+        source: "structured" as const,
+      })));
     }
   }
   const prioritySession = sessions.find((session) => session.id === options.prioritySessionId);
   const priorityFile = prioritySession && project.files.get(prioritySession.path);
   const priorityPending = Boolean(priorityFile && priorityFile.phase !== "done" && priorityFile.phase !== "error");
-  return { records, bindings, partial: running || errors > 0, ...(failure ? { failure } : {}),
-    ...(options.prioritySessionId ? { priorityPending } : {}), progress: { running, processedBytes, totalBytes } };
+  const incomplete = running || errors > 0 || uncertain;
+  const unknown = errors > 0 || uncertain;
+  return {
+    records,
+    bindings,
+    partial: incomplete,
+    incomplete,
+    unknown,
+    state: unknown ? "unknown" : incomplete ? "incomplete" : "complete",
+    ...(failure ? { failure } : {}),
+    ...(options.prioritySessionId ? { priorityPending } : {}),
+    progress: { running, processedBytes, totalBytes },
+  };
 }

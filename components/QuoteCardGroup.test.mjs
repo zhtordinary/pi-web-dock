@@ -113,6 +113,7 @@ test("SidekickDrawer uses direct textarea quote to distinguish from main chat qu
   assert.doesNotMatch(source, /<QuoteCardGroup/, "must not mount QuoteCardGroup in Sidekick composer");
   assert.match(source, /pi-sidekick-quote/, "must listen to pi-sidekick-quote event");
   assert.match(source, /setDraft\(\(current\) => current \? `\$\{current\}\\n\\n\$\{text\}` : text\)/, "must directly append quote text to textarea");
+  assert.match(source, /<textarea className="chat-input-textarea" ref=\{textareaRef\}/, "must hide the sidekick composer scrollbar like the main chat input");
 });
 
 test("ChatWindow wires Sidekick quotes back to the main composer", async () => {
@@ -129,6 +130,18 @@ test("Sidekick shows canonical cache hit rate and keeps stop in the composer", a
   assert.match(source, /onStop=\{\(\) => void agent\.handleAbort\(\)\}/, "must keep stop in the composer");
   const streaming = source.slice(source.indexOf("isStreaming && streamingMessage"), source.indexOf("agent.error &&", source.indexOf("isStreaming && streamingMessage")));
   assert.doesNotMatch(streaming, /handleAbort/, "must not duplicate stop in the streaming answer card");
+});
+
+test("Sidekick message actions share press and reduced-motion feedback", async () => {
+  const source = await readFile(new URL("./SidekickDrawer.tsx", import.meta.url), "utf8");
+  const question = source.slice(source.indexOf("export function SidekickQuestion"), source.indexOf("function SidekickAnswer"));
+  const answer = source.slice(source.indexOf("function SideSessionThread"), source.indexOf("function HowItWorks"));
+  assert.equal((question.match(/<SidekickActionButton\b/g) ?? []).length, 2);
+  assert.equal((answer.match(/<SidekickActionButton\b/g) ?? []).length, 2);
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.sidekick-message-action:active:not\(:focus-visible\)\s*\{[^}]*transform:\s*scale\(0\.95\)/);
+  assert.match(css, /\.sidekick-message-action:focus-visible\s*\{[^}]*outline:/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\.sidekick-stream-label[^}]*\}[^}]*\.sidekick-message-action\s*\{[^}]*transition:\s*none/s);
 });
 
 test("Sidekick promotes a persisted side session through the official fork route", async () => {

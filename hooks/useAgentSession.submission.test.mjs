@@ -42,6 +42,7 @@ function harness() {
     promptDeliveriesRef: ref(new Map()), promptCompletionDeduperRef: ref({ claim: () => true }),
     setUnconfirmedPrompts: update => { unconfirmed = update(unconfirmed); }, onAgentEnd: () => completions.push("completed"),
     sessionHookMountedRef: ref(true), sessionIdRef: ref("session"), branchScopeRef: ref("local:session"),
+    syncServerUnattendedRef: ref(async () => {}),
     branchRef: ref({ state: { runtimeLeafId: "old-entry" } }),
     remotePeerRef: ref(null), sdkAgentActiveRef: ref(false), currentAgentRunIdRef: ref(null),
     executeBashRef: ref(async (command, excluded) => actions.push(["bash", command, excluded])),
@@ -271,6 +272,42 @@ test("an ambiguous historical edit keeps the identity without replaying", async 
   assert.equal(h.restored.length, 1);
   assert.equal(h.unconfirmed.length, 1);
   assert.equal(c.pendingHistoryEdits.get("session").clientMessageId, "client-message");
+});
+
+test("an accepted historical edit clears its identity before a later normal prompt", async () => {
+  const h = harness(), c = h.context;
+  c.editEntryId = "old-entry";
+  c.pendingHistoryEdits.set("session", { entryId: "old-entry", targetLeafId: "old-entry", clientMessageId: "client-message" });
+  c.setEdit = entryId => {
+    h.actions.push(["setEdit", entryId]);
+    if (entryId === null) {
+      c.pendingHistoryEdits.delete("session");
+      c.editEntryId = null;
+    }
+  };
+  c.sendAgentCommandR = async (_sid, command) => {
+    h.commands.push(command);
+    if (command.type === "edit_history") {
+      h.posting.resolve();
+      c.branchScopeRef.current = "changed-scope";
+      await h.accepted.promise;
+      return { accepted: true, leafId: "edited-leaf" };
+    }
+    return { accepted: true };
+  };
+  const edit = actual("handleSend", c)("edited input");
+  h.ready.resolve();
+  await h.posting.promise;
+  h.accepted.resolve();
+  await edit;
+  assert.deepEqual(h.actions.filter(action => Array.isArray(action) && action[0] === "setEdit"), [["setEdit", null]]);
+  assert.equal(c.pendingHistoryEdits.has("session"), false);
+
+  c.agentRunningRef.current = false;
+  c.sessionRunningRef.current = false;
+  c.branchScopeRef.current = "local:session";
+  await actual("handleSend", c)("new input");
+  assert.deepEqual(h.commands.map(command => command.type), ["edit_history", "prompt"]);
 });
 
 test("historical edit aborts when its session or peer scope changes", async () => {

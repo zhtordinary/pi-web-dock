@@ -13,7 +13,7 @@ function diskProjection(snapshot: SessionReadSnapshot, sessionId: string, leafId
   const cached = branches?.get(branchKey);
   if (cached && cached.sessionId === sessionId) return cached;
   const projection = createHistoryProjection(snapshot.entries, {
-    sessionId, leafId, currentLeafId: snapshot.leafId,
+    sessionId, leafId, currentLeafId: snapshot.leafId, cwd: snapshot.header?.cwd,
     sourceRevision: JSON.stringify([
       snapshot.path, snapshot.fileDev, snapshot.fileIno, snapshot.fileSize,
       snapshot.fileMtimeMs, snapshot.fileCtimeMs, snapshot.entries.length, snapshot.entries.at(-1)?.id ?? null,

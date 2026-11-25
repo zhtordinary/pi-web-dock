@@ -45,6 +45,7 @@ const SOUND_CLAIM_TIMEOUT_MS = 5_000;
 export const SOUND_LOAD_TIMEOUT_MS = 5_000;
 export const SOUND_CLAIM_REQUEST_EVENT = "pi-web-sound-claim-request";
 export const SOUND_CLAIM_RESPONSE_EVENT = "pi-web-sound-claim-response";
+export const SOUND_DIALOG_INTERACTION_EVENT = "pi-web-sound-dialog-interaction";
 
 type SoundLockManager = {
   request: (name: string, callback: (lock: unknown) => Promise<boolean> | boolean) => Promise<boolean>;
@@ -241,11 +242,16 @@ export function tryPlaySoundRequest(
 const SESSION_DIALOG_SILENCE_MS = 30_000;
 const sessionDialogInteractedAt = new Map<string, number>();
 
-/** 弹窗交互（键盘输入/提交）时调用：记录该会话的最后交互时刻。 */
+/** 弹窗鼠标/键盘交互时调用：记录该会话的最后交互时刻。 */
 export function markSessionDialogInteracted(sessionId: string | undefined | null): void {
-  if (!sessionId) return;
+  const normalized = sessionId?.trim();
+  if (!normalized) return;
   try {
-    sessionDialogInteractedAt.set(sessionId, Date.now());
+    sessionDialogInteractedAt.set(normalized, Date.now());
+    if (typeof window !== "undefined" && window.parent && window.parent !== window) {
+      const targetOrigin = parentTargetOrigin();
+      if (targetOrigin) window.parent.postMessage({ type: SOUND_DIALOG_INTERACTION_EVENT, requestId: normalized }, targetOrigin);
+    }
   } catch {
     // 忽略
   }

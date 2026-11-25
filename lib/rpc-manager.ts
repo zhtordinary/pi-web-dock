@@ -12,11 +12,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { createAgentSessionFromServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type AgentSession, type SessionEntry as PiSessionEntry, type SessionMessageEntry as NativeSessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { createReaderAgentSessionServices, invalidateModelRuntimeWithExtensions } from "./model-runtime";
+import { installCodexCacheAffinityTransport } from "./codex-cache-affinity";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { createHash, randomUUID } from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
 import { historyEntryOrderKey, historyClientMessageIds, CLIENT_MESSAGE_CUSTOM_TYPE } from "./transcript-order";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { homedir } from "os";
 import { resolve, relative, isAbsolute } from "path";
 import lockfile from "proper-lockfile";
 import { acquireSessionRuntimeOwnership, type SessionRuntimeOwnership } from "./session-runtime-ownership";
@@ -95,12 +97,8 @@ import {
 } from "./rpc-session-tool-policy";
 export { readSessionThinkingLevel, resolveActiveToolNames } from "./rpc-session-tool-policy";
 import { createSessionControlExtension } from "./session-control";
-import { readSideRelation } from "./side-session";
-import {
-  createPromptCacheLineageExtension,
-  readPromptCacheLineage,
-  readPromptCacheMcpServersSection,
-} from "./prompt-cache-lineage";
+import { readSideRelation, sideToolNames } from "./side-session";
+import { createPromptCacheLineageExtension, readPromptCacheLineage } from "./prompt-cache-lineage";
 import { drainLocalOwnerOutboxes, persistSessionWaitEvent, persistSessionUiRequestEvent, invalidateSessionUiRequestWaits } from "./session-waits";
 import { drainPendingSessionWakes } from "./session-control-wake-queue";
 import { createSubagentExtension, preferPiWebSubagentExtension, type SubagentExecution, type SubagentExtensionRuntime } from "./subagent-extension";
@@ -148,7 +146,9 @@ import { samePath } from "./paths";
 import { localDeviceId } from "./activity-peers";
 import { isSessionPeerAgentMessage, isSessionPeerMessage, type SessionPeerMessage } from "./session-peer-message.ts";
 import { assignSession, subprojectForSession } from "./subproject-state";
-import { resolveProject } from "./worktree";
+import { listWorktrees, resolveProject } from "./worktree";
+import { appendWorktreeBinding } from "./worktree-bindings";
+import { confirmedWorktreeCreationCommand, inspectWorktreeCreationCommand } from "./worktree-creation-history";
 import { assertReaderExecutionCwd, readerRuntimeProjectRoot } from "./reader-execution-cwd";
 import { createCompactionModelExtension } from "./compaction-model-extension";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
@@ -2514,6 +2514,38 @@ export class AgentSessionWrapper {
    */
   private notifyAgentStateChanged(): void {
     this.evaluateUnattended();
+  }
+
+  /** Persist a creator binding only after Reader's own bash result proves the checkout exists. */
+  private async persistConfirmedWorktreeCreation(
+    command: string,
+    output: string,
+    result: { exitCode?: number; cancelled?: boolean },
+  ): Promise<void> {
+    if (result.exitCode !== 0 || result.cancelled === true) return;
+    const possible = inspectWorktreeCreationCommand(command, null, homedir(), this.cwd, this.cwd);
+    if (!possible.command && !possible.uncertain) return;
+    try {
+      const project = await resolveProject(this.cwd);
+      const candidate = confirmedWorktreeCreationCommand(
+        command,
+        output,
+        result,
+        (await listWorktrees(this.cwd)).map((worktree) => worktree.path),
+        homedir(),
+        this.cwd,
+        project.projectRoot,
+      );
+      if (!candidate || this.inner.sessionManager.getSessionId() !== this.sessionId) return;
+      appendWorktreeBinding(this.inner.sessionManager, {
+        projectRoot: project.projectRoot,
+        worktreePath: candidate.path,
+        relation: "creator",
+      });
+      this.persistSessionFileNow(true);
+    } catch {
+      // A failed post-command binding must not turn a successful shell action into a false failure.
+    }
   }
 
   private resetModelRoutingCycle(): void {
@@ -5265,7 +5297,12 @@ export class AgentSessionWrapper {
               shellPath: this.inner.settingsManager.getShellPath(),
             }),
           },
-        ).then((result) => {
+        ).then(async (result) => {
+          await this.persistConfirmedWorktreeCreation(
+            command.command as string,
+            typeof result.output === "string" ? result.output : "",
+            { exitCode: result.exitCode, cancelled: result.cancelled },
+          );
           this.persistSessionFileNow(true);
           return result;
         }).finally(() => {
@@ -7540,13 +7577,9 @@ export async function startRpcSession(
     const runtimeProjectRoot = await readerRuntimeProjectRoot(sessionCwd);
     const startupEntries = sessionManager.getEntries() as unknown as SessionEntry[];
     const agentDir = requestedAgentDir ?? getAgentDir();
+    const sideRelation = readSideRelation(startupEntries);
     const promptCacheLineage = readPromptCacheLineage(sessionManager.getHeader());
-    const inheritedMcpServersSection = promptCacheLineage
-      ? readPromptCacheMcpServersSection(startupEntries)
-      : undefined;
-    const promptCacheLineageExtension = createPromptCacheLineageExtension(promptCacheLineage, {
-      inheritedMcpServersSection,
-    });
+    const promptCacheLineageExtension = createPromptCacheLineageExtension(promptCacheLineage);
     const subagentResources = sessionFile
       ? readValidSubagentResources(startupEntries)
       : null;
@@ -7560,7 +7593,12 @@ export async function startRpcSession(
       ? undefined
       : readSessionToolSelectionPolicy(sessionManager.getEntries() as unknown as SessionEntry[]);
     const persistedToolNames = persistedToolPolicy?.tools;
-    const effectiveToolNames = subagentResources?.tools ?? toolNames ?? persistedToolNames;
+    const sideToolNamesForSession = sideRelation
+      ? sideToolNames(persistedToolNames, sessionManager.buildSessionContext().messages as never)
+      : undefined;
+    const effectiveToolNames = subagentResources?.tools ?? (sideRelation
+      ? sideToolNamesForSession
+      : toolNames ?? persistedToolNames);
     if (!subagentResources && strictToolAllowlist === true) {
       if (toolNames === undefined) {
         throw new Error("strictToolAllowlist requires an explicit toolNames allow-list");
@@ -7601,7 +7639,7 @@ export async function startRpcSession(
       // tool registry — so they were unavailable in Pi Web sessions even though the
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
-      toolsOption = effectiveToolNames.length === 0 || strictToolAllowlistEnabled
+      toolsOption = effectiveToolNames.length === 0 || strictToolAllowlistEnabled || sideRelation
         ? effectiveToolNames
         : undefined;
     }
@@ -7612,7 +7650,7 @@ export async function startRpcSession(
     const builtinResources = subagentResources && (subagentResources.codemode || subagentResources.mcp)
       ? await createPiWebBuiltinExtensions({ agentDir })
       : undefined;
-    const builtins = subagentResources || chatOnly || strictToolAllowlistEnabled
+    const builtins = subagentResources || chatOnly || strictToolAllowlistEnabled || sideRelation
       ? undefined
       : await createPiWebBuiltinExtensions({ agentDir });
 
@@ -7769,6 +7807,21 @@ export async function startRpcSession(
                 createCompactionModelExtension(settingsManager),
                 promptCacheLineageExtension],
             }
+        : sideRelation
+          ? {
+              ...(strictToolAllowlistEnabled ? { noExtensions: true, noSkills: true, noContextFiles: true } : {}),
+              noPromptTemplates: true,
+              noThemes: true,
+              extensionFactories: [
+                createCompactionModelExtension(settingsManager),
+                promptCacheLineageExtension,
+                ...(effectiveToolNames?.includes("bash") ? [createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager })] : []),
+                ...(effectiveToolNames?.includes("powershell") ? [createProjectCommandPowerShellExtension({ cwd: sessionCwd })] : []),
+                createImageGenerationOutputExtension(),
+                createRemoteClaudeHostGuardExtension(),
+              ],
+              extensionsOverride: (base) => preferUserPowerShellExtension(preferUserBashExtension(preferPiWebSubagentExtension(base))),
+            }
         : strictToolAllowlistEnabled
           ? {
               noExtensions: true,
@@ -7802,7 +7855,6 @@ export async function startRpcSession(
               createCompactionModelExtension(settingsManager),
               createImageGenerationOutputExtension(),
               ...(builtins?.extensions ?? []),
-              // Restore the copied MCP section after builtin:mcp refreshes it.
               promptCacheLineageExtension,
               createReadOnlyMcpPolicyExtension(),
               createFastModeExtension(fastModeState),
@@ -7874,6 +7926,7 @@ export async function startRpcSession(
     if (initial.requiresModelSelection) {
       throw new Error(`The saved provider ${defaultProvider} is retired. Select a model before starting a session.`);
     }
+    if (!subagentResources && promptCacheLineage) await installCodexCacheAffinityTransport(services.modelRuntime);
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
@@ -7929,7 +7982,9 @@ export async function startRpcSession(
         effectiveToolNames ?? initialToolNames,
         strictToolAllowlistEnabled ? [] : initialToolNames,
       );
-      inner.setActiveToolsByName(selectedTools);
+      inner.setActiveToolsByName(sideRelation
+        ? selectedTools.filter((name) => effectiveToolNames?.includes(name))
+        : selectedTools);
     }
 
     let remoteClaudeHost: RemoteClaudeHostBinding | undefined;

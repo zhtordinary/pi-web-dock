@@ -26,7 +26,7 @@ import { useSessionDetails } from "@/hooks/useSessionDetails";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { clearSessionActivityCache, fetchSessionActivity } from "@/lib/session-activity-fetch";
 import { useI18n } from "@/hooks/useI18n";
-import { statusSoundRequestId, useAudio, tryPlaySoundRequest, waitSoundRequestId } from "@/hooks/useAudio";
+import { statusSoundRequestId, useAudio, tryPlaySoundRequest, waitSoundRequestId, wasSessionDialogRecentlyInteracted } from "@/hooks/useAudio";
 import { announceReaderMenuOpen, ReaderFloatingMultiSelect, ReaderFloatingSelect, type ReaderSelectOption } from "./ReaderFloatingSelect";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { SessionSearchInput } from "./SessionSearchInput";
@@ -881,12 +881,12 @@ function ProjectPathContextMenu({ path, deviceId, canDelete = false, hasSessions
     if (!position) return;
     const closeOnPointerDown = (event: PointerEvent) => {
       const target = event.target;
-      const inSubprojectPopover = target instanceof Element && target.closest("[data-subproject-manager-submenu], [data-subproject-context-menu], [data-worktree-manager-submenu]");
+      const inSubprojectPopover = target instanceof Element && target.closest("[data-subproject-manager-submenu], [data-subproject-context-menu], [data-worktree-manager-submenu], [data-reader-floating-menu]");
       if (!menuRef.current?.contains(target as Node) && !inSubprojectPopover) closeMenu();
     };
     const closeOnContextMenu = (event: MouseEvent) => {
       const target = event.target;
-      const inSubprojectPopover = target instanceof Element && target.closest("[data-subproject-manager-submenu], [data-subproject-context-menu], [data-worktree-manager-submenu]");
+      const inSubprojectPopover = target instanceof Element && target.closest("[data-subproject-manager-submenu], [data-subproject-context-menu], [data-worktree-manager-submenu], [data-reader-floating-menu]");
       if (!menuRef.current?.contains(target as Node) && !inSubprojectPopover) closeMenu();
     };
     // A click inside an iframe never bubbles to the parent document. embedded session
@@ -2151,6 +2151,9 @@ function useSessionActivityData({
       if (prevStateKeysRef.current === null) continue;
       if (prevStateKeysRef.current.has(key)) continue;
       if (item.status === "waiting_user") {
+        // Activity is a separate sound producer; dialog interaction in the chat
+        // must silence its next request too, including the outer iframe shell.
+        if (wasSessionDialogRecentlyInteracted(item.session.id)) continue;
         // The same pending request uses the same fact ID in every surface.
         tryPlaySoundRequest(waitSoundRequestId(requestId), playWaitSound, () => canPlaySound("wait"));
       } else if (item.status === "failed" || item.status === "aborted") {
@@ -3568,7 +3571,7 @@ function ActivitySubprojectManager({ projectKey, deviceId, definitions, sortSett
     if (!open) return;
     const close = (event: PointerEvent) => {
       const target = event.target;
-      if (target instanceof Node && (anchorRef.current?.contains(target) || submenuRef.current?.contains(target) || (target instanceof Element && target.closest("[data-subproject-context-menu]")))) return;
+      if (target instanceof Node && (anchorRef.current?.contains(target) || submenuRef.current?.contains(target) || (target instanceof Element && target.closest("[data-subproject-context-menu], [data-reader-floating-menu]")))) return;
       setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {

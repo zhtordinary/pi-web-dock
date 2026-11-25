@@ -1,4 +1,5 @@
 import type { AgentMessage, SessionEntry } from "./types";
+import type { WrittenFile } from "./turn-written-files";
 
 /** Shared transport and residency budgets; these are not browser heap measurements. */
 export const HISTORY_PAGE_MESSAGES = 50;
@@ -59,6 +60,8 @@ export interface HistoryWindowItem {
   contentState: "placeholder" | "answer" | "full";
   process: boolean;
   toolCallCount: number;
+  /** Successful files written in this turn; tool bodies remain lazy. */
+  writtenFiles?: WrittenFile[];
   deferred: HistoryDeferredContent[];
 }
 

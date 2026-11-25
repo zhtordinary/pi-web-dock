@@ -987,6 +987,19 @@ test("embedded reader delegates wait-sound to the outer shell (no double play)",
   assert.match(appShell, /soundAlerts=\{!embeddedReaderMode\}/);
 });
 
+test("silences activity wait alerts after dialog interaction across embedded shells", () => {
+  assert.match(activityPanel, /wasSessionDialogRecentlyInteracted\(item\.session\.id\)/);
+  const waitingBranch = activityPanel.slice(
+    activityPanel.indexOf('if (item.status === "waiting_user") {'),
+    activityPanel.indexOf('} else if (item.status === "failed" || item.status === "aborted") {'),
+  );
+  assert.match(waitingBranch, /if \(wasSessionDialogRecentlyInteracted\(item\.session\.id\)\) continue/);
+  assert.match(chatWindow, /onPointerDownCapture=\{onInteraction\}/);
+  assert.match(chatWindow, /onKeyDownCapture=\{onInteraction\}/);
+  assert.match(appShell, /SOUND_DIALOG_INTERACTION_EVENT/);
+  assert.match(appShell, /markSessionDialogInteracted\(typeof data\.requestId === "string"/);
+});
+
 test("shell revives its audio context on validated gestures reported by an embedded Reader", async () => {
   // 完整设备视图里状态音由外层播，而用户的手势落在 iframe 内、到不了外层文档：
   // iframe 转告手势，外层在校验 source 与 origin 之后才恢复自己的 AudioContext。

@@ -439,6 +439,14 @@ test("keeps per-model hidden state in the full config save", () => {
   assert.match(source, /if \(!res\.ok\) throw new Error\(`HTTP \$\{res\.status\}`\)/);
 });
 
+test("keeps provider visibility in the full config save", () => {
+  assert.match(source, /interface ModelsJson[\s\S]*collapsedProviders\?: string\[\]/);
+  assert.match(source, /collapsedProviders: normalizeCollapsedProviderNames\(d\.collapsedProviders\)/);
+  assert.match(source, /let draft: ModelsJson = \{ \.\.\.config, collapsedProviders: \[\.\.\.collapsedProviders\] \};/);
+  const save = source.slice(source.indexOf("const handleSave = useCallback"), source.indexOf("const isMainDirty"));
+  assert.match(save, /\}, \[applyProviderRename, collapsedProviders, config,/);
+});
+
 test("hidden model rows are opt-in without filtering providers", () => {
   assert.match(source, /const \[showHiddenModels, setShowHiddenModels\] = useState\(false\)/);
   assert.match(source, /const hiddenModelCount = customProviders\.reduce/);

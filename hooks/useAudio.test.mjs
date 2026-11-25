@@ -167,6 +167,33 @@ test("iframe claim accepts only the registered parent origin and source", async 
   }
 });
 
+test("forwards dialog interaction to the validated parent shell", async () => {
+  const oldWindow = globalThis.window;
+  const oldDocument = globalThis.document;
+  const messages = [];
+  const parent = { postMessage: (data, targetOrigin) => messages.push({ data, targetOrigin }) };
+  globalThis.window = {
+    localStorage: oldWindow.localStorage,
+    parent,
+    addEventListener() {},
+  };
+  globalThis.document = { referrer: "https://shell.example/monitor" };
+  try {
+    const fresh = await freshAudio();
+    const sessionId = `dialog-forward-${Date.now()}-${Math.random()}`;
+    fresh.markSessionDialogInteracted(sessionId);
+    assert.equal(fresh.wasSessionDialogRecentlyInteracted(sessionId), true);
+    assert.deepEqual(messages, [{
+      data: { type: fresh.SOUND_DIALOG_INTERACTION_EVENT, requestId: sessionId },
+      targetOrigin: "https://shell.example",
+    }]);
+  } finally {
+    globalThis.window = oldWindow;
+    if (oldDocument === undefined) delete globalThis.document;
+    else globalThis.document = oldDocument;
+  }
+});
+
 test("terminal keys require server run identity", () => {
   assert.equal(statusSoundRequestId("session-1", "done"), "");
   assert.equal(statusSoundRequestId("session-1", "done", "run-1"), "status:done:session-1:run-1");

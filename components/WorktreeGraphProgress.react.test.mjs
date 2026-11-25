@@ -210,6 +210,29 @@ test("association progress is shown while bounded scans continue, then the creat
     });
     assert.match(section.textContent, /32 MiB/, "an oversized entry needs a specific warning rather than an endless refresh hint");
     assert.equal(cleanup.disabled, true, "an incomplete history never enables removal");
+    await React.act(async () => {
+      failureResponse = { records: [], bindings: [], partial: true, unknown: true, state: "unknown", progress: { running: false, processedBytes: 100, totalBytes: 100 } };
+      window.dispatchEvent(new CustomEvent("pi-web:worktree-management-changed"));
+      await tick();
+    });
+    assert.match(section.textContent, /历史创建记录.*无法.*核验/);
+    assert.doesNotMatch(section.textContent, /点击刷新重试/, "repeated reads cannot resolve ambiguous history");
+    assert.equal(cleanup.disabled, true, "unresolved history must still block removal");
+    await React.act(async () => {
+      failureResponse = { ...failureResponse, records: [{ worktreePath: linked, sessionId: "creator", createdAt: "2026-01-01" }] };
+      window.dispatchEvent(new CustomEvent("pi-web:worktree-management-changed"));
+      await tick();
+    });
+    assert.ok(section.querySelector('[data-worktree-associated-session="creator"]'), "verified associations remain visible");
+    assert.match(section.textContent, /历史创建记录.*无法.*核验/);
+    assert.equal(cleanup.disabled, true);
+    await React.act(async () => {
+      failureResponse = { records: [], bindings: [], partial: true, unknown: true, failure: "unavailable", progress: { running: false, processedBytes: 100, totalBytes: 100 } };
+      window.dispatchEvent(new CustomEvent("pi-web:worktree-management-changed"));
+      await tick();
+    });
+    assert.match(section.textContent, /点击刷新重试/, "an actual read failure still offers a retry");
+    assert.equal(cleanup.disabled, true);
   } finally {
     await React.act(async () => { root.unmount(); await tick(); });
     clearSessionActivityCache();

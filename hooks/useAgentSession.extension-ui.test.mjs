@@ -36,6 +36,7 @@ function fixture({ toolsResult = {} } = {}) {
     ...queue, isBlockingExtensionUiRequest, getToolNamesForPreset,
     useCallback: (callback) => callback, opts: {}, console: { error: (...args) => state.errors.push(args) },
     sessionIdRef: { current: "s" }, sessionPropIdRef: { current: "s" }, sessionHookMountedRef: { current: true }, remotePeerRef: { current: null },
+    syncServerUnattendedRef: { current: async () => {} },
     ensuringNewSessionRef: { current: null }, sessionToolsPinnedRef: { current: false },
     stateRunRevisionRef: { current: 0 }, currentAgentRunIdRef: { current: "previous-run" }, rpcPromptPendingRef: { current: false },
     activeToolIdsRef: { current: new Set() }, toolEventRevisionRef: { current: 0 }, setActiveToolResults: noop, setAgentPhase: noop,

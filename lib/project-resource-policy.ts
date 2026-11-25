@@ -81,6 +81,17 @@ function hasSdkGlobWildcard(path: string): boolean {
   return path.includes("*") || path.includes("?");
 }
 
+function hasLegacyGlobSyntax(path: string): boolean {
+  if (/[*?()[\]{}]/.test(path)) return true;
+  if (!path.startsWith("file://")) return false;
+  try {
+    // SDK normalizePath decodes file URLs before glob matching.
+    return /[*?()[\]{}]/.test(fileURLToPath(path));
+  } catch {
+    return false;
+  }
+}
+
 function assertTopLevelOverridePathSupported(path: string): void {
   if (path.includes("\0")) throw new Error("Pi cannot safely override a resource path containing NUL");
   let target = path;
@@ -136,6 +147,8 @@ let sdkGlobTools: { minimatch: (path: string, pattern: string) => boolean; norma
 function assertNoAmbiguousLegacyGlob(entries: readonly string[], path: string, targetBaseDir: string, ruleBaseDir: string | null = targetBaseDir): void {
   const exclusions = entries.filter((entry) => entry.startsWith("!"));
   if (!exclusions.length) return;
+  const candidatePatterns = exclusions.map((entry) => toPosixPath(entry.slice(1)));
+  if (!candidatePatterns.some(hasLegacyGlobSyntax)) return;
   if (!sdkGlobTools) {
     try {
       // Bind to the SDK instance already in use, not a separately resolved version.
@@ -154,7 +167,7 @@ function assertNoAmbiguousLegacyGlob(entries: readonly string[], path: string, t
   }
   let globs: string[];
   try {
-    globs = exclusions.map((entry) => toPosixPath(sdkGlobTools!.normalizePath(entry.slice(1))))
+    globs = candidatePatterns.map((pattern) => toPosixPath(sdkGlobTools!.normalizePath(pattern)))
       .filter((pattern) => /[*?()[\]{}]/.test(pattern));
   } catch {
     throw new Error("Pi cannot safely check an invalid legacy resource exclusion");

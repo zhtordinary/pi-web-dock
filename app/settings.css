@@ -1963,6 +1963,12 @@ html.dark,
   border-radius: 6px;
 }
 
+.settings-builtin-tools {
+  flex-wrap: wrap;
+  max-width: 420px;
+  font-family: var(--font-mono);
+}
+
 .settings-send-mode-option {
   position: relative;
   display: flex;

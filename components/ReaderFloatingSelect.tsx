@@ -277,6 +277,7 @@ function ReaderFloatingMenu(props: ReaderFloatingMenuProps) {
     <div
       ref={menuRef}
       role="listbox"
+      data-reader-floating-menu="true"
       aria-label={ariaLabel}
       aria-multiselectable={props.mode === "multiple" ? true : undefined}
       onKeyDown={(event) => {

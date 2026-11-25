@@ -48,7 +48,7 @@ import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTa
 import { clearFileTabAnchor, getFileTabId, openFileTab, replaceFileTab, saveFileViewerState } from "./file-tab-state";
 import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { AgentFamilyMenu } from "./AgentFamilyMenu";
-import { claimSoundRequest, SOUND_CLAIM_REQUEST_EVENT, SOUND_CLAIM_RESPONSE_EVENT, SOUND_UNLOCK_EVENT, statusSoundRequestId, tryPlaySoundRequest, useAudio, waitSoundRequestId, wasSessionDialogRecentlyInteracted } from "@/hooks/useAudio";
+import { claimSoundRequest, markSessionDialogInteracted, SOUND_CLAIM_REQUEST_EVENT, SOUND_CLAIM_RESPONSE_EVENT, SOUND_DIALOG_INTERACTION_EVENT, SOUND_UNLOCK_EVENT, statusSoundRequestId, tryPlaySoundRequest, useAudio, waitSoundRequestId, wasSessionDialogRecentlyInteracted } from "@/hooks/useAudio";
 import { getThemeSnapshot, useTheme } from "@/hooks/useTheme";
 import { isThemePreference } from "@/lib/theme";
 import { useI18n } from "@/hooks/useI18n";
@@ -802,7 +802,7 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
         requestId?: unknown;
         nonce?: unknown;
       } | null;
-      if (!data || (data.type !== SOUND_CLAIM_REQUEST_EVENT && data.type !== SOUND_UNLOCK_EVENT)) return;
+      if (!data || ![SOUND_CLAIM_REQUEST_EVENT, SOUND_DIALOG_INTERACTION_EVENT, SOUND_UNLOCK_EVENT].includes(data.type as string)) return;
       let expectedOrigin: string | null = null;
       try {
         expectedOrigin = embeddedReaderUrl ? new URL(embeddedReaderUrl, window.location.href).origin : null;
@@ -811,10 +811,8 @@ export function AppShell({ localDeviceId, localDeviceName }: { localDeviceId: st
       }
       const source = embeddedIframeRef.current?.contentWindow;
       if (!source || event.source !== source || !expectedOrigin || event.origin !== expectedOrigin) return;
-      if (data.type === SOUND_UNLOCK_EVENT) {
-        unlockAudio();
-        return;
-      }
+      if (data.type === SOUND_UNLOCK_EVENT) { unlockAudio(); return; }
+      if (data.type === SOUND_DIALOG_INTERACTION_EVENT) { markSessionDialogInteracted(typeof data.requestId === "string" && data.requestId.length <= 512 ? data.requestId : ""); return; }
       if (
         typeof data.requestId !== "string"
         || data.requestId.length > 512

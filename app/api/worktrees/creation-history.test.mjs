@@ -50,17 +50,53 @@ test("creation history reads visible project sessions without executing or expos
     ];
     await writeFile(path.join(sessionsDir, `${id}.jsonl`), entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   }
-  await writeSession("visible-session", true);
+  const printedRevisionCommand = [
+    `ROOT='${repo}'`,
+    `printf 'baseline %s\\n' "$(git rev-parse origin/reader)"`,
+    `git -C "$ROOT" worktree add -b feat/task '${linked}' main`,
+    `touch '${marker}'`,
+  ].join("\n");
+  await writeSession("visible-session", true, printedRevisionCommand);
   await writeSession("hidden-session");
+  await writeFile(path.join(sessionsDir, "structured-only.jsonl"), [
+    { type: "session", version: 3, id: "structured-only", timestamp: "2026-01-01T00:00:00.000Z", cwd: repo },
+    { type: "custom", id: "binding", timestamp: "2026-01-02T00:00:02.000Z", customType: "pi-web:worktree-binding", data: { version: 1, action: "bind", relation: "creator", projectRoot: repo, worktreePath: linked } },
+    { type: "session_info", id: "name", timestamp: "2026-01-02T00:00:03.000Z", name: "Structured only" },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   await writeFile(process.env.PI_WEB_HIDDEN_FILE, JSON.stringify({ sessions: ["hidden-session"], projects: [], devices: [], visibleSessions: [] }));
   const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
   const { GET, DELETE } = await jiti.import("./route.ts");
+  const { POST: bindWorktree } = await jiti.import("./bind/route.ts");
   const response = await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&creationHistory=1`));
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.partial, false);
-  assert.deepEqual(body.records.map((record) => [record.worktreePath, record.sessionId]), [[linked, "visible-session"]]);
-  assert.deepEqual(body.bindings.map((record) => [record.worktreePath, record.sessionId, record.relation]), [[linked, "visible-session", "task-root"]]);
+  assert.deepEqual(body.records.map((record) => [record.worktreePath, record.sessionId, record.source]), [[linked, "visible-session", "history"]]);
+  assert.deepEqual(body.bindings.map((record) => [record.worktreePath, record.sessionId, record.relation, record.source]).sort(), [
+    [linked, "structured-only", "creator", "structured"],
+    [linked, "visible-session", "task-root", "structured"],
+  ]);
+  const bindRequest = (value = { cwd: repo, worktreePath: linked, sessionId: "visible-session", relation: "creator" }) => bindWorktree(new Request("http://localhost/api/worktrees/bind", {
+    method: "POST",
+    headers: { Host: "localhost", "Content-Type": "application/json" },
+    body: JSON.stringify(value),
+  }));
+  const wrongPath = await bindRequest({ cwd: repo, worktreePath: path.join(repo, "not-registered"), sessionId: "visible-session", relation: "creator" });
+  assert.equal(wrongPath.status, 400);
+  const missingSession = await bindRequest({ cwd: repo, worktreePath: linked, sessionId: "missing-session", relation: "creator" });
+  assert.equal(missingSession.status, 404);
+  const firstBind = await bindRequest();
+  const firstBindBody = await firstBind.json();
+  assert.equal(firstBind.status, 200, JSON.stringify(firstBindBody));
+  assert.equal(firstBindBody.appended, true);
+  const secondBind = await bindRequest();
+  const secondBindBody = await secondBind.json();
+  assert.equal(secondBind.status, 200, JSON.stringify(secondBindBody));
+  assert.equal(secondBindBody.appended, false);
+  const rebound = await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&creationHistory=1`));
+  const reboundBody = await rebound.json();
+  assert.deepEqual(reboundBody.records.map((record) => record.sessionId), []);
+  assert.deepEqual(reboundBody.bindings.filter((record) => record.sessionId === "visible-session").map((record) => record.relation).sort(), ["creator", "task-root"]);
   assert.equal(JSON.stringify(body).includes("must-not-run"), false);
   await assert.rejects(stat(marker), { code: "ENOENT" });
   const removal = await DELETE(new Request("http://localhost/api/worktrees", {
@@ -97,8 +133,13 @@ test("creation history reads visible project sessions without executing or expos
   assert.ok(batches > 1, "a large session is read across several batches");
   assert.ok(batches < 10, "large scans should not require dozens of request round trips");
   assert.equal(largeBody.partial, false);
-  assert.deepEqual(largeBody.records.map((record) => [record.worktreePath, record.sessionId]).sort(), [[linked, "large-session"], [linked, "visible-session"]]);
-  assert.deepEqual(largeBody.bindings.map((record) => [record.worktreePath, record.sessionId, record.relation]).sort(), [[linked, "large-session", "task-root"], [linked, "visible-session", "task-root"]]);
+  assert.deepEqual(largeBody.records.map((record) => [record.worktreePath, record.sessionId]).sort(), [[linked, "large-session"]]);
+  assert.deepEqual(largeBody.bindings.map((record) => [record.worktreePath, record.sessionId, record.relation, record.source]).sort(), [
+    [linked, "large-session", "task-root", "structured"],
+    [linked, "structured-only", "creator", "structured"],
+    [linked, "visible-session", "creator", "structured"],
+    [linked, "visible-session", "task-root", "structured"],
+  ]);
   assert.equal(largeBody.records.find((record) => record.sessionId === "large-session").sessionName, "Session large-session");
   const largeAfter = await stat(largePath);
   assert.equal(largeAfter.size, largeBefore.size);
@@ -260,6 +301,16 @@ test("an unindexed session leaves verified associations available but removal fa
     { type: "custom", id: "binding", timestamp: stamp, customType: "pi-web:worktree-binding", data: { version: 1, action: "bind", relation: "task-root", projectRoot: repo, worktreePath: linked } },
   ];
   await writeFile(path.join(sessionsDir, "valid.jsonl"), valid.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const ambiguousCommand = [
+    `ROOT='${repo}'`,
+    'TASK="$(printf \'%s\' "$ROOT/.worktrees/task")"',
+    'git -C "$ROOT" worktree add -b feat/unknown "$TASK" main',
+  ].join("\n");
+  await writeFile(path.join(sessionsDir, "ambiguous.jsonl"), [
+    { type: "session", version: 3, id: "ambiguous", timestamp: stamp, cwd: repo },
+    { type: "message", id: "assistant", timestamp: "2026-01-02T00:00:00.000Z", message: { role: "assistant", content: [{ type: "toolCall", id: "ambiguous-call", name: "bash", arguments: { command: ambiguousCommand } }] } },
+    { type: "message", id: "result", timestamp: "2026-01-02T00:00:01.000Z", message: { role: "toolResult", toolName: "bash", toolCallId: "ambiguous-call", isError: false, content: [{ type: "text", text: "Preparing worktree (new branch 'feat/unknown')\nHEAD is now at abc1234 initial\n" }] } },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
   const { GET, DELETE } = await createJiti(import.meta.url, { tsconfigPaths: true, moduleCache: false }).import("./route.ts");
   const history = await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&creationHistory=1`));
   assert.equal(history.status, 200);
@@ -276,6 +327,22 @@ test("an unindexed session leaves verified associations available but removal fa
   assert.equal((await stat(linked)).isDirectory(), true);
   await rm(path.join(sessionsDir, "unreadable-session.jsonl"));
   await rm(path.join(sessionsDir, "valid.jsonl"));
+  globalThis.__piWorktreeAssociationScans?.delete(repo);
+  const uncertainResponse = await GET(new Request(`http://localhost/api/worktrees?cwd=${encodeURIComponent(repo)}&creationHistory=1`));
+  assert.equal(uncertainResponse.status, 200);
+  const uncertain = await uncertainResponse.json();
+  assert.equal(uncertain.partial, true);
+  assert.equal(uncertain.unknown, true);
+  assert.equal(uncertain.state, "unknown");
+  assert.deepEqual(uncertain.records, []);
+  const uncertainDelete = await DELETE(new Request("http://localhost/api/worktrees", {
+    method: "DELETE", headers: { Host: "localhost", "Content-Type": "application/json" },
+    body: JSON.stringify({ cwd: repo, path: linked }),
+  }));
+  assert.equal(uncertainDelete.status, 409);
+  assert.match((await uncertainDelete.json()).error, /worktree creation history is incomplete/);
+  await rm(path.join(sessionsDir, "ambiguous.jsonl"));
+  globalThis.__piWorktreeAssociationScans?.delete(repo);
   const deletedDir = path.join(process.env.PI_CODING_AGENT_DIR, "deleted_sessions", "project");
   await mkdir(deletedDir, { recursive: true });
   await writeFile(path.join(deletedDir, "recoverable.jsonl"), JSON.stringify({ type: "session", id: "recoverable", cwd: linked, timestamp: "2026-01-01T00:00:00Z" }) + "\n");

@@ -173,9 +173,12 @@ export function setSlashFavoriteKeys(value: unknown): SlashFavoriteState {
   let categories: SlashFavoriteCategory[];
   if (current && current.categories.length > 0) {
     // Preserve existing category structure: filter removed keys, keep existing assignments
+    const targetOrder = new Map(targetKeys.map((key, index) => [key, index]));
     const existingKeySet = new Set<string>();
     categories = current.categories.map((cat) => {
-      const kept = cat.keys.filter((k) => targetSet.has(k));
+      const kept = cat.keys
+        .filter((k) => targetSet.has(k))
+        .sort((a, b) => (targetOrder.get(a) ?? targetKeys.length) - (targetOrder.get(b) ?? targetKeys.length));
       for (const k of kept) existingKeySet.add(k);
       return { ...cat, keys: kept };
     });

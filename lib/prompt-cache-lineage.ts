@@ -6,7 +6,7 @@ export const PROMPT_CACHE_LINEAGE_EXTENSION_NAME = "pi-web-prompt-cache-lineage"
 export const PROMPT_CACHE_LINEAGE_PROVIDER = "openai-codex";
 export const PROMPT_CACHE_LINEAGE_MODEL = "gpt-5.6-luna";
 export const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
-export const PROMPT_CACHE_MCP_SERVERS_SECTION = "mcp_servers";
+export const PROMPT_CACHE_AFFINITY = Symbol.for("pi-web:prompt-cache-affinity");
 
 export interface PromptCacheLineageHeader {
   [PROMPT_CACHE_LINEAGE_HEADER]?: unknown;
@@ -38,34 +38,6 @@ export function promptCacheLineageForCopy(sourceSessionId: string, sourceHeader?
   return effectivePromptCacheKey(sourceSessionId, sourceHeader);
 }
 
-/**
- * Read the latest persisted MCP summary so a copied session keeps the exact
- * inherited prompt prefix while its own MCP runtime connects independently.
- * The persisted section is already rendered as `<mcp_servers>…</mcp_servers>`,
- * while `before_agent_start` exposes the unwrapped content that Pi renders
- * again, so the wrapper is stripped here. `null` means the source explicitly
- * removed the section; `undefined` means no system prompt carried it yet.
- */
-export function readPromptCacheMcpServersSection(entries: readonly unknown[]): string | null | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "system") continue;
-    const sections = entry.message.sections;
-    if (!isRecord(sections) || !Object.prototype.hasOwnProperty.call(sections, PROMPT_CACHE_MCP_SERVERS_SECTION)) continue;
-    const value = sections[PROMPT_CACHE_MCP_SERVERS_SECTION];
-    return typeof value === "string" ? unwrapPromptCacheSection(PROMPT_CACHE_MCP_SERVERS_SECTION, value) : null;
-  }
-  return undefined;
-}
-
-const SECTION_WRAPPER_TEMPLATE = /^<([a-z_]+)>\n([\s\S]*)\n<\/\1>$/;
-
-/** Turn a persisted rendered section back into the content Pi re-renders. */
-function unwrapPromptCacheSection(name: string, rendered: string): string {
-  const match = SECTION_WRAPPER_TEMPLATE.exec(rendered);
-  return match && match[1] === name ? match[2] : rendered;
-}
-
 function isTargetModel(model: unknown): boolean {
   if (!model || typeof model !== "object" || Array.isArray(model)) return false;
   const candidate = model as { provider?: unknown; id?: unknown };
@@ -77,9 +49,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Replace only the cache key already emitted by Pi's Codex request builder.
- * The builder remains authoritative for cache enablement, input ordering,
- * tools, transport headers and session affinity.
+ * Route the inherited cache prefix without changing session or request identity.
+ * Pi remains authoritative for cache enablement, input ordering and tools.
  */
 export function applyPromptCacheLineage<T>(
   payload: T,
@@ -90,25 +61,14 @@ export function applyPromptCacheLineage<T>(
   // Pi omits prompt_cache_key when cacheRetention is "none". Do not turn a
   // disabled-cache request back on, and do not infer cache state elsewhere.
   if (typeof payload.prompt_cache_key !== "string") return payload;
-  return { ...payload, prompt_cache_key: lineageKey } as T;
+  return { ...payload, prompt_cache_key: lineageKey, [PROMPT_CACHE_AFFINITY]: lineageKey } as T;
 }
 
-export function createPromptCacheLineageExtension(
-  lineageKey: string | undefined,
-  options: { inheritedMcpServersSection?: string | null } = {},
-): InlineExtension {
+export function createPromptCacheLineageExtension(lineageKey: string | undefined): InlineExtension {
   return {
     name: PROMPT_CACHE_LINEAGE_EXTENSION_NAME,
     hidden: true,
     factory: (pi: ExtensionAPI) => {
-      const inheritedMcpServersSection = options.inheritedMcpServersSection;
-      if (lineageKey && inheritedMcpServersSection !== undefined) {
-        pi.on("before_agent_start", (event) => {
-          const sections = event.systemPromptOptions.sections;
-          if (inheritedMcpServersSection === null) delete sections[PROMPT_CACHE_MCP_SERVERS_SECTION];
-          else sections[PROMPT_CACHE_MCP_SERVERS_SECTION] = inheritedMcpServersSection;
-        });
-      }
       pi.on("before_provider_request", (event, context) =>
         applyPromptCacheLineage(event.payload, lineageKey, context.model)
       );

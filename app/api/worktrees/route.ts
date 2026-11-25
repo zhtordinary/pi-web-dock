@@ -50,6 +50,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function associationKey(sessionId: string, worktreePath: string): string {
+  const normalized = worktreePath.replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+  return `${sessionId}:${/^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized}`;
+}
+
 // GET /api/worktrees?cwd=&graph=1&refresh=1&inspect=
 export async function GET(req: Request) {
   try {
@@ -111,15 +116,31 @@ export async function GET(req: Request) {
         await new Promise<void>((resolve) => setImmediate(resolve));
         history = scanWorktreeAssociations(sessions, project.projectRoot, paths, { prioritySessionId });
       }
+      const structuredKeys = new Set(history.bindings
+        .filter((binding) => binding.relation === "creator")
+        .map((binding) => associationKey(binding.sessionId, binding.worktreePath)));
+      const records = history.records.filter((record) => !structuredKeys.has(associationKey(record.sessionId, record.worktreePath)));
       const partial = history.partial || inventoryIncomplete;
+      const unknown = history.unknown || inventoryIncomplete;
+      const incomplete = partial;
+      const state = unknown ? "unknown" : incomplete ? "incomplete" : "complete";
       const provisionalRecords = partial
         ? readWorktreeAssociationHints(project.projectRoot, sessions, paths)
           .filter((record) => record.sessionId !== prioritySessionId || history.priorityPending)
         : [];
-      if (!partial || history.records.length) {
-        saveWorktreeAssociationHints(project.projectRoot, sessions, paths, history.records, !partial);
+      if (!partial || records.length) {
+        saveWorktreeAssociationHints(project.projectRoot, sessions, paths, records, !partial);
       }
-      return NextResponse.json({ ...history, partial, ...(inventoryIncomplete && !history.failure ? { failure: "unavailable" } : {}), provisionalRecords }, { headers: { "Cache-Control": "no-store" } });
+      return NextResponse.json({
+        ...history,
+        records,
+        partial,
+        incomplete,
+        unknown,
+        state,
+        ...(inventoryIncomplete && !history.failure ? { failure: "unavailable" } : {}),
+        provisionalRecords,
+      }, { headers: { "Cache-Control": "no-store" } });
     }
     const graph = searchParams.get("graph") === "1" && isGit
       ? await buildWorktreeGraph(existsSync(cwd) ? cwd : project.projectRoot, { forceRefresh: searchParams.get("refresh") === "1" })

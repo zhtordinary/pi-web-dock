@@ -11,7 +11,7 @@ import { readSiblingExecution } from "./session-channel-control";
 import { getSessionEntries, listAllSessions, listArchivedSessions } from "./session-reader";
 import { listSessionsIncremental } from "./session-list-scanner";
 import { findWorktreeBindingRecords } from "./worktree-bindings";
-import { findWorktreeCreationRecords } from "./worktree-creation-history";
+import { findWorktreeCreationEvidence } from "./worktree-creation-history";
 import { assertWorktreeDirectoryIdentity, collectWorktreeDirtySummaries, listWorktrees, type WorktreeDirectoryIdentity } from "./worktree";
 
 type SafetySession = {
@@ -125,8 +125,11 @@ export async function assertWorktreeRemovalSafe(cwd: string, path: string): Prom
       if (size > 64 * 1024 * 1024 || size > remainingBytes) throw new Error("Worktree safety unknown: session history is too large to inspect");
       remainingBytes -= size;
       const entries = getSessionEntries(sessionPath);
-      if (findWorktreeCreationRecords(entries, session, [target.path], homedir(), projectRoot).length
-        || findWorktreeBindingRecords(entries, session, projectRoot, [target.path]).length) {
+      const creationEvidence = findWorktreeCreationEvidence(entries, session, [target.path], homedir(), projectRoot);
+      if (creationEvidence.uncertain) {
+        throw new Error("Worktree safety unknown: worktree creation history is incomplete");
+      }
+      if (creationEvidence.records.length || findWorktreeBindingRecords(entries, session, projectRoot, [target.path]).length) {
         throw new Error("Worktree removal refused: a session is associated with this worktree");
       }
     } catch (error) {

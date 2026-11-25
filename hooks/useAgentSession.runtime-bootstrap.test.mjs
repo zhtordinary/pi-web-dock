@@ -190,6 +190,21 @@ test('late initialization cannot connect events after peer or generation scope c
   resolve({}); await assert.rejects(pending, /conversation changed/);
 });
 
+test("reconnect and foreground paths resync the unattended scheduler", () => {
+  const connectedStart = source.indexOf('case "connected":');
+  const connectedEnd = source.indexOf('case "unattended_state":', connectedStart);
+  assert.ok(connectedStart >= 0 && connectedEnd > connectedStart);
+  assert.match(source.slice(connectedStart, connectedEnd), /syncServerUnattendedRef\.current\?\.\(sid\)/);
+  assert.match(source, /syncServerUnattendedRef\.current = syncServerUnattendedState/);
+  const syncStart = source.indexOf("const syncServerUnattendedState =");
+  const effectStart = source.indexOf("useEffect(() => {", syncStart);
+  const effectEnd = source.indexOf("const toggleUnattended =", effectStart);
+  assert.ok(syncStart >= 0 && effectStart > syncStart && effectEnd > effectStart);
+  const recovery = source.slice(effectStart, effectEnd);
+  for (const event of ["visibilitychange", "online", "pageshow"]) assert.match(recovery, new RegExp(event));
+  assert.match(recovery, /runtimeAvailable/);
+});
+
 for (const phase of ["current", "preview", "unknown", "pending"]) {
   test(`initialization confirms the runtime branch before send without bypassing ${phase} ownership`, async () => {
     const branch = new BranchNavigation(); branch.reset("scope"); branch.observeRuntime("answer");

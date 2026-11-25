@@ -13,6 +13,7 @@ const menu = await readFile(new URL("./SessionSubprojectMenu.tsx", import.meta.u
 const pointerDnd = await readFile(new URL("../lib/session-subproject-pointer-dnd.ts", import.meta.url), "utf8")
 const subprojectRoute = await readFile(new URL("../app/api/subprojects/route.ts", import.meta.url), "utf8")
 const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8")
+const floatingSelect = await readFile(new URL("./ReaderFloatingSelect.tsx", import.meta.url), "utf8")
 
 function between(source, start, end) {
   const startIndex = source.indexOf(start)
@@ -246,6 +247,16 @@ test("subproject sorting is persisted and bucket surfaces are draggable", () => 
   assert.doesNotMatch(sidebar, /data-subproject-reorder-handle/)
   assert.match(sidebar, /reorderSubprojectIds/)
   assert.match(css, /\.session-activity-sidebar \.activity-subproject-header \{\s*padding-right: 10px !important;/)
+})
+
+test("project context menu keeps ReaderFloatingSelect portals inside the active menu", () => {
+  const projectMenu = between(activity, "function ProjectPathContextMenu", "interface FilterOption")
+  const manager = between(activity, "function ActivitySubprojectManager", "function useCoarsePointer")
+  assert.match(floatingSelect, /data-reader-floating-menu="true"/)
+  assert.match(projectMenu, /data-reader-floating-menu/)
+  assert.match(manager, /data-reader-floating-menu/)
+  assert.match(manager, /onChange=\{\(value\) => void changeSortMode\(value as SubprojectSortMode\)\}/)
+  assert.match(manager, /run\("PUT", \{ projectKey, mode, order: customOrder \}\)/)
 })
 
 test("subproject drop target covers entire bucket instead of header only", () => {

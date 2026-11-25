@@ -21,6 +21,9 @@ import {
 
 export const dynamic = "force-dynamic";
 
+const TRANSIENT_ASSIGNMENT_WAIT_MS = 2_000;
+const TRANSIENT_ASSIGNMENT_POLL_MS = 25;
+
 async function listAssignmentSessions() {
   const [active, archived, runtime] = await Promise.all([
     listAllSessions({ force: true }),
@@ -28,6 +31,23 @@ async function listAssignmentSessions() {
     attachSessionProjectInfo(getRpcSessionInfos()),
   ]);
   return mergeSessionLists([...active, ...archived], runtime, { includeArchived: true });
+}
+
+/**
+ * The first prompt can be acknowledged before message_end appends the user
+ * entry and the runtime writes its first JSONL file. Wait only for a running
+ * live runtime; an empty draft remains fail-closed as a transient session.
+ */
+async function persistLiveSessionBeforeAssignment(id: string): Promise<void> {
+  const liveSession = getRpcSession(id);
+  if (!liveSession) return;
+  const deadline = Date.now() + TRANSIENT_ASSIGNMENT_WAIT_MS;
+  while (true) {
+    liveSession.persistSessionFileNow();
+    const runtime = getRpcSessionInfos().find((candidate) => candidate.id === id);
+    if (!runtime?.transient || !liveSession.isRunning() || Date.now() >= deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, TRANSIENT_ASSIGNMENT_POLL_MS));
+  }
 }
 
 export async function PATCH(
@@ -45,8 +65,7 @@ export async function PATCH(
     }
     // Valid input must be durable before the transient/lineage/project lookup;
     // malformed requests must not materialize an otherwise transient session.
-    const liveSession = getRpcSession(id);
-    liveSession?.persistSessionFileNow();
+    await persistLiveSessionBeforeAssignment(id);
     const sessions = await listAssignmentSessions();
     const session = sessions.find((candidate) => candidate.id === id);
     if (!session) {

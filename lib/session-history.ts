@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AgentMessage, AssistantMessage, SessionEntry } from "./types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, SessionEntry, ToolResultMessage } from "./types";
 import { entryToUiMessage, getSessionDisplayEntries } from "./session-reader";
 import { getSessionMessageTextSegments } from "./session-search";
 import { formatUserQuestion, sessionDisplayInputs } from "./session-hover-preview";
@@ -7,6 +7,7 @@ import { findFinalAssistantIndex, isResponseTurnAnchor } from "./response-durati
 import { splitFinalAssistantBlocks } from "./message-display";
 import { historyOrderKeys, historyClientMessageIds } from "./transcript-order";
 import { historyImageUrl, readBase64ImageBlock } from "./session-history-media";
+import { extractTurnWrittenFiles } from "./turn-written-files";
 import {
   HISTORY_CONTENT_CHARACTERS,
   HISTORY_INDEX_NODES,
@@ -49,6 +50,7 @@ export class HistoryReadError extends Error {
 
 export interface HistoryProjection extends HistoryScope {
   readonly requestedLeafId?: string | null;
+  readonly cwd?: string;
   readonly entries: readonly SessionEntry[];
   readonly positions: ReadonlyMap<string, number>;
   readonly orderKeys: ReadonlyMap<string, HistoryOrderKey>;
@@ -63,6 +65,7 @@ interface ProjectionOptions {
   sessionId: string;
   leafId?: string | null;
   currentLeafId?: string | null;
+  cwd?: string;
   /** Derived from the same read snapshot, never from a second stat of the file. */
   sourceRevision?: string;
 }
@@ -203,7 +206,7 @@ export function createHistoryProjection(entries: SessionEntry[], options: Projec
   }
   return {
     sessionId: options.sessionId, leafId, revision: hash.digest("base64url"),
-    requestedLeafId: options.leafId, entries: selected, positions, orderKeys, clientMessageIds, nodes, questions, displayInputs, firstUserEntryId,
+    requestedLeafId: options.leafId, cwd: options.cwd, entries: selected, positions, orderKeys, clientMessageIds, nodes, questions, displayInputs, firstUserEntryId,
   };
 }
 
@@ -342,6 +345,13 @@ function turnStarts(projection: HistoryProjection): number[] {
 
 function collapsedTurn(projection: HistoryProjection, start: number, end: number, turnStart: number, turnEnd: number): WindowSlice {
   const messages = projection.entries.slice(turnStart, turnEnd).map(entry => messageWithMedia(projection, entry));
+  const turnContent: AssistantContentBlock[] = [];
+  const toolResults = new Map<string, ToolResultMessage>();
+  for (const message of messages) {
+    if (message.role === "assistant") turnContent.push(...message.content);
+    else if (message.role === "toolResult") toolResults.set(message.toolCallId, message);
+  }
+  const writtenFiles = extractTurnWrittenFiles(turnContent, toolResults, projection.cwd);
   const finals = new Set<number>();
   let groupStart = -1;
   for (let index = 0; index <= messages.length; index++) {
@@ -362,6 +372,7 @@ function collapsedTurn(projection: HistoryProjection, start: number, end: number
     const item = windowItem(projection, entry, index, answer ? { ...message, content: split.answerBlocks } as AssistantMessage : message, Boolean(answer));
     item.process = process;
     item.toolCallCount = message.role === "assistant" && Array.isArray(message.content) ? message.content.filter(block => block.type === "toolCall").length : 0;
+    if (finals.has(index) && writtenFiles.length > 0) item.writtenFiles = writtenFiles;
     if (process && !answer) { item.message = null; item.contentState = "placeholder"; item.deferred = []; }
     slice.items.push(item);
   }

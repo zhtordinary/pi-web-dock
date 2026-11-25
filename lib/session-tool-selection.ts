@@ -78,11 +78,11 @@ export function validateSessionToolSelection(tools: unknown): string[] {
   return parsed.tools;
 }
 
-export function createSessionToolSelectionEntry(tools: readonly string[], id: string, parentId: string | null = null) {
+export function createSessionToolSelectionEntry(policy: SessionToolSelectionPolicy, id: string, parentId: string | null = null) {
   return {
     type: "custom",
     customType: TOOL_SELECTION_TYPE,
-    data: { version: 1, tools: [...tools] } satisfies SessionToolSelectionData,
+    data: { version: 1, tools: [...policy.tools], ...(policy.strict ? { strict: true as const } : {}) } satisfies SessionToolSelectionData,
     id,
     parentId,
     timestamp: new Date().toISOString(),

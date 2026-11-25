@@ -22,6 +22,8 @@ import {
   useChatAppearance,
 } from "@/hooks/useChatAppearance";
 import { getPushSubscription, pushPermission, requestPushSubscription, unsubscribePushSubscription } from "@/lib/push-client";
+import type { ToolSettingsResponse } from "@/lib/api-types";
+import { SETTINGS_BUILTIN_TOOLS } from "@/lib/tool-presets";
 import type { Locale } from "@/lib/i18n/types";
 import {
   loadSessionOpenScroll,
@@ -81,6 +83,10 @@ export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionCh
   const [autoCompactionDefault, setAutoCompactionDefault] = useState<boolean | null>(null);
   const [autoCompactionSaving, setAutoCompactionSaving] = useState(false);
   const [autoCompactionError, setAutoCompactionError] = useState<string | null>(null);
+  const [toolSettings, setToolSettings] = useState<ToolSettingsResponse | null>(null);
+  const [toolSettingsError, setToolSettingsError] = useState<string | null>(null);
+  const [builtinToolsSaving, setBuiltinToolsSaving] = useState(false);
+  const [builtinToolsError, setBuiltinToolsError] = useState<string | null>(null);
   const [pushPermissionState, setPushPermissionState] = useState<NotificationPermission | "unsupported" | "remote-disabled">("unsupported");
   const [pushSubscribed, setPushSubscribed] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
@@ -104,6 +110,22 @@ export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionCh
     window.addEventListener("focus", refreshPushState);
     return () => window.removeEventListener("focus", refreshPushState);
   }, [refreshPushState]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch(apiFor(remotePeer, "tools/settings"), { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json() as ToolSettingsResponse & { error?: string };
+        if (!response.ok || data.error || !Array.isArray(data.builtinTools)) {
+          throw new Error(data.error ?? `HTTP ${response.status}`);
+        }
+        if (!cancelled) setToolSettings(data);
+      })
+      .catch((cause) => {
+        if (!cancelled) setToolSettingsError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { cancelled = true; };
+  }, [remotePeer]);
 
   const handlePushSubscribe = useCallback(async () => {
     if (remotePeer || pushBusy) return;
@@ -147,6 +169,31 @@ export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionCh
     setSessionOpenScrollState(value);
     setSessionOpenScroll(value);
   }, []);
+
+  const handleBuiltinToolChange = useCallback(async (name: string, enabled: boolean) => {
+    if (!toolSettings || builtinToolsSaving) return;
+    setBuiltinToolsSaving(true);
+    setBuiltinToolsError(null);
+    try {
+      const builtinTools = enabled
+        ? [...toolSettings.builtinTools, name]
+        : toolSettings.builtinTools.filter((tool) => tool !== name);
+      const response = await fetch(apiFor(remotePeer, "tools/settings"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ builtinTools }),
+      });
+      const data = await response.json() as ToolSettingsResponse & { error?: string };
+      if (!response.ok || data.error || !Array.isArray(data.builtinTools)) {
+        throw new Error(data.error ?? `HTTP ${response.status}`);
+      }
+      setToolSettings(data);
+    } catch (cause) {
+      setBuiltinToolsError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBuiltinToolsSaving(false);
+    }
+  }, [builtinToolsSaving, remotePeer, toolSettings]);
 
   const handleQuoteSelectionChange = useCallback((enabled: boolean) => {
     setQuoteSelection(enabled);
@@ -220,6 +267,7 @@ export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionCh
   const TOC_ITEMS = [
     { id: "general-sec-appearance", labelKey: "settings.tocAppearance" },
     { id: "general-sec-chat", labelKey: "settings.tocChat" },
+    { id: "general-sec-tools", labelKey: "settings.builtinTools" },
     { id: "general-sec-sound", labelKey: "settings.tocSound" },
     { id: "general-sec-push", labelKey: "settings.tocPush" },
     { id: "general-sec-language", labelKey: "settings.tocLanguage" },
@@ -509,6 +557,44 @@ export function GeneralConfig({ quoteSelectionEnabled = true, onQuoteSelectionCh
           </div>
 
         </div>
+      </section>
+
+      {/* 内置工具 */}
+      <section id="general-sec-tools" aria-labelledby="general-builtin-tools-heading" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div>
+          <h3 id="general-builtin-tools-heading" style={{ fontSize: 13, fontWeight: 600, margin: 0, color: "var(--text)" }}>
+            {t("settings.builtinTools")}
+          </h3>
+          <p id="general-builtin-tools-description" style={{ fontSize: 12, color: "var(--text-muted)", margin: "5px 0 0", lineHeight: 1.45 }}>
+            {t("settings.builtinToolsDescription")}
+          </p>
+        </div>
+        {toolSettings ? (
+          <div
+            className="settings-send-mode-options settings-builtin-tools"
+            role="group"
+            aria-label={t("settings.builtinTools")}
+            aria-describedby="general-builtin-tools-description"
+          >
+            {SETTINGS_BUILTIN_TOOLS.map((name) => (
+              <label key={name} className="settings-send-mode-option">
+                <input
+                  type="checkbox"
+                  checked={toolSettings.builtinTools.includes(name)}
+                  disabled={builtinToolsSaving}
+                  onChange={(event) => void handleBuiltinToolChange(name, event.target.checked)}
+                  className="sr-only"
+                />
+                <span className="settings-send-mode-label">
+                  {name === "bash" && toolSettings.powerShellEnabled ? "powershell" : name}
+                </span>
+              </label>
+            ))}
+          </div>
+        ) : toolSettingsError ? (
+          <p role="alert" style={{ margin: 0, color: "#ef4444", fontSize: 11 }}>{toolSettingsError}</p>
+        ) : null}
+        {builtinToolsError && <p role="alert" style={{ margin: 0, color: "#ef4444", fontSize: 11 }}>{builtinToolsError}</p>}
       </section>
 
       {/* 提示音 */}

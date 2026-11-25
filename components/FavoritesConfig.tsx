@@ -113,6 +113,7 @@ export function FavoritesConfig({
   const [draggingCatId, setDraggingCatId] = useState<string | null>(null);
   const [dragOverCategoryPillId, setDragOverCategoryPillId] = useState<string | null>(null);
   const dragHappenedRef = useRef(false);
+  const favoritesLoadRevisionRef = useRef(0);
 
   // Command details modal state
   const detailRequestRef = useRef(0);
@@ -138,10 +139,12 @@ export function FavoritesConfig({
 
   // Load favorites from API
   const loadFavorites = useCallback(async () => {
+    const revisionAtStart = favoritesLoadRevisionRef.current;
     try {
       setLoading(true);
       const res = await fetch(apiPath("slash-command-favorites"), { cache: "no-store" });
       const data = await res.json().catch(() => ({}));
+      if (revisionAtStart !== favoritesLoadRevisionRef.current) return;
       if (typeof data.filePath === "string") setFilePath(data.filePath);
       if (data.favorites && Array.isArray(data.favorites.categories)) {
         setCategories(data.favorites.categories);
@@ -151,16 +154,18 @@ export function FavoritesConfig({
             window.localStorage.setItem("pi-web:slash-command-favorites:v1", JSON.stringify(data.favorites.keys));
           }
         } catch (error) { void error; }
-        if (data.favorites.categories.length > 0 && !data.favorites.categories.some((c: SlashFavoriteCategory) => c.id === commandPickerTargetCatId)) {
-          setCommandPickerTargetCatId(data.favorites.categories[0].id);
-        }
+        setCommandPickerTargetCatId((current) => (
+          data.favorites.categories.some((c: SlashFavoriteCategory) => c.id === current)
+            ? current
+            : data.favorites.categories[0]?.id ?? current
+        ));
       }
     } catch (err) {
       console.warn("[FavoritesConfig] failed to load favorites:", err);
     } finally {
       setLoading(false);
     }
-  }, [apiPath, commandPickerTargetCatId]);
+  }, [apiPath]);
 
   // Load available commands (skills, custom prompts, etc.)
   const loadAvailableCommands = useCallback(async () => {
@@ -299,7 +304,27 @@ export function FavoritesConfig({
   useEffect(() => {
     loadFavorites();
     loadAvailableCommands();
-    const handleChanged = () => loadFavorites();
+    const handleChanged = (event: Event) => {
+      favoritesLoadRevisionRef.current += 1;
+      const detail = (event as CustomEvent<{ categories?: unknown; keys?: unknown }>).detail;
+      if (Array.isArray(detail?.categories)) {
+        const nextCategories = detail.categories as SlashFavoriteCategory[];
+        setCategories(nextCategories);
+        try {
+          window.localStorage.setItem("pi-web:slash-command-favorite-categories:v1", JSON.stringify(nextCategories));
+          if (Array.isArray(detail.keys)) {
+            window.localStorage.setItem("pi-web:slash-command-favorites:v1", JSON.stringify(detail.keys));
+          }
+        } catch (error) { void error; }
+        setCommandPickerTargetCatId((current) => (
+          nextCategories.some((category) => category.id === current)
+            ? current
+            : nextCategories[0]?.id ?? current
+        ));
+        return;
+      }
+      void loadFavorites();
+    };
     window.addEventListener(SLASH_FAVORITES_CHANGED_EVENT, handleChanged);
     return () => window.removeEventListener(SLASH_FAVORITES_CHANGED_EVENT, handleChanged);
   }, [loadFavorites, loadAvailableCommands]);
@@ -400,6 +425,7 @@ export function FavoritesConfig({
   // Save categories to backend
   const saveCategories = useCallback(
     async (nextCategories: SlashFavoriteCategory[]) => {
+      favoritesLoadRevisionRef.current += 1;
       try {
         setSaving(true);
         const res = await fetch(apiPath("slash-command-favorites"), {

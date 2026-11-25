@@ -76,6 +76,8 @@ test("FavoritesConfig defines canonical controls and subcategory management", ()
 
   // Event synchronization
   assert.ok(source.includes("SLASH_FAVORITES_CHANGED_EVENT"), "exports and listens to favorite changed event");
+  assert.ok(source.includes("favoritesLoadRevisionRef"), "ignores stale favorite reloads");
+  assert.match(source, /detail\?\.categories/, "applies pushed favorite state without waiting for a reload");
 
   const initialize = source.indexOf('JSON.stringify({ type: "initialize_runtime" })');
   const commands = source.indexOf('JSON.stringify({ type: "get_commands" })');

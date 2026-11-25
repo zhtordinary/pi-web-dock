@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { fsCache: false, jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { mergeAssociatedWorktreeSessions, preferredWorktreePath } = await jiti.import("./WorktreeGraphOverlay.tsx");
+const { compactAssociationRelation, mergeAssociatedWorktreeSessions, preferredWorktreePath } = await jiti.import("./WorktreeGraphOverlay.tsx");
 const { useAppShellWorktree } = await jiti.import("./app-shell-worktree.tsx");
 const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const worktreeShell = await readFile(new URL("./app-shell-worktree.tsx", import.meta.url), "utf8");
@@ -106,7 +106,37 @@ test("verified worktree creators appear in the associated-session list", () => {
   assert.doesNotMatch(graph, /data-testid="worktree-creation-history"|worktreeGraph\.creationHistory/);
   assert.match(graph, /associatedSessionsIncomplete/);
   assert.match(graph, /associatedSessionsRefreshKey, fetchCreationHistory/);
+  assert.match(graph, /sourceDetails/);
+  assert.match(graph, /sourceCreatorStructured/);
+  assert.match(graph, /sourceCreatorHistory/);
+  assert.match(graph, /sourceTaskRoot/);
+  assert.match(graph, /creationHistory\?\.unknown/);
   assert.match(docs, /whose `cwd` matches the selected worktree path or is inside it, sessions whose successful tool history confirms they created that worktree/);
+});
+
+test("structured creators win over legacy history while task-root remains separate", () => {
+  const result = mergeAssociatedWorktreeSessions("/repo/.worktrees/task", [], {
+    partial: false,
+    records: [
+      { worktreePath: "/repo/.worktrees/task", sessionId: "owner", createdAt: "2026-01-01", source: "history" },
+      { worktreePath: "/repo/.worktrees/task", sessionId: "task-owner", createdAt: "2026-01-01", source: "history" },
+    ],
+    bindings: [
+      { worktreePath: "/repo/.worktrees/task", sessionId: "owner", relation: "creator", createdAt: "2026-01-01", source: "structured" },
+      { worktreePath: "/repo/.worktrees/task", sessionId: "task-owner", relation: "task-root", createdAt: "2026-01-01", source: "structured" },
+    ],
+  });
+  assert.deepEqual([...result].sort((left, right) => left.id.localeCompare(right.id)), [
+    { id: "owner", title: "owner", relations: ["creator"], sources: ["structured"] },
+    { id: "task-owner", title: "task-owner", relations: ["creator", "task-root"], sources: ["history", "task-root"] },
+  ]);
+});
+
+test("compacts associated-session relations to one primary label", () => {
+  assert.equal(compactAssociationRelation(["cwd", "child-cwd"]), "cwd");
+  assert.equal(compactAssociationRelation(["child-cwd", "child-task-root"]), "child");
+  assert.equal(compactAssociationRelation(["creator", "task-root"]), "task-root");
+  assert.equal(compactAssociationRelation(["creator"]), "creator");
 });
 
 test("cwd sessions and verified creators share one list without duplicate IDs", () => {
@@ -123,10 +153,10 @@ test("cwd sessions and verified creators share one list without duplicate IDs", 
     { worktreePath: "/repo/.worktrees/task", sessionId: "creator-session", sessionName: "Duplicate binding", relation: "task-root", createdAt: "2026-01-01" },
   ] });
   assert.deepEqual(result, [
-    { id: "cwd-session", title: "Runs here", status: "running", relations: ["cwd", "creator"] },
-    { id: "creator-session", title: "Created it", status: "idle", relations: ["creator", "task-root"] },
-    { id: "history-only", title: "History session", relations: ["creator"] },
-    { id: "task-owner", title: "Task owner", relations: ["task-root"] },
+    { id: "cwd-session", title: "Runs here", status: "running", relations: ["cwd", "creator"], sources: ["cwd", "history"] },
+    { id: "creator-session", title: "Created it", status: "idle", relations: ["creator", "task-root"], sources: ["history", "task-root"] },
+    { id: "history-only", title: "History session", relations: ["creator"], sources: ["history"] },
+    { id: "task-owner", title: "Task owner", relations: ["task-root"], sources: ["task-root"] },
   ]);
 });
 
@@ -141,7 +171,7 @@ test("collapses subagent-associated sessions to their owning main session", () =
     { worktreePath: "/repo/.worktrees/task", sessionId: "grandchild", sessionName: "Child creator", createdAt: "2026-01-01" },
   ] });
   assert.deepEqual(result, [
-    { id: "main", title: "Main session", status: "idle", relations: ["child-cwd", "child-creator"] },
+    { id: "main", title: "Main session", status: "idle", relations: ["child-cwd", "child-creator"], sources: ["cwd", "history"] },
   ]);
 });
 

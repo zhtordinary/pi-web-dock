@@ -59,13 +59,17 @@ interface Props {
 type FilterTab = "all" | "active" | "at_base";
 
 type WorktreeAssociationRelation = "cwd" | "creator" | "task-root" | "child-cwd" | "child-creator" | "child-task-root";
+type WorktreeAssociationSource = "cwd" | "history" | "structured" | "task-root";
 
 interface WorktreeCreationHistory {
-  records: Array<{ worktreePath: string; sessionId: string; createdAt: string; sessionName?: string }>;
+  records: Array<{ worktreePath: string; sessionId: string; createdAt: string; sessionName?: string; source?: "history" }>;
   provisionalRecords?: Array<{ worktreePath: string; sessionId: string; createdAt: string }>;
-  bindings?: Array<{ worktreePath: string; sessionId: string; relation: "creator" | "task-root"; createdAt: string; sessionName?: string }>;
+  bindings?: Array<{ worktreePath: string; sessionId: string; relation: "creator" | "task-root"; createdAt: string; sessionName?: string; source?: "structured" }>;
   priorityPending?: boolean;
   partial: boolean;
+  incomplete?: boolean;
+  unknown?: boolean;
+  state?: "complete" | "incomplete" | "unknown";
   failure?: "entry_too_large" | "unavailable";
   progress?: { running: boolean; processedBytes: number; totalBytes: number };
 }
@@ -75,6 +79,7 @@ interface WorktreeAssociatedSession {
   title: string;
   status?: SessionActivityItem["status"];
   relations: WorktreeAssociationRelation[];
+  sources: WorktreeAssociationSource[];
 }
 
 interface GraphSnapshot {
@@ -172,7 +177,12 @@ function normalizeWorktreePath(value: string): string {
 function sameWorktreePath(left: string, right: string): boolean {
   const a = normalizeWorktreePath(left);
   const b = normalizeWorktreePath(right);
-  return /^[a-z]:\//i.test(a) && /^[a-z]:\//i.test(b) ? a.toLowerCase() === b.toLowerCase() : a === b;
+  return associationPathKey(a) === associationPathKey(b);
+}
+
+function associationPathKey(value: string): string {
+  const normalized = normalizeWorktreePath(value);
+  return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized;
 }
 
 function worktreeForCwd<T extends { path: string }>(worktrees: readonly T[], cwd: string | null | undefined): T | null {
@@ -194,7 +204,11 @@ export function preferredWorktreePath(
   history: WorktreeCreationHistory | null,
   navigationPath?: string | null,
 ): string | null {
-  const historyMatches = [...(history?.records ?? []), ...(history?.provisionalRecords ?? [])]
+  const historyMatches = [
+    ...(history?.records ?? []),
+    ...(history?.bindings ?? []).filter((record) => record.relation === "creator"),
+    ...(history?.provisionalRecords ?? []),
+  ]
     .filter((record) => record.sessionId === currentSessionId)
     .map((record) => worktrees.find((worktree) => sameWorktreePath(worktree.path, record.worktreePath)))
     .filter((worktree): worktree is WorktreeGraphItem => Boolean(worktree));
@@ -213,6 +227,10 @@ function addAssociationRelation(item: WorktreeAssociatedSession, relation: Workt
   if (!item.relations.includes(relation)) item.relations.push(relation);
 }
 
+function addAssociationSource(item: WorktreeAssociatedSession, source: WorktreeAssociationSource): void {
+  if (!item.sources.includes(source)) item.sources.push(source);
+}
+
 export function mergeAssociatedWorktreeSessions(
   selectedPath: string | null,
   sessions: readonly SessionActivityItem[],
@@ -229,44 +247,62 @@ export function mergeAssociatedWorktreeSessions(
     for (const subagent of family.subagents) ownerBySessionId.set(subagent.id, owner);
   }
   const associated = new Map<string, WorktreeAssociatedSession>();
-  const ensure = (sessionId: string, title: string, status: SessionActivityItem["status"] | undefined, relation: WorktreeAssociationRelation) => {
+  const ensure = (sessionId: string, title: string, status: SessionActivityItem["status"] | undefined, relation: WorktreeAssociationRelation, source: WorktreeAssociationSource) => {
     const existing = associated.get(sessionId);
     if (existing) {
       addAssociationRelation(existing, relation);
+      addAssociationSource(existing, source);
       if (existing.status === undefined && status !== undefined) existing.status = status;
       return;
     }
-    associated.set(sessionId, { id: sessionId, title, ...(status ? { status } : {}), relations: [relation] });
+    associated.set(sessionId, { id: sessionId, title, ...(status ? { status } : {}), relations: [relation], sources: [source] });
   };
-  const ensureActivityOwner = (activity: SessionActivityItem, relation: WorktreeAssociationRelation) => {
+  const ensureActivityOwner = (activity: SessionActivityItem, relation: WorktreeAssociationRelation, source: WorktreeAssociationSource) => {
     const owner = ownerBySessionId.get(activity.session.id);
     if (!owner) return;
     const actualRelation = owner.session.id === activity.session.id ? relation : `child-${relation}` as WorktreeAssociationRelation;
-    ensure(owner.session.id, associatedSessionTitle(owner.session), owner.status, actualRelation);
+    ensure(owner.session.id, associatedSessionTitle(owner.session), owner.status, actualRelation, source);
   };
   for (const item of sessions) {
-    if (worktreeForCwd(worktrees, item.session.cwd)?.path === selectedPath) ensureActivityOwner(item, "cwd");
+    if (worktreeForCwd(worktrees, item.session.cwd)?.path === selectedPath) ensureActivityOwner(item, "cwd", "cwd");
   }
+  const structuredKeys = new Set((history?.bindings ?? [])
+    .filter((record) => record.relation === "creator")
+    .map((record) => `${record.sessionId}:${associationPathKey(record.worktreePath)}`));
   for (const record of history?.records ?? []) {
-    if (!sameWorktreePath(record.worktreePath, selectedPath)) continue;
+    if (!sameWorktreePath(record.worktreePath, selectedPath)
+      || structuredKeys.has(`${record.sessionId}:${associationPathKey(record.worktreePath)}`)) continue;
     const activity = sessionsById.get(record.sessionId);
     if (activity) {
-      ensureActivityOwner(activity, "creator");
+      ensureActivityOwner(activity, "creator", "history");
     } else {
-      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, "creator");
+      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, "creator", "history");
     }
   }
   for (const record of history?.bindings ?? []) {
     if (!sameWorktreePath(record.worktreePath, selectedPath)) continue;
     const activity = sessionsById.get(record.sessionId);
     const relation = record.relation === "creator" ? "creator" : "task-root";
+    const source = record.relation === "creator" ? "structured" : "task-root";
     if (activity) {
-      ensureActivityOwner(activity, relation);
+      ensureActivityOwner(activity, relation, source);
     } else {
-      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, relation);
+      ensure(record.sessionId, record.sessionName || record.sessionId, undefined, relation, source);
     }
   }
   return [...associated.values()];
+}
+
+type WorktreeAssociationDisplayRelation = "cwd" | "child" | "task-root" | "creator";
+
+export function compactAssociationRelation(
+  relations: readonly WorktreeAssociationRelation[],
+): WorktreeAssociationDisplayRelation | null {
+  if (relations.includes("cwd")) return "cwd";
+  if (relations.some((relation) => relation.startsWith("child-"))) return "child";
+  if (relations.includes("task-root")) return "task-root";
+  if (relations.includes("creator")) return "creator";
+  return null;
 }
 
 function associationRelationLabel(
@@ -280,6 +316,30 @@ function associationRelationLabel(
     case "child-cwd": return translate("worktreeGraph.relationChildCwd");
     case "child-creator": return translate("worktreeGraph.relationChildCreator");
     case "child-task-root": return translate("worktreeGraph.relationChildTaskRoot");
+  }
+}
+
+function compactAssociationRelationLabel(
+  relation: WorktreeAssociationDisplayRelation,
+  translate: (key: string) => string,
+): string {
+  switch (relation) {
+    case "child": return translate("worktreeGraph.relationChild");
+    case "creator": return translate("worktreeGraph.relationCreated");
+    case "task-root": return translate("worktreeGraph.relationTask");
+    default: return associationRelationLabel(relation, translate);
+  }
+}
+
+function associationSourceLabel(
+  source: WorktreeAssociationSource,
+  translate: (key: string) => string,
+): string {
+  switch (source) {
+    case "cwd": return translate("worktreeGraph.sourceCwd");
+    case "history": return translate("worktreeGraph.sourceCreatorHistory");
+    case "structured": return translate("worktreeGraph.sourceCreatorStructured");
+    case "task-root": return translate("worktreeGraph.sourceTaskRoot");
   }
 }
 
@@ -561,6 +621,7 @@ export function WorktreeGraphOverlay({
     if (!graph || !selectedPath) return null;
     return graph.worktrees.find((w) => w.path === selectedPath) ?? null;
   }, [graph, selectedPath]);
+  const selectedWorktreeCopyKey = selectedWorktree ? `path:${selectedWorktree.path}` : null;
 
   const selectedWorktreeSessions = useMemo(
     () => mergeAssociatedWorktreeSessions(selectedPath, associatedSessions, creationHistoryFresh ? creationHistory : null, graph?.worktrees),
@@ -569,10 +630,17 @@ export function WorktreeGraphOverlay({
   const provisionalSelection = Boolean(!selectionManuallySet && creationHistoryFresh && selectedPath && currentSessionId
     && creationHistory?.provisionalRecords?.some((record) => record.sessionId === currentSessionId && sameWorktreePath(record.worktreePath, selectedPath))
     && !creationHistory.records.some((record) => record.sessionId === currentSessionId && sameWorktreePath(record.worktreePath, selectedPath)));
+  const currentCreatorBinding = creationHistory?.bindings?.some((record) => record.sessionId === currentSessionId && record.relation === "creator") ?? false;
   const unknownSelection = Boolean(!selectionManuallySet && currentSessionId && (creationHistoryError
-    || (creationHistory?.failure && !creationHistory.records.some((record) => record.sessionId === currentSessionId))));
+    || ((creationHistory?.unknown || creationHistory?.failure) && !creationHistory.records.some((record) => record.sessionId === currentSessionId)
+      && !currentCreatorBinding)));
   const workspaceActionsDisabled = !graphFresh || provisionalSelection || unknownSelection;
   const associatedSessionsIncomplete = Boolean(associatedSessionsError || creationHistoryError || creationHistory?.partial);
+  const associatedSessionsWarning = creationHistory?.failure === "entry_too_large"
+    ? "worktreeGraph.associatedSessionsEntryTooLarge"
+    : creationHistory?.unknown && !creationHistory.failure && !associatedSessionsError && !creationHistoryError
+      ? "worktreeGraph.associatedSessionsUnknown"
+      : selectedWorktreeSessions.length === 0 ? "worktreeGraph.associatedSessionsUnavailable" : "worktreeGraph.associatedSessionsPartial";
 
   const githubUrl = graph?.githubUrl ?? null;
   const githubRepo = graph?.githubRepository ?? null;
@@ -621,10 +689,11 @@ export function WorktreeGraphOverlay({
   }, [selectedPath, projectRoot, remotePeer, open, graph, graphFresh]);
 
   const handleCopy = useCallback((key: string, text: string) => {
+    const copyKey = `${key}:${text}`;
     void copyText(text);
-    setCopiedKey(key);
+    setCopiedKey(copyKey);
     setTimeout(() => {
-      setCopiedKey((curr) => (curr === key ? null : curr));
+      setCopiedKey((curr) => (curr === copyKey ? null : curr));
     }, 1800);
   }, []);
 
@@ -673,8 +742,11 @@ export function WorktreeGraphOverlay({
   );
   const waitingForCurrentSession = Boolean(currentSessionId && !creationHistoryError
     && (!creationHistoryFresh || (creationHistory?.priorityPending ?? creationHistory?.progress?.running ?? false)));
-  const hasCurrentEvidence = creationHistoryFresh && [...(creationHistory?.records ?? []), ...(creationHistory?.provisionalRecords ?? [])]
-    .some((record) => record.sessionId === currentSessionId && graph?.worktrees.some((worktree) => sameWorktreePath(worktree.path, record.worktreePath)));
+  const hasCurrentEvidence = creationHistoryFresh && [
+    ...(creationHistory?.records ?? []),
+    ...(creationHistory?.bindings?.filter((record) => record.relation === "creator") ?? []),
+    ...(creationHistory?.provisionalRecords ?? []),
+  ].some((record) => record.sessionId === currentSessionId && graph?.worktrees.some((worktree) => sameWorktreePath(worktree.path, record.worktreePath)));
 
   const filteredWorktrees = useMemo(() => {
     if (!graph) return [];
@@ -1594,12 +1666,12 @@ export function WorktreeGraphOverlay({
                     style={{
                       background: "none",
                       border: "none",
-                      color: copiedKey === "path" ? "var(--accent)" : "var(--text-dim)",
+                      color: copiedKey === selectedWorktreeCopyKey ? "var(--accent)" : "var(--text-dim)",
                       cursor: "pointer",
                       padding: 2,
                     }}
                   >
-                    {copiedKey === "path" ? <Check size={12} /> : <Copy size={12} />}
+                    {copiedKey === selectedWorktreeCopyKey ? <Check size={12} /> : <Copy size={12} />}
                   </button>
                   {selectedWorktreeGithubUrl && (
                     <a
@@ -1632,28 +1704,39 @@ export function WorktreeGraphOverlay({
                 </div>
                 {!associatedSessionsLoading && selectedWorktreeSessions.length > 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                      {selectedWorktreeSessions.map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          data-worktree-associated-session={item.id}
-                          title={item.title}
-                          aria-label={item.title}
-                          disabled={!graphFresh}
-                          onClick={() => {
-                            onOpenSession(item.id, selectedWorktree.path);
-                          }}
-                          style={{ minWidth: 0, width: "100%", padding: "7px 8px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg)", color: "inherit", font: "inherit", textAlign: "left", cursor: "pointer", overflow: "hidden" }}
-                        >
-                          <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 11, fontWeight: 600 }}>{item.title}</span>
-                          <span style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, minWidth: 0, color: "var(--text-dim)", fontSize: 10, lineHeight: 1.3 }}>
-                            <span title={item.id} style={{ flexShrink: 0, fontFamily: "var(--font-mono)" }}>{t("worktreeGraph.sessionId")} #{item.id.slice(0, 8)}</span>
-                            {item.id === currentSessionId && <span>{t("worktreeGraph.currentSession")}</span>}
-                            {item.relations.map((relation) => <span key={relation} style={{ flexShrink: 0, padding: "1px 4px", borderRadius: 3, background: "var(--bg-hover)", color: "var(--text-muted)" }}>{associationRelationLabel(relation, t)}</span>)}
-                            {item.status && <><span aria-hidden="true">·</span><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: sessionActivityStatusColor(item.status) }}>{item.relations.some((relation) => relation.startsWith("child-")) ? t("worktreeGraph.ownerStatus", { status: t(`sessionActivity.status.${item.status}`) }) : t(`sessionActivity.status.${item.status}`)}</span></>}
-                          </span>
-                        </button>
-                      ))}
+                      {selectedWorktreeSessions.map((item) => {
+                        const compactRelation = compactAssociationRelation(item.relations);
+                        const relationDetails = item.relations.map((relation) => associationRelationLabel(relation, t)).join(" · ");
+                        const sourceDetails = item.sources.map((source) => associationSourceLabel(source, t)).join(" · ");
+                        const rowLabel = [item.title, relationDetails, sourceDetails].filter(Boolean).join(" · ");
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            data-worktree-associated-session={item.id}
+                            title={rowLabel}
+                            aria-label={rowLabel}
+                            disabled={!graphFresh}
+                            onClick={() => {
+                              onOpenSession(item.id, selectedWorktree.path);
+                            }}
+                            style={{ minWidth: 0, width: "100%", padding: "7px 8px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg)", color: "inherit", font: "inherit", textAlign: "left", cursor: "pointer", overflow: "hidden" }}
+                          >
+                            <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 11, fontWeight: 600 }}>{item.title}</span>
+                            <span style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3, minWidth: 0, color: "var(--text-dim)", fontSize: 10, lineHeight: 1.3 }}>
+                              <span title={item.id} style={{ flexShrink: 0, fontFamily: "var(--font-mono)" }}>{t("worktreeGraph.sessionId")} #{item.id.slice(0, 8)}</span>
+                              {item.id === currentSessionId && <span>{t("worktreeGraph.currentSessionShort")}</span>}
+                              {compactRelation && (
+                                <span title={relationDetails || undefined} style={{ flexShrink: 0, padding: "1px 4px", borderRadius: 3, background: "var(--bg-hover)", color: "var(--text-muted)" }}>
+                                  {compactAssociationRelationLabel(compactRelation, t)}
+                                </span>
+                              )}
+                              {sourceDetails && <span title={sourceDetails} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-muted)" }}>{sourceDetails}</span>}
+                              {item.status && <><span aria-hidden="true">·</span><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: sessionActivityStatusColor(item.status) }}>{item.relations.some((relation) => relation.startsWith("child-")) ? t("worktreeGraph.ownerStatus", { status: t(`sessionActivity.status.${item.status}`) }) : t(`sessionActivity.status.${item.status}`)}</span></>}
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                 )}
                 {associatedSessionsLoading || creationHistoryLoading ? (
@@ -1663,11 +1746,11 @@ export function WorktreeGraphOverlay({
                       : t("worktreeGraph.associatedSessionsLoading")}
                   </div>
                 ) : selectedWorktreeSessions.length === 0 && associatedSessionsIncomplete ? (
-                  <div role="status" style={{ fontSize: 11, color: "#b45309", lineHeight: 1.4 }}>{t(creationHistory?.failure === "entry_too_large" ? "worktreeGraph.associatedSessionsEntryTooLarge" : "worktreeGraph.associatedSessionsUnavailable")}</div>
+                  <div role="status" style={{ fontSize: 11, color: "#b45309", lineHeight: 1.4 }}>{t(associatedSessionsWarning)}</div>
                 ) : selectedWorktreeSessions.length === 0 ? (
                   <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.4 }}>{t("worktreeGraph.noAssociatedSessions")}</div>
                 ) : associatedSessionsIncomplete ? (
-                  <div role="status" style={{ fontSize: 10, color: "#b45309", lineHeight: 1.4, marginTop: 4 }}>{t(creationHistory?.failure === "entry_too_large" ? "worktreeGraph.associatedSessionsEntryTooLarge" : "worktreeGraph.associatedSessionsPartial")}</div>
+                  <div role="status" style={{ fontSize: 10, color: "#b45309", lineHeight: 1.4, marginTop: 4 }}>{t(associatedSessionsWarning)}</div>
                 ) : null}
               </section>
 

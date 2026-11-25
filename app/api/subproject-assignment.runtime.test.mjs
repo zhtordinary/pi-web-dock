@@ -31,7 +31,7 @@ test.after(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-async function assignLiveSession({ content, projectPath = project, sessionsPath = sessions, body: requestBody, label = "pi-web Reader", seedMessage = true } = {}) {
+async function assignLiveSession({ content, projectPath = project, sessionsPath = sessions, body: requestBody, label = "pi-web Reader", seedMessage = true, running = false, onPersist } = {}) {
   const manager = SessionManager.create(projectPath, sessionsPath);
   const sessionId = manager.getSessionId();
   const sessionFile = manager.getSessionFile();
@@ -40,14 +40,15 @@ async function assignLiveSession({ content, projectPath = project, sessionsPath 
   let persistCalls = 0;
   globalThis.__piSessions = new Map([[sessionId, {
     isAlive: () => true,
-    isRunning: () => false,
+    isRunning: () => running,
     cwd: projectPath,
     sessionFile,
     sessionId,
     inner: { sessionManager: manager },
     persistSessionFileNow: () => {
       persistCalls += 1;
-      persistSessionFile(manager);
+      if (onPersist) onPersist({ manager, persistCalls });
+      else persistSessionFile(manager);
     },
   }]]);
 
@@ -74,6 +75,29 @@ test("assigning a prompted live skill session persists it before transient valid
   assert.equal(responseBody.session.subprojectId, result.subproject.id);
   assert.deepEqual(responseBody.relatedSessionIds, [result.sessionId]);
   assert.match(await readFile(result.sessionFile, "utf8"), /<skill name=code-review>/);
+});
+
+test("waits for a running new session's first message before assigning it", async (t) => {
+  if (process.platform === "win32") { t.skip("SDK custom-session persistence fixture is not stable on Windows"); return; }
+  let firstMessagePersisted = false;
+  const result = await assignLiveSession({
+    content: "delayed prompt",
+    label: "delayed prompt",
+    seedMessage: false,
+    running: true,
+    onPersist: ({ manager, persistCalls }) => {
+      if (persistCalls < 2 || firstMessagePersisted) return;
+      manager.appendMessage({ role: "user", content: "delayed prompt", timestamp: Date.now() });
+      persistSessionFile(manager);
+      firstMessagePersisted = true;
+    },
+  });
+  const responseBody = await result.response.json();
+  assert.equal(result.response.status, 200, JSON.stringify(responseBody));
+  assert.equal(firstMessagePersisted, true);
+  assert.ok(result.persistCalls() >= 2);
+  assert.equal(responseBody.session.subprojectId, result.subproject.id);
+  assert.ok(readSubprojectState().assignments.some((item) => item.sessionId === result.sessionId));
 });
 
 test("malformed assignment input does not materialize a transient session", async () => {

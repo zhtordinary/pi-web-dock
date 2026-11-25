@@ -5,7 +5,7 @@ import { forkSessionName, sessionDisplayTitle } from "./session-fork-name";
 import { scanSessionFileInfo } from "./session-list-scanner";
 import { readSubagentRun } from "./subagents";
 import { SIDE_BOUNDARY_MESSAGE_TYPE, SIDE_SESSION_NAME } from "./session-family.ts";
-import { createSessionToolSelectionEntry, readSessionToolSelection, TOOL_SELECTION_TYPE } from "./session-tool-selection";
+import { appendClearedSessionToolSelection, appendSessionToolSelection, createSessionToolSelectionEntry, readSessionToolSelectionPolicy, TOOL_SELECTION_TYPE, type SessionToolSelectionPolicy } from "./session-tool-selection";
 import { createSideBoundaryEntry, createSideMetadataEntry, readSideRelation, SIDE_META_TYPE } from "./side-session";
 import { promptCacheLineageForCopy, PROMPT_CACHE_LINEAGE_HEADER, readPromptCacheLineage } from "./prompt-cache-lineage";
 import type { SessionEntry } from "./types";
@@ -177,7 +177,7 @@ function copySessionBranch(
   liveLeafId: string | null | undefined,
   nameFor: (source: SessionManager) => string | undefined,
   allowSide = false,
-): { sessionId: string; path: string; name: string | undefined; sourceSessionId: string; toolSelection: string[] | undefined } {
+): { sessionId: string; path: string; name: string | undefined; sourceSessionId: string; toolSelection: SessionToolSelectionPolicy | undefined } {
   const live = liveLeafId !== undefined;
   // SessionManager.open() of a missing path silently starts an empty session.
   if (!existsSync(sourcePath)) {
@@ -218,7 +218,7 @@ function copySessionBranch(
   // SAFETY: SessionManager entries use the same persisted SessionEntry wire shape as Reader.
   const sourceHeader = manager.getHeader();
   const promptCacheLineage = promptCacheLineageForCopy(sourceSessionId, sourceHeader);
-  const toolSelection = readSessionToolSelection(manager.getEntries() as unknown as SessionEntry[]);
+  const toolSelection = readSessionToolSelectionPolicy(manager.getEntries() as unknown as SessionEntry[]);
   const path = manager.createBranchedSession(leafId);
   // SessionManager intentionally creates a fresh header for a branch. Keep
   // the cache lineage while leaving the new runtime/session identity intact.
@@ -227,6 +227,12 @@ function copySessionBranch(
   if (path && existsSync(path) && childHeader && promptCacheLineage && readPromptCacheLineage(childHeader) === promptCacheLineage) {
     const content = [childHeader, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
     writeFileSync(path, content, { encoding: "utf8" });
+  }
+  // Tool selections are session-wide even when the copied branch predates the latest selection.
+  const branchToolSelection = readSessionToolSelectionPolicy(manager.getEntries() as unknown as SessionEntry[]);
+  if (JSON.stringify(branchToolSelection) !== JSON.stringify(toolSelection)) {
+    if (toolSelection) appendSessionToolSelection(manager, toolSelection.tools, { strict: toolSelection.strict });
+    else appendClearedSessionToolSelection(manager);
   }
   // Appended to the copy's file; a shell-only copy keeps it in memory until
   // it is written below.

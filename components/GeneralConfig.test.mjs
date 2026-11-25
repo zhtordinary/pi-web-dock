@@ -39,6 +39,15 @@ test("the default quote shortcut shows a translated label", () => {
   }
 });
 
+test("GeneralConfig exposes the global built-in tool controls", () => {
+  assert.match(source, /SETTINGS_BUILTIN_TOOLS/);
+  assert.match(source, /apiFor\(remotePeer, "tools\/settings"\)/);
+  assert.match(source, /body: JSON\.stringify\(\{ builtinTools \}\)/);
+  assert.match(source, /settings\.builtinToolsDescription/);
+  assert.match(source, /type="checkbox"/);
+  assert.match(source, /settings-builtin-tools/);
+});
+
 test("GeneralConfig owns explicit Web Push subscription controls", () => {
   assert.match(source, /requestPushSubscription/);
   assert.match(source, /unsubscribePushSubscription/);

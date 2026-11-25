@@ -64,7 +64,7 @@ type Props = {
   /** Kept for the branch-aware caller; ordinary Side sessions are keyed by session id. */
   historyRevision?: number;
   onClose: () => void;
-  onQuoteToComposer?: (text: string) => void;
+  onQuoteToComposer?: (text: string) => boolean | undefined;
   mainBusy?: boolean;
   activeBranchId?: string;
   activeParentId?: string | null;
@@ -82,7 +82,7 @@ type Props = {
 };
 
 const sidekickActionButtonStyle: React.CSSProperties = {
-  background: "none",
+  background: "var(--sidekick-action-background, transparent)",
   border: "none",
   color: "var(--text-muted)",
   cursor: "pointer",
@@ -92,7 +92,6 @@ const sidekickActionButtonStyle: React.CSSProperties = {
   borderRadius: 3,
   display: "inline-flex",
   alignItems: "center",
-  transition: "color 0.12s, background-color 0.12s",
 };
 
 function sideSessionListUrl(sessionId: string, remotePeer?: string | null): string {
@@ -250,7 +249,45 @@ function ImageAttachments({
   );
 }
 
-export function SidekickQuestion({ question, images, copied, onCopy, onQuote }: { question: string; images?: SidekickImage[]; copied: boolean; onCopy: () => void; onQuote?: () => void }) {
+export function SidekickActionButton({ kind, title, onAction }: {
+  kind: "copy" | "quote";
+  title: string;
+  onAction: () => boolean | Promise<boolean>;
+}) {
+  const { t } = useI18n();
+  const [feedback, setFeedback] = useState<"success" | "failed" | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attempt = useRef(0);
+  useEffect(() => () => {
+    attempt.current += 1;
+    if (timer.current !== null) clearTimeout(timer.current);
+  }, []);
+  const activate = async () => {
+    const current = ++attempt.current;
+    if (timer.current !== null) clearTimeout(timer.current);
+    setFeedback(null);
+    let success = false;
+    try { success = await onAction(); } catch { success = false; }
+    if (current !== attempt.current) return;
+    setFeedback(success ? "success" : "failed");
+    timer.current = setTimeout(() => { setFeedback(null); timer.current = null; }, 1500);
+  };
+  const label = feedback === "success"
+    ? t(kind === "copy" ? "i18n.copied" : "sidekick.quoted")
+    : feedback === "failed"
+      ? t(kind === "copy" ? "sidekick.copyFailed" : "sidekick.quoteFailed")
+      : t(kind === "copy" ? "i18n.copy" : "sidekick.quote");
+  return (
+    <button type="button" className="sidekick-message-action" data-feedback={feedback ?? undefined}
+      onClick={() => void activate()} aria-label={feedback ? `${title}: ${label}` : title}
+      title={feedback === "failed" && kind === "quote" ? t("sidekick.quoteFailedHint") : title}
+      style={{ ...sidekickActionButtonStyle, color: feedback === "failed" ? "var(--danger, #dc2626)" : feedback === "success" || kind === "quote" ? "var(--accent)" : "var(--text-muted)" }}>
+      <span aria-live="polite">{label}</span>
+    </button>
+  );
+}
+
+export function SidekickQuestion({ question, images, onQuote }: { question: string; images?: SidekickImage[]; onQuote?: () => boolean }) {
   const { t } = useI18n();
   return (
     <div style={{ alignSelf: "flex-end", display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "100%", minWidth: 0 }}>
@@ -259,8 +296,8 @@ export function SidekickQuestion({ question, images, copied, onCopy, onQuote }: 
         <ImageAttachments images={images} />
       </div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4, marginTop: 4 }}>
-        <button type="button" onClick={onCopy} aria-label={t("sidekick.copyQuestion")} style={sidekickActionButtonStyle}>{copied ? t("i18n.copied") : t("i18n.copy")}</button>
-        {onQuote && <button type="button" onClick={onQuote} aria-label={t("sidekick.quoteQuestion")} style={{ ...sidekickActionButtonStyle, color: "var(--accent)" }}>{t("sidekick.quote")}</button>}
+        <SidekickActionButton kind="copy" title={t("sidekick.copyQuestion")} onAction={() => copyText(question)} />
+        {onQuote && <SidekickActionButton kind="quote" title={t("sidekick.quoteQuestion")} onAction={onQuote} />}
       </div>
     </div>
   );
@@ -509,7 +546,7 @@ function SidekickComposer({
       {modelPortal}{thinkingPortal}
       <div data-sidekick-composer="true" style={{ padding: "6px 8px 8px", background: "var(--bg)", display: "flex", flexDirection: "column", flex: "0 1 auto", minHeight: 0, maxHeight: "min(44%, 50dvh)", overflow: "hidden" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: "1 1 auto", minHeight: 64, overflow: "hidden", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, padding: "8px 8px 6px", position: "relative" }}>
-          <textarea ref={textareaRef} value={draft} onChange={(event) => { setDraft(event.target.value); onError(null); }} onInput={resize} onPaste={(event) => { const files = Array.from(event.clipboardData?.items ?? []).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!files.length) return; event.preventDefault(); void addFiles(files); }} onKeyDown={(event) => { if (event.key !== "Enter" || event.shiftKey) return; handleExtensionDialogInputKeyDown(event.nativeEvent, compositionActiveRef.current, compositionEndAtRef.current, onSend); }} onCompositionStart={() => { compositionActiveRef.current = true; }} onCompositionEnd={() => { compositionActiveRef.current = false; compositionEndAtRef.current = Date.now(); }} onBlur={() => { compositionEndAtRef.current = getExtensionDialogInputCompositionEndAtOnBlur(compositionActiveRef.current, compositionEndAtRef.current); compositionActiveRef.current = false; }} placeholder="" rows={2} disabled={disabled} style={{ display: "block", flex: "1 1 auto", width: "100%", minWidth: 0, background: "transparent", border: 0, outline: 0, resize: "none", boxSizing: "border-box", minHeight: 56, maxHeight: 220, overflowY: "auto", overflowWrap: "anywhere", whiteSpace: "pre-wrap", fontSize: "var(--chat-content-font-size, 14px)", color: "var(--text)", lineHeight: 1.7 }} />
+          <textarea className="chat-input-textarea" ref={textareaRef} value={draft} onChange={(event) => { setDraft(event.target.value); onError(null); }} onInput={resize} onPaste={(event) => { const files = Array.from(event.clipboardData?.items ?? []).filter((item) => item.type.startsWith("image/")).map((item) => item.getAsFile()).filter((file): file is File => Boolean(file)); if (!files.length) return; event.preventDefault(); void addFiles(files); }} onKeyDown={(event) => { if (event.key !== "Enter" || event.shiftKey) return; handleExtensionDialogInputKeyDown(event.nativeEvent, compositionActiveRef.current, compositionEndAtRef.current, onSend); }} onCompositionStart={() => { compositionActiveRef.current = true; }} onCompositionEnd={() => { compositionActiveRef.current = false; compositionEndAtRef.current = Date.now(); }} onBlur={() => { compositionEndAtRef.current = getExtensionDialogInputCompositionEndAtOnBlur(compositionActiveRef.current, compositionEndAtRef.current); compositionActiveRef.current = false; }} placeholder="" rows={2} disabled={disabled} style={{ display: "block", flex: "1 1 auto", width: "100%", minWidth: 0, background: "transparent", border: 0, outline: 0, resize: "none", boxSizing: "border-box", minHeight: 56, maxHeight: 220, overflowY: "auto", overflowWrap: "anywhere", whiteSpace: "pre-wrap", fontSize: "var(--chat-content-font-size, 14px)", color: "var(--text)", lineHeight: 1.7 }} />
           <ImageAttachments images={images} onRemove={(index) => setImages(images.filter((_, imageIndex) => imageIndex !== index))} />
           {error && <div role="alert" style={{ color: "#ef4444", fontSize: 10 }}>{error}</div>}
           <input ref={fileInputRef} type="file" accept="image/*" multiple tabIndex={-1} aria-hidden="true" style={{ display: "none" }} onChange={(event) => { const files = Array.from(event.target.files ?? []); event.target.value = ""; void addFiles(files); }} />
@@ -586,7 +623,7 @@ function SideSessionThread({
   composerError: string | null;
   setComposerError: (value: string | null) => void;
   remotePeer?: string | null;
-  onQuoteToComposer?: (text: string) => void;
+  onQuoteToComposer?: (text: string) => boolean | undefined;
   onBusyChange: (busy: boolean) => void;
   initialModel: { provider: string; modelId: string } | null;
   initialThinkingLevel: string;
@@ -684,7 +721,7 @@ function SideSessionThread({
           const cacheHitRate = answer?.usage ? turnCacheHitRate(answer.usage) : null;
           return (
             <div key={`${turn.user.id ?? turn.user.timestamp ?? index}:${index}`} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <SidekickQuestion question={question} images={messageImages(turn.user)} copied={false} onCopy={() => void copyText(question)} onQuote={onQuoteToComposer ? () => onQuoteToComposer(question) : undefined} />
+              <SidekickQuestion question={question} images={messageImages(turn.user)} onQuote={onQuoteToComposer ? () => onQuoteToComposer(question) === true : undefined} />
               {turn.answers.length > 0 && <div style={{ alignSelf: "flex-start", width: "100%", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ fontSize: "var(--chat-content-font-size, 14px)", lineHeight: 1.7 }} className="prose prose-sm dark:prose-invert max-w-none"><SidekickAnswer messages={turn.answers} /></div>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 6, fontSize: 11, color: "var(--text-dim)" }}>
@@ -693,8 +730,8 @@ function SideSessionThread({
                     {cacheHitRate !== null && <><span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span><span style={{ color: "var(--accent)", fontWeight: 600, whiteSpace: "nowrap" }}>{t("chat.turnCacheHitRate")} {cacheHitRate.toFixed(1)}%</span></>}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <button type="button" onClick={() => void copyText(answerText || t("sidekick.noAnswerBodyParenthetical"))} style={sidekickActionButtonStyle} title={t("sidekick.copyAnswer")}>{t("i18n.copy")}</button>
-                    {onQuoteToComposer && <button type="button" onClick={() => onQuoteToComposer(t("sidekick.quoteToComposerText", { question, answer: answerText || t("sidekick.noAnswerBodyParenthetical") }))} style={{ ...sidekickActionButtonStyle, color: "var(--accent)" }} title={t("sidekick.quoteAnswerTitle")}>{t("sidekick.quote")}</button>}
+                    <SidekickActionButton kind="copy" title={t("sidekick.copyAnswer")} onAction={() => copyText(answerText || t("sidekick.noAnswerBodyParenthetical"))} />
+                    {onQuoteToComposer && <SidekickActionButton kind="quote" title={t("sidekick.quoteAnswerTitle")} onAction={() => onQuoteToComposer(t("sidekick.quoteToComposerText", { question, answer: answerText || t("sidekick.noAnswerBodyParenthetical") })) === true} />}
                   </div>
                 </div>
               </div>}

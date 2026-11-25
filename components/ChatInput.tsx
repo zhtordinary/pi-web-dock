@@ -186,7 +186,7 @@ export interface ChatInputHandle {
   getQuotes?: () => QuoteContextItem[];
   hasRefreshRisk: () => boolean;
   insertText: (text: string) => void;
-  insertIfEmpty: (text: string, images?: ChatDraftImage[]) => void;
+  insertIfEmpty: (text: string, images?: ChatDraftImage[]) => boolean;
   replaceMessage: (message: UserMessage) => boolean;
   prependText: (text: string, images?: ChatDraftImage[]) => void;
   availableImageSlots: () => number;
@@ -614,6 +614,28 @@ export function normalizeSlashFavoriteKeys(value: unknown): string[] {
     result.push(key);
   }
   return result;
+}
+
+export function mergeSlashFavoriteKeysIntoCategories(
+  categories: readonly SlashFavoriteCategory[],
+  targetKeys: readonly string[],
+): SlashFavoriteCategory[] {
+  const normalizedKeys = normalizeSlashFavoriteKeys(targetKeys);
+  const targetSet = new Set(normalizedKeys);
+  const targetOrder = new Map(normalizedKeys.map((key, index) => [key, index]));
+  const existingKeys = new Set<string>();
+  const nextCategories = categories.map((category) => {
+    const keys = category.keys
+      .filter((key) => targetSet.has(key))
+      .sort((a, b) => (targetOrder.get(a) ?? normalizedKeys.length) - (targetOrder.get(b) ?? normalizedKeys.length));
+    for (const key of keys) existingKeys.add(key);
+    return { ...category, keys };
+  });
+  const addedKeys = normalizedKeys.filter((key) => !existingKeys.has(key));
+  if (addedKeys.length === 0 || nextCategories.length === 0) return nextCategories;
+  return nextCategories.map((category, index) => (
+    index === 0 ? { ...category, keys: [...category.keys, ...addedKeys] } : category
+  ));
 }
 
 export function resolveSlashFavoriteLoad(
@@ -1452,6 +1474,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const slashFavoriteWriteRef = useRef<Promise<void>>(Promise.resolve());
   const slashFavoriteMutationRef = useRef(0);
+  const slashFavoriteLoadRevisionRef = useRef(0);
   const slashDetailRequestRef = useRef(0);
   const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const historyItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -1693,14 +1716,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const normalized = normalizeSlashFavoriteKeys(next);
     const mutationId = slashFavoriteMutationRef.current + 1;
     slashFavoriteMutationRef.current = mutationId;
+    slashFavoriteLoadRevisionRef.current += 1;
     setSlashFavoriteError(null);
+    const nextCategories = mergeSlashFavoriteKeysIntoCategories(slashFavoriteCategories, normalized);
     setSlashFavoriteKeys(normalized);
+    setSlashFavoriteCategories(nextCategories);
     try {
       window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, JSON.stringify(normalized));
+      window.localStorage.setItem(SLASH_FAVORITE_CATEGORIES_STORAGE_KEY, JSON.stringify(nextCategories));
     } catch {
       // The server-side config remains the durable source when browser storage is unavailable.
     }
-    const eventDetail = { keys: normalized, categories: slashFavoriteCategories };
+    const eventDetail = { keys: normalized, categories: nextCategories };
     window.dispatchEvent(new CustomEvent("pi-web:slash-command-favorites-changed", { detail: eventDetail }));
     if (typeof window !== "undefined") {
       if (window.parent !== window) {
@@ -1727,10 +1754,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         if (mutationId === slashFavoriteMutationRef.current) setSlashFavoriteError(t("chat.slashFavoritesSaveFailed"));
         console.warn("[ChatInput] failed to persist slash favorites:", error);
       });
-  }, [apiPath, t]);
+  }, [apiPath, slashFavoriteCategories, t]);
 
   const loadSlashFavorites = useCallback(async () => {
     const mutationAtStart = slashFavoriteMutationRef.current;
+    const loadRevisionAtStart = slashFavoriteLoadRevisionRef.current;
     const localKeys = readLocalSlashFavoriteKeys();
     setSlashFavoriteError(null);
     let allowLocalFallback = false;
@@ -1750,7 +1778,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         throw new Error("slash favorites endpoint unavailable");
       }
       const remoteKeys = resolved.keys;
-      if (slashFavoriteMutationRef.current !== mutationAtStart) return;
+      if (slashFavoriteMutationRef.current !== mutationAtStart
+        || slashFavoriteLoadRevisionRef.current !== loadRevisionAtStart) return;
       setSlashFavoriteKeys(remoteKeys);
       try { window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, JSON.stringify(remoteKeys)); } catch { /* Ignore storage quota errors */ }
       if (data?.favorites && Array.isArray((data.favorites as { categories?: unknown }).categories)) {
@@ -1760,13 +1789,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       setSlashFavoriteError(null);
     } catch (error) {
-      if (slashFavoriteMutationRef.current !== mutationAtStart) return;
+      if (slashFavoriteMutationRef.current !== mutationAtStart
+        || slashFavoriteLoadRevisionRef.current !== loadRevisionAtStart) return;
       if (allowLocalFallback || error instanceof TypeError) {
         setSlashFavoriteKeys(localKeys);
         return;
       }
-      setSlashFavoriteKeys([]);
-      try { window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, "[]"); } catch { /* Ignore storage quota errors */ }
+      // A failed revalidation must not erase favorites that are already visible.
+      setSlashFavoriteKeys((current) => current.length > 0 ? current : localKeys);
       setSlashFavoriteError(t("chat.slashFavoritesLoadFailed"));
       console.warn("[ChatInput] failed to load slash favorites:", error);
     }
@@ -1776,6 +1806,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     void loadSlashFavorites();
     const onFavoritesChanged = (event: Event) => {
       const detail = (event as CustomEvent<{ keys?: unknown; categories?: unknown }>).detail;
+      if (Array.isArray(detail?.keys) || Array.isArray(detail?.categories)) {
+        slashFavoriteLoadRevisionRef.current += 1;
+      }
       if (Array.isArray(detail?.keys)) {
         const nextKeys = normalizeSlashFavoriteKeys(detail.keys);
         setSlashFavoriteKeys(nextKeys);
@@ -1791,6 +1824,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const data = event.data as { type?: unknown; detail?: unknown } | null;
       if (data?.type === "pi-web:slash-command-favorites-changed") {
         const detail = data.detail as { keys?: unknown; categories?: unknown } | null;
+        if (Array.isArray(detail?.keys) || Array.isArray(detail?.categories)) {
+          slashFavoriteLoadRevisionRef.current += 1;
+        }
         if (Array.isArray(detail?.keys)) {
           const nextKeys = normalizeSlashFavoriteKeys(detail.keys);
           setSlashFavoriteKeys(nextKeys);
@@ -1805,8 +1841,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
     const onStorage = (event: StorageEvent) => {
       if (event.key === SLASH_FAVORITES_STORAGE_KEY && event.newValue) {
+        slashFavoriteLoadRevisionRef.current += 1;
         try { setSlashFavoriteKeys(normalizeSlashFavoriteKeys(JSON.parse(event.newValue))); } catch { /* Ignore JSON parse errors */ }
       } else if (event.key === SLASH_FAVORITE_CATEGORIES_STORAGE_KEY && event.newValue) {
+        slashFavoriteLoadRevisionRef.current += 1;
         try { setSlashFavoriteCategories(normalizeSlashFavoriteCategories(JSON.parse(event.newValue))); } catch { /* Ignore JSON parse errors */ }
       }
     };
@@ -2004,7 +2042,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     insertIfEmpty(text: string, images?: ChatDraftImage[]) {
       const ta = textareaRef.current;
       const current = ta ? ta.value : value;
-      if (current.trim() || attachedImagesRef.current.length) return;
+      if (current.trim() || attachedImagesRef.current.length) return false;
       pendingDraftFocusRef.current = { key: draftKey, value: text };
       valueRef.current = text;
       setValue(text);
@@ -2013,6 +2051,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return draftImagesToAttachedImages(images);
       });
       setAtQuery(null);
+      return true;
     },
     replaceMessage(message: UserMessage) {
       const ta = textareaRef.current;
@@ -2745,8 +2784,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashLayout = (() => {
     // 1. Searching on a specific tab (not "all"): show current tab matches first, then other categories matches below
     if (isSearchingSlash && activeSlashTab !== "all") {
+      const selectedFavoriteKeys = activeSlashTab === "favorites" && activeSlashSubcategory !== "all"
+        ? new Set(slashFavoriteCategories.find((category) => category.id === activeSlashSubcategory)?.keys ?? [])
+        : null;
       const currentTabCommands = activeSlashTab === "favorites"
-        ? favoriteCommands
+        ? favoriteCommands.filter((command) => (
+          !selectedFavoriteKeys || selectedFavoriteKeys.has(getSlashCommandFavoriteKey(command))
+        ))
         : filteredSlashCommands.filter((c) => c.source === activeSlashTab);
 
       let currentGroups: Array<{

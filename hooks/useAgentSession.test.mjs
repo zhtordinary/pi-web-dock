@@ -453,6 +453,7 @@ function createRefreshHarness({ hookSource = source, realTerminalHelpers = false
     thinkingLevelOverrideRef: { current: null },
     syncUnattendedEnabledRef: { current: null },
     syncUnattendedStateRef: { current: null },
+    syncServerUnattendedRef: { current: async () => {} },
     queuedDraftProjectionRef: { current: new QueuedDraftProjection() },
     pendingUserMessageCountsRef: { current: new Map() },
     sessionStatePendingRef: { current: false },

@@ -11,7 +11,7 @@ import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantB
 import { summarizeTurnUsage, type TurnUsage } from "@/lib/turn-usage";
 import { findFinalAssistantIndex, isCompactionMessage, isResponseTurnAnchor } from "@/lib/response-duration";
 import { analyzeTurns, summarizeTurns, timingPercent, type TurnActivity } from "@/lib/session-timing";
-import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
+import { resolveTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { getFinalAnswerViews, keepWrittenFiles, withAssistantBlocks, type FinalAnswerViews } from "@/lib/turn-views";
 import { MarkdownBody } from "./MarkdownBody";
 import { MessageView } from "./MessageView";
@@ -48,7 +48,7 @@ import { scrollSessionSearchTarget } from "@/lib/session-search-dom";
 import type { HistoryContentPage, HistoryNode, HistoryProcessRange } from "@/lib/session-history-types";
 import { shouldShowContinueForActivityStatus } from "@/lib/session-activity-status";
 import type { SessionExecutionState } from "@/lib/session-execution";
-import { statusSoundRequestId, tryPlaySoundRequest, useAudio, type SoundKey, waitSoundRequestId, wasSessionDialogRecentlyInteracted } from "@/hooks/useAudio";
+import { markSessionDialogInteracted, statusSoundRequestId, tryPlaySoundRequest, useAudio, type SoundKey, waitSoundRequestId, wasSessionDialogRecentlyInteracted } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
@@ -2281,6 +2281,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
           key={extensionDialog.id}
           request={extensionDialog}
           waitingCount={waitingExtensionDialogCount}
+          onInteraction={() => markSessionDialogInteracted(session?.id)}
           onRespond={respondToExtensionUi}
         />
       )}
@@ -2290,6 +2291,7 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
           key={extensionCustomUi.id}
           request={extensionCustomUi}
           waitingCount={waitingExtensionCustomUiCount}
+          onInteraction={() => markSessionDialogInteracted(session?.id)}
           onInput={sendExtensionCustomInput}
           onClose={closeExtensionCustomUi}
         />
@@ -2722,7 +2724,8 @@ export function ChatWindow({ session, sessionRunning, newSessionCwd, newSessionS
                         const message = messages[i];
                         if (message?.role === "assistant") for (const block of message.content ?? []) turnContent.push(block);
                       }
-                      const writtenFiles = keepWrittenFiles(finalViews!, extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd));
+                      const persistedWrittenFiles = transcript.items.get(entryIds[finalAssistantIdx])?.writtenFiles;
+                      const writtenFiles = keepWrittenFiles(finalViews!, resolveTurnWrittenFiles(persistedWrittenFiles, turnContent, toolResultsMap, messageCwd));
                       const timingTurn = timingTurnByFinalIndex.get(finalAssistantIdx);
                       // The server adds subagents this turn started; until it answers, the main agent's own share is shown.
                       const sessionTurnTiming = timingTurn ? sessionTurnTimingByEntryId.get(entryIds[timingTurn.userIndex] ?? "") : undefined;
@@ -3378,11 +3381,13 @@ function ExtensionWaitingCount({ count }: { count: number }) {
 function ExtensionDialog({
   request,
   waitingCount,
+  onInteraction,
   onRespond,
 }: {
   request: ExtensionDialogRequest;
   /** Further dialogs queued behind this one; each opens after this one is answered. */
   waitingCount: number;
+  onInteraction: () => void;
   onRespond: (request: ExtensionDialogRequest, response: { value: string } | { confirmed: boolean } | { cancelled: true }) => void;
 }) {
   const { t } = useI18n();
@@ -3493,6 +3498,8 @@ function ExtensionDialog({
 
   return (
     <div
+      onPointerDownCapture={onInteraction}
+      onKeyDownCapture={onInteraction}
       style={{
         position: "absolute",
         inset: 0,
@@ -3957,11 +3964,13 @@ function ExtensionDialog({
 function ExtensionCustomPanel({
   request,
   waitingCount,
+  onInteraction,
   onInput,
   onClose,
 }: {
   request: ExtensionCustomRequest;
   waitingCount: number;
+  onInteraction: () => void;
   onInput: (request: ExtensionCustomRequest, data: string) => void | Promise<void>;
   onClose: (request: ExtensionCustomRequest) => void | Promise<void>;
 }) {
@@ -4252,6 +4261,8 @@ function ExtensionCustomPanel({
 
   return (
     <div
+      onPointerDownCapture={onInteraction}
+      onKeyDownCapture={onInteraction}
       style={{
         position: "absolute",
         inset: 0,

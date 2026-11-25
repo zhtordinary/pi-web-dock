@@ -718,6 +718,12 @@ test("a manually recovered legacy historical edit still submits as edit_history"
     assert.equal(store.getDraft(SESSION_ID).value, "recover my edit");
     await React.act(async () => { resolveEdit(response({ success: true, data: { accepted: true, leafId: "edited-leaf" } })); await tick(); await tick(); });
     assert.equal(store.getDraft(store.historyDraftKey(SESSION_ID, peer))?.historyEdit, undefined, "the edit identity clears only after acknowledgement");
+    const source = ControlledEventSource.instances.at(-1);
+    await React.act(async () => { source.emit({ type: "prompt_done", clientMessageId: sent.clientMessageId }); await tick(); });
+    await React.act(async () => { await current.agent.handleSend("new follow-up"); await tick(); });
+    const followUp = commands.at(-1);
+    assert.equal(followUp?.type, "prompt", "a message after an acknowledged edit must be a normal prompt");
+    assert.notEqual(followUp?.clientMessageId, sent.clientMessageId, "the follow-up must use a fresh identity");
   } finally {
     if (resolveEdit) resolveEdit(response({ success: true, data: { accepted: true, leafId: "edited-leaf" } }));
     await React.act(async () => { root.unmount(); await tick(); });
@@ -977,6 +983,67 @@ test("the real Sidekick drawer dismisses only its floating view on parent messag
   } finally {
     await React.act(async () => { root.unmount(); await tick(); });
     globalThis.fetch = previousFetch;
+    restoreDom();
+  }
+});
+
+test("Sidekick copy and quote buttons acknowledge each result independently", async () => {
+  const restoreDom = installDom();
+  const { SidekickQuestion, SidekickActionButton } = await jiti.import("./SidekickDrawer.tsx");
+  const { I18nProvider } = await jiti.import("@/hooks/useI18n");
+  const { copyText } = await jiti.import("@/lib/clipboard");
+  const copied = [];
+  let rejectCopy = false;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+    async writeText(text) { if (rejectCopy) throw new Error("clipboard denied"); copied.push(text); },
+  } });
+  document.execCommand = () => true;
+  let quoted = "";
+  const root = createRoot(document.body.appendChild(document.createElement("div")));
+  try {
+    await React.act(async () => {
+      root.render(React.createElement(I18nProvider, { initialLocale: "en" }, React.createElement(React.Fragment, null,
+        React.createElement(SidekickQuestion, { question: "question", onQuote: () => { quoted = "question"; return true; } }),
+        React.createElement(SidekickActionButton, { kind: "copy", title: "Copy answer", onAction: () => copyText("answer") }),
+        React.createElement(SidekickActionButton, { kind: "quote", title: "Quote answer", onAction: () => false }),
+      )));
+      await tick();
+    });
+    const buttons = [...document.querySelectorAll(".sidekick-message-action")];
+    assert.equal(buttons.length, 4);
+    assert.deepEqual(buttons.map((button) => button.textContent), ["Copy", "Quote", "Copy", "Quote"]);
+    await React.act(async () => { buttons[0].click(); await tick(); });
+    assert.deepEqual(copied, ["question"]);
+    assert.equal(buttons[0].textContent, "Copied");
+    assert.match(buttons[0].getAttribute("aria-label"), /Copied/);
+    assert.equal(buttons[2].textContent, "Copy", "copy feedback belongs only to the clicked message");
+    await React.act(async () => { buttons[1].click(); buttons[3].click(); await tick(); });
+    assert.equal(quoted, "question");
+    assert.equal(buttons[1].textContent, "Quoted");
+    assert.equal(buttons[3].textContent, "Not quoted");
+    assert.match(buttons[3].title, /input/i);
+    rejectCopy = true;
+    await React.act(async () => { buttons[2].click(); await tick(); });
+    assert.equal(buttons[2].textContent, "Copied", "a successful fallback is acknowledged");
+    document.execCommand = () => false;
+    await React.act(async () => { buttons[2].click(); await tick(); });
+    assert.equal(buttons[2].textContent, "Copy failed", "a refused fallback must not claim success");
+    document.execCommand = () => { throw new Error("fallback denied"); };
+    await React.act(async () => { buttons[2].click(); await tick(); });
+    assert.equal(buttons[2].textContent, "Copy failed");
+    assert.equal(document.querySelectorAll("textarea").length, 0, "the temporary fallback textarea is removed even on error");
+    await React.act(async () => { await new Promise((resolve) => setTimeout(resolve, 1600)); });
+    assert.deepEqual(buttons.map((button) => button.textContent), ["Copy", "Quote", "Copy", "Quote"]);
+    let rejectOldCopy;
+    navigator.clipboard.writeText = () => new Promise((_, reject) => { rejectOldCopy = reject; });
+    await React.act(async () => { buttons[0].click(); await tick(); });
+    navigator.clipboard.writeText = async () => {};
+    await React.act(async () => { buttons[0].click(); await tick(); });
+    assert.equal(buttons[0].textContent, "Copied");
+    await React.act(async () => { rejectOldCopy(new Error("late failure")); await tick(); });
+    assert.equal(buttons[0].textContent, "Copied", "an older failure must not overwrite newer feedback");
+  } finally {
+    await React.act(async () => { root.unmount(); await tick(); });
     restoreDom();
   }
 });

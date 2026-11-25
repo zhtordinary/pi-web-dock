@@ -125,3 +125,13 @@ export function extractTurnWrittenFiles(
 
   return writtenFiles;
 }
+
+/** Prefer persisted history metadata; live and fully loaded turns use the existing extractor. */
+export function resolveTurnWrittenFiles(
+  persisted: WrittenFile[] | undefined,
+  content: AssistantContentBlock[],
+  toolResults: Map<string, ToolResultMessage> | undefined,
+  cwd?: string,
+): WrittenFile[] {
+  return persisted ?? extractTurnWrittenFiles(content, toolResults, cwd);
+}

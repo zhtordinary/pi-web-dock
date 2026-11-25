@@ -418,7 +418,7 @@ function readCompactResult(result: unknown, reason: string): CompactResultInfo |
 
 export interface ChatInputHandle {
   insertText: (text: string) => void;
-  insertIfEmpty: (content: string) => void;
+  insertIfEmpty: (content: string) => boolean;
   replaceMessage: (message: UserMessage) => boolean;
   prependText: (text: string, images?: ChatDraftImage[]) => void;
   availableImageSlots: () => number;
@@ -777,6 +777,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const syncUnattendedStateRef = useRef<((state: SchedulerState | null) => void) | null>(null);
   const syncUnattendedEnabledRef = useRef<((enabled: boolean) => void) | null>(null);
+  const syncServerUnattendedRef = useRef<((sid: string) => Promise<void>) | null>(null);
   const pendingUnattendedRef = useRef<boolean | null>(null);
   const unattendedOverrideRef = useRef<boolean | null>(null);
   const unattendedWriteRef = useRef<Promise<void> | null>(null);
@@ -2418,6 +2419,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase((previous) => previous?.kind === "running_tools" ? null : previous);
         if (sid) {
           void loadAgentState(sid).then((state) => restoreLoadedRunState(sid, state, undefined, revision));
+          void syncServerUnattendedRef.current?.(sid);
         }
         // A reconnect snapshot has no agent_start event. Clear the previous
         // server run identity so the first terminal event can seed this stream;
@@ -3057,6 +3059,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               });
         const submissionStillCurrent = isCurrentSubmission();
         acceptDelivery(delivery);
+        // Clear the submitted edit even if the view changed while its admission was pending.
+        if (isHistoricalEdit && historyEditKey && pendingHistoryEdits.get(historyEditKey)?.clientMessageId === clientId) {
+          setEdit(null);
+        }
         if (isHistoricalEdit && submissionStillCurrent) {
           const acknowledgedLeafId = result?.leafId !== undefined ? result.leafId : result?.parentId;
           if (acknowledgedLeafId !== undefined) {
@@ -3064,7 +3070,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setActiveLeafId(acknowledgedLeafId);
             reader.followPersistedTail();
           }
-          if (historyEditKey && pendingHistoryEdits.get(historyEditKey)?.clientMessageId === clientId) setEdit(null);
         }
         if (submissionStillCurrent && rpcPromptPendingRef.current === submission) {
           rpcPromptPendingRef.current = true;
@@ -4064,6 +4069,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       syncUnattendedStateRef.current?.(result?.state ?? null);
     } catch (error) { console.error("Failed to load unattended state:", error); }
   }, [sendAgentCommandR]);
+  syncServerUnattendedRef.current = syncServerUnattendedState;
+
+  // Re-read the server scheduler when a live session reconnects or returns to the foreground.
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || opts.background || !runtimeAvailable) return;
+    const sync = () => {
+      if (document.visibilityState === "visible") void syncServerUnattendedState(sid);
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("online", sync);
+    window.addEventListener("pageshow", sync);
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      window.removeEventListener("online", sync);
+      window.removeEventListener("pageshow", sync);
+    };
+  }, [opts.background, remotePeer, runtimeAvailable, session?.id, syncServerUnattendedState]);
+
   const toggleUnattended = useCallback(() => {
     toggleUnattendedLocal();
     const enabled = !unattended;

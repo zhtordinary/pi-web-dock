@@ -2486,6 +2486,7 @@ export function SkillsConfig({
   const [skillContentState, setSkillContentState] = useState<SkillContentState | null>(null);
 
   const SLASH_FAVORITES_STORAGE_KEY = "pi-web:slash-command-favorites:v1";
+  const SLASH_FAVORITE_CATEGORIES_STORAGE_KEY = "pi-web:slash-command-favorite-categories:v1";
   const [slashFavoriteCategories, setSlashFavoriteCategories] = useState<SlashFavoriteCategory[]>([]);
   const [slashFavoriteKeys, setSlashFavoriteKeys] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
@@ -2510,6 +2511,9 @@ export function SkillsConfig({
         if (!data?.favorites) return;
         if (Array.isArray(data.favorites.categories)) {
           setSlashFavoriteCategories(data.favorites.categories as SlashFavoriteCategory[]);
+          try {
+            window.localStorage.setItem(SLASH_FAVORITE_CATEGORIES_STORAGE_KEY, JSON.stringify(data.favorites.categories));
+          } catch (storageError) { void storageError; }
         }
         if (Array.isArray(data.favorites.keys)) {
           const keys = data.favorites.keys.filter((k): k is string => typeof k === "string");
@@ -2522,8 +2526,22 @@ export function SkillsConfig({
 
   useEffect(() => {
     loadFavoritesState();
-    const onFavoritesChanged = () => {
-      loadFavoritesState();
+    const onFavoritesChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ keys?: unknown; categories?: unknown }>).detail;
+      let applied = false;
+      if (Array.isArray(detail?.categories)) {
+        const categories = detail.categories as SlashFavoriteCategory[];
+        setSlashFavoriteCategories(categories);
+        try { window.localStorage.setItem(SLASH_FAVORITE_CATEGORIES_STORAGE_KEY, JSON.stringify(categories)); } catch (storageError) { void storageError; }
+        applied = true;
+      }
+      if (Array.isArray(detail?.keys)) {
+        const keys = detail.keys.filter((key): key is string => typeof key === "string");
+        setSlashFavoriteKeys(keys);
+        try { window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, JSON.stringify(keys)); } catch (storageError) { void storageError; }
+        applied = true;
+      }
+      if (!applied) loadFavoritesState();
     };
     window.addEventListener("pi-web:slash-command-favorites-changed", onFavoritesChanged);
     return () => {
@@ -2551,7 +2569,10 @@ export function SkillsConfig({
 
       const nextKeys = Array.from(new Set(nextCategories.flatMap((c) => c.keys)));
       setSlashFavoriteKeys(nextKeys);
-      try { window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, JSON.stringify(nextKeys)); } catch (storageError) { void storageError; }
+      try {
+        window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, JSON.stringify(nextKeys));
+        window.localStorage.setItem(SLASH_FAVORITE_CATEGORIES_STORAGE_KEY, JSON.stringify(nextCategories));
+      } catch (storageError) { void storageError; }
 
       window.dispatchEvent(new CustomEvent("pi-web:slash-command-favorites-changed", { detail: { categories: nextCategories, keys: nextKeys } }));
       if (typeof window !== "undefined") {
@@ -2572,7 +2593,12 @@ export function SkillsConfig({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ categories: nextCategories }),
         },
-      ).catch(() => {});
+      ).then(async (res) => {
+        const data = (await res.json().catch(() => ({}))) as { favorites?: unknown };
+        if (data.favorites) {
+          window.dispatchEvent(new CustomEvent("pi-web:slash-command-favorites-changed", { detail: data.favorites }));
+        }
+      }).catch(() => {});
 
       return nextCategories;
     });
@@ -2607,7 +2633,10 @@ export function SkillsConfig({
 
       const nextKeys = Array.from(new Set(nextCategories.flatMap((c) => c.keys)));
       setSlashFavoriteKeys(nextKeys);
-      try { window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, JSON.stringify(nextKeys)); } catch (storageError) { void storageError; }
+      try {
+        window.localStorage.setItem(SLASH_FAVORITES_STORAGE_KEY, JSON.stringify(nextKeys));
+        window.localStorage.setItem(SLASH_FAVORITE_CATEGORIES_STORAGE_KEY, JSON.stringify(nextCategories));
+      } catch (storageError) { void storageError; }
 
       window.dispatchEvent(new CustomEvent("pi-web:slash-command-favorites-changed", { detail: { categories: nextCategories, keys: nextKeys } }));
       if (typeof window !== "undefined") {
@@ -2628,7 +2657,12 @@ export function SkillsConfig({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ categories: nextCategories }),
         },
-      ).catch(() => {});
+      ).then(async (res) => {
+        const data = (await res.json().catch(() => ({}))) as { favorites?: unknown };
+        if (data.favorites) {
+          window.dispatchEvent(new CustomEvent("pi-web:slash-command-favorites-changed", { detail: data.favorites }));
+        }
+      }).catch(() => {});
 
       return nextCategories;
     });

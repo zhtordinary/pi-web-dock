@@ -4024,10 +4024,19 @@ html[data-keyboard-open] .app-shell {
 .sidekick-question-actions { opacity: 0; transition: opacity 0.12s; }
 .sidekick-question:hover .sidekick-question-actions,
 .sidekick-question:focus-within .sidekick-question-actions { opacity: 1; }
+.sidekick-message-action { transition: color 0.12s, background-color 0.12s, transform 0.12s; }
+.sidekick-message-action[data-feedback] { --sidekick-action-background: var(--bg-hover); }
+.sidekick-message-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sidekick-message-action:active:not(:focus-visible) { --sidekick-action-background: var(--bg-hover); transform: scale(0.95); }
+@media (hover: hover) { .sidekick-message-action:hover { --sidekick-action-background: var(--bg-hover); } }
 .sidekick-stream-label { color: #10b981; animation: sidekick-stream-label-pulse 1.6s ease-in-out infinite; }
 @keyframes sidekick-stream-label-pulse { 50% { opacity: 0.35; } }
 @media (hover: none) { .sidekick-question-actions { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .sidekick-stream-label { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .sidekick-stream-label { animation: none; }
+  .sidekick-message-action { transition: none; }
+  .sidekick-message-action:active:not(:focus-visible) { transform: none; }
+}
 
 /* A ```svg fence: isolated <img> preview with a source toggle. */
 .svg-block {
